@@ -13,7 +13,7 @@ root: run every command from inside `contracts/` and install dependencies here o
 | `AgentRegistry` | ERC-8004-inspired agent identity. Each agent is owned by a human identity; only that identity's controller can register it or change its status (`0 Registered, 1 Active, 2 Paused, 3 Revoked`). |
 | `PermissionRegistry` | The "Agent Permission Passport": per-agent policy commitment (`policyHash`, `version`, `policyURI`, `active`) plus an append-only `ActionDecision` event log and allow/violation counters. Decisions are recorded by the agent owner or by allow-listed enforcers. |
 | `ReputationRegistry` | Latest 0–100 score per agent written by allow-listed scorers; every update emits `ScoreUpdated`. |
-| `FukuSpendGuard` | Moves a funding wallet's tokens for an agent only with an EIP-712 attestation from the compliance signer, an open mandate with a daily cap, a live agent and a matching active policy. Records each transfer as an allowed decision (`"R6"`) in `PermissionRegistry` (it is an enforcer). See [below](#cleanverse-simulator-contracts--fukuspendguard). |
+| `FukuSpendGuard` | Moves a funding wallet's tokens for an agent only inside the mandate that wallet opened on-chain (token, UTC-day cap, per-transaction limit, expiry, optional payee list), only with a single-use EIP-712 attestation from the compliance signer tied to the current mandate version, and only for a live agent whose active on-chain policy matches. Records each transfer as an allowed decision (`"R6"`) in `PermissionRegistry` (it is an enforcer). See [below](#cleanverse-simulator-contracts--fukuspendguard). |
 | `sim/CleanverseAPassSim` | **Simulator** of the Cleanverse A-Pass (CVI): wallet-bound, non-transferable compliance credential; `verify` mirrors Cleanverse `verify_apass` codes. |
 | `sim/CleanverseATokenSim` | **Simulator** of a Cleanverse aToken (`aUSDC-SIM`, 6 decimals): ERC-20 whose transfers require an eligible A-Pass on both sides. |
 
@@ -283,29 +283,71 @@ name) and works with any ERC-20, including a real Cleanverse aToken.
 
 ### `FukuSpendGuard`
 
+Trust model: the compliance signer (the Fuku server key) decides off-chain whether an action is
+allowed, but it can only move funds inside what the owner's own wallet authorised on-chain: the
+mandate's token, UTC-day cap, per-transaction limit, expiry and (with `restrictPayees`) payee
+list, plus the ERC-20 allowance the wallet gave the guard. It can only do so for a live agent
+(registered, neither Paused nor Revoked) whose current on-chain policy is active and equal to the
+attested policy hash. Every attestation is single-use (its nonce and its `actionHash`) and tied
+to the current mandate version, so changing, closing or re-opening a mandate voids it. A leaked
+signer key is therefore bounded by the open mandates and allowances; the owner cuts it off by
+closing the mandate, pausing or revoking the agent, revoking the policy or withdrawing the
+allowance, and the guard owner can rotate the key with `setComplianceSigner`.
+
 - `constructor(agentRegistry, permissionRegistry, complianceSigner)`; owner-only
   `setComplianceSigner(address)` (event `ComplianceSignerSet`).
-- Mandates, keyed by (agentId, wallet), are opened by the funding wallet itself:
-  `openMandate(agentId, token, dailyCap)` / `closeMandate(agentId)`; view
-  `mandates(agentId, wallet) -> (token, dailyCap, active)`. The agent need not exist yet. The
-  wallet must also `approve` the guard on the token.
+- Mandates, keyed by (agentId, wallet), are managed by the funding wallet itself
+  (`msg.sender`). The agent need not exist yet. The wallet must also `approve` the guard on the
+  token.
+  - `openMandate(agentId, token, dailyCap, maxPerTx, validUntil, restrictPayees)`.
+    `maxPerTx == 0` means no per-transaction limit beyond the daily cap; `validUntil` is unix
+    seconds, `0` = no expiry, expired once `block.timestamp > validUntil`. Reverts `ZeroAddress`
+    (token 0), `ZeroDailyCap`, or `InvalidMandate()` (`maxPerTx > dailyCap`, or
+    `validUntil != 0 && validUntil <= block.timestamp`). Replaces any existing mandate; the
+    amount already spent today still counts. Event
+    `MandateOpened(agentId, wallet, token, dailyCap, maxPerTx, validUntil, restrictPayees, version)`.
+  - `closeMandate(agentId)`: `NoMandate(agentId, wallet)` when none is active; otherwise clears
+    the terms and emits `MandateClosed(agentId, wallet, version)`.
+  - Version: a per-(agentId, wallet) counter bumped by every open and every close (first open
+    = 1; open, close, open = 1, 2, 3). It lives in its own mapping, so a close + re-open never
+    reuses a version.
+  - View `mandates(agentId, wallet) -> (token, dailyCap, maxPerTx, validUntil, restrictPayees, version, active)`;
+    a closed mandate reads `(0, 0, 0, 0, false, version, false)`.
+  - Payees: `setPayee(agentId, payee, allowed)` (`ZeroRecipient` for payee 0; event
+    `PayeeSet(agentId, wallet, payee, allowed)`), view `isPayee(agentId, wallet, payee)`. The
+    list is the owner's address book: it survives close / re-open and is enforced only while the
+    mandate has `restrictPayees`. Removing a payee also stops attestations already signed.
 - `execute(GuardedTransfer t, bytes sig)` (non-reentrant, callable by any relayer) checks, in
-  order: `AttestationExpired` (`block.timestamp > deadline`), `NonceUsed` (nonces are global to
-  the guard), `BadAttestation` (65-byte signature only, low-s, `v` 27/28, `ecrecover` must equal
-  `complianceSigner`), `AgentNotFound` / `AgentNotActive` (Registered and Active pass; Paused
-  and Revoked fail), `PolicyNotActive` / `PolicyMismatch` (on-chain `policyHash` must equal
-  `t.policyHash`), `NoMandate` / `TokenNotMandated`, `ZeroAmount` / `ZeroRecipient`,
-  `DailyCapExceeded(remaining)` (per agent, wallet and UTC day `block.timestamp / 1 days`).
-  It then marks the nonce, adds to the day's spend, calls `token.transferFrom(from, to, amount)`
-  (tokens that return nothing are accepted; a failing token's revert data, such as
-  `ComplianceRejected`, is bubbled unchanged), calls
-  `PermissionRegistry.recordDecision(agentId, actionHash, true, proofHash, "R6")` and emits
-  `GuardedTransferExecuted(agentId, from, to, token, amount, proofHash, complianceRef, nonce)`.
+  order:
+  1. attestation: `AttestationExpired` (`block.timestamp > deadline`), `NonceUsed` (nonces are
+     global to the guard), `ActionAlreadyExecuted(actionHash)` (one Fuku action => at most one
+     transfer, even with a fresh nonce), `BadAttestation` (65-byte signature only, low-s, `v`
+     27/28, `ecrecover` of the EIP-712 digest for this chain and this guard must equal
+     `complianceSigner`);
+  2. agent and policy: `AgentNotFound` / `AgentNotActive` (Registered and Active pass; Paused
+     and Revoked fail), `PolicyNotActive` / `PolicyMismatch` (on-chain `policyHash` must equal
+     `t.policyHash`);
+  3. mandate: `NoMandate`, `TokenNotMandated`, `StaleMandate(current, attested)`
+     (`t.mandateVersion` must equal the mandate's `version`), `MandateExpired(validUntil)`,
+     `ZeroAmount` / `ZeroRecipient`, `PerTxLimitExceeded(maxPerTx)`,
+     `PayeeNotApproved(payee)` (only with `restrictPayees`), `DailyCapExceeded(remaining)` (per
+     agent, wallet and UTC day `block.timestamp / 1 days`).
+
+  It then marks the nonce and the action as used, adds to the day's spend, calls
+  `token.transferFrom(from, to, amount)` (tokens that return nothing are accepted; a failing
+  token's revert data, such as `ComplianceRejected`, is bubbled unchanged and nothing is
+  consumed), calls `PermissionRegistry.recordDecision(agentId, actionHash, true, proofHash, "R6")`
+  and emits
+  `GuardedTransferExecuted(agentId, from, to, token, amount, actionHash, proofHash, complianceRef, mandateVersion, nonce)`.
 - Views: `spentToday(agentId, wallet)`, `hashTransfer(t)` (full EIP-712 digest),
-  `domainSeparator()`, `nonceUsed(nonce)`, `GUARDED_TRANSFER_TYPEHASH`.
+  `domainSeparator()`, `nonceUsed(nonce)`, `actionExecuted(actionHash)`,
+  `isPayee(agentId, wallet, payee)`, `GUARDED_TRANSFER_TYPEHASH`.
 
 EIP-712, as signed by the compliance signer (viem `signTypedData` with exactly these values;
-`test/FukuSpendGuard.test.ts` checks `hashTransfer` against viem `hashTypedData`):
+`test/FukuSpendGuard.test.ts` checks `hashTransfer` against viem `hashTypedData`).
+`mandateVersion` is the `version` that `mandates(agentId, from)` returns when the attestation is
+issued. This struct replaced the first version (no `mandateVersion`) before any public
+deployment; a signer still using the old types gets `BadAttestation`.
 
 ```ts
 const domain = { name: "FukuSpendGuard", version: "1", chainId, verifyingContract: guardAddress };
@@ -320,11 +362,12 @@ const types = {
     { name: "actionHash", type: "bytes32" },
     { name: "proofHash", type: "bytes32" },
     { name: "complianceRef", type: "bytes32" },
+    { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint64" },
   ],
 } as const;
-// typehash: GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint256 nonce,uint64 deadline)
+// typehash: GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 deadline)
 ```
 
 ### Deploying them

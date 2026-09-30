@@ -34,21 +34,46 @@ interface ISpendGuardPermissionRegistry {
 }
 
 /// @title FukuSpendGuard
-/// @notice Lets an AI agent move a funding wallet's tokens only when every layer agrees:
-///         the wallet opened a mandate for (agent, token) with a daily cap and approved this
-///         contract on the token; the agent is registered and not paused / revoked; its policy
-///         in PermissionRegistry is active and matches the attested policy hash; and the
-///         Fuku compliance signer signed an EIP-712 `GuardedTransfer` attestation for exactly
-///         this transfer. The token itself (for example a Cleanverse aToken) still applies its
-///         own compliance checks; its revert data is bubbled up unchanged. Every executed
-///         transfer is logged as an allowed decision (rule "R6") in PermissionRegistry.
+/// @notice Moves a funding wallet's tokens for an AI agent only inside limits the wallet set
+///         on-chain itself, and only with a single-use attestation from the Fuku compliance
+///         signer for exactly that transfer.
+///
+///         Trust model. The compliance signer (the Fuku server key) decides off-chain whether
+///         an action is allowed, but it can only move funds inside what the owner's own wallet
+///         authorised on-chain: the mandate the wallet opened for the agent (token, UTC-day
+///         cap, per-transaction limit, expiry and, when `restrictPayees` is set, the payee
+///         list kept with `setPayee`) and the ERC-20 allowance the wallet gave this contract.
+///         It can also only do so for a live agent (registered in AgentRegistry and neither
+///         Paused nor Revoked) whose current on-chain policy in PermissionRegistry is active
+///         and equal to the attested policy hash. A leaked or misbehaving signer key is
+///         therefore bounded by the open mandates and allowances; the owner cuts it off by
+///         closing the mandate, pausing or revoking the agent, revoking its policy or
+///         withdrawing the allowance, and the contract owner can rotate the signer.
+///
+///         Single use. Each attestation consumes its `nonce` (global to this guard) and its
+///         `actionHash` (one Fuku action => at most one transfer, even with a fresh nonce). It
+///         names the `mandateVersion` it was issued under, a per-(agent, wallet) counter that
+///         increases on every `openMandate` and `closeMandate`, so replacing, closing or
+///         re-opening a mandate voids every attestation issued under earlier terms. The
+///         EIP-712 domain binds it to this chain and this contract.
+///
+///         The token itself (for example a Cleanverse aToken) still applies its own compliance
+///         checks; its revert data is bubbled up unchanged, and a reverted transfer consumes
+///         no budget, nonce or action. Every executed transfer is logged as an allowed
+///         decision (rule "R6") in PermissionRegistry.
 /// @dev Anyone may relay `execute`; authority comes from the attestation, the mandate and
 ///      the token allowance, never from msg.sender.
 contract FukuSpendGuard is Ownable {
+    /// @notice A funding wallet's on-chain authorisation for one agent. Field order is the
+    ///         order `mandates(agentId, wallet)` returns.
     struct Mandate {
-        address token;
-        uint256 dailyCap;
-        bool active;
+        address token; // the only token the agent may move from this wallet
+        uint256 dailyCap; // max total per UTC day, in token base units
+        uint256 maxPerTx; // max per transfer; 0 = only the daily cap applies
+        uint64 validUntil; // unix seconds; expired once block.timestamp > validUntil; 0 = never
+        bool restrictPayees; // true: `to` must be on the wallet's payee list for this agent
+        uint64 version; // current mandate version of (agent, wallet); bumped on open and close
+        bool active; // open (true) or closed / never opened (false)
     }
 
     /// @notice EIP-712 message signed by the compliance signer. Field order is part of the
@@ -63,12 +88,13 @@ contract FukuSpendGuard is Ownable {
         bytes32 actionHash;
         bytes32 proofHash;
         bytes32 complianceRef;
+        uint64 mandateVersion;
         uint256 nonce;
         uint64 deadline;
     }
 
     bytes32 public constant GUARDED_TRANSFER_TYPEHASH = keccak256(
-        "GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint256 nonce,uint64 deadline)"
+        "GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 deadline)"
     );
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -92,32 +118,54 @@ contract FukuSpendGuard is Ownable {
     /// @notice Address whose EIP-712 signature authorises each `GuardedTransfer`.
     address public complianceSigner;
 
-    /// @notice agentId => funding wallet => mandate.
+    /// @notice agentId => funding wallet => mandate, returned as (token, dailyCap, maxPerTx,
+    ///         validUntil, restrictPayees, version, active). A closed mandate has its terms
+    ///         zeroed and `active == false` but still shows the current `version`.
     mapping(bytes32 => mapping(address => Mandate)) public mandates;
     /// @notice nonce => already consumed (nonces are global to this guard).
     mapping(uint256 => bool) public nonceUsed;
+    /// @notice actionHash => a transfer was already executed for this Fuku action.
+    mapping(bytes32 => bool) public actionExecuted;
 
+    /// @dev agentId => funding wallet => last mandate version handed out. Kept apart from
+    ///      `mandates` so a closed and re-opened mandate never reuses a version.
+    mapping(bytes32 => mapping(address => uint64)) private _mandateVersions;
+    /// @dev agentId => funding wallet => payee => approved. Survives close / re-open.
+    mapping(bytes32 => mapping(address => mapping(address => bool))) private _payees;
     /// @dev agentId => funding wallet => UTC day (block.timestamp / 1 days) => amount spent.
     mapping(bytes32 => mapping(address => mapping(uint256 => uint256))) private _spent;
 
     uint256 private _lock = 1;
 
     event ComplianceSignerSet(address indexed previousSigner, address indexed newSigner);
-    event MandateOpened(bytes32 indexed agentId, address indexed wallet, address indexed token, uint256 dailyCap);
-    event MandateClosed(bytes32 indexed agentId, address indexed wallet);
+    event MandateOpened(
+        bytes32 indexed agentId,
+        address indexed wallet,
+        address indexed token,
+        uint256 dailyCap,
+        uint256 maxPerTx,
+        uint64 validUntil,
+        bool restrictPayees,
+        uint64 version
+    );
+    event MandateClosed(bytes32 indexed agentId, address indexed wallet, uint64 version);
+    event PayeeSet(bytes32 indexed agentId, address indexed wallet, address indexed payee, bool allowed);
     event GuardedTransferExecuted(
         bytes32 indexed agentId,
         address indexed from,
         address indexed to,
         address token,
         uint256 amount,
+        bytes32 actionHash,
         bytes32 proofHash,
         bytes32 complianceRef,
+        uint64 mandateVersion,
         uint256 nonce
     );
 
     error AttestationExpired(uint64 deadline, uint256 timestamp);
     error NonceUsed(uint256 nonce);
+    error ActionAlreadyExecuted(bytes32 actionHash);
     error BadAttestation();
     error AgentNotFound(bytes32 agentId);
     error AgentNotActive(bytes32 agentId, uint8 status);
@@ -125,7 +173,12 @@ contract FukuSpendGuard is Ownable {
     error PolicyMismatch(bytes32 onChain, bytes32 attested);
     error NoMandate(bytes32 agentId, address wallet);
     error TokenNotMandated(address mandated, address requested);
+    error StaleMandate(uint64 current, uint64 attested);
+    error MandateExpired(uint64 validUntil);
+    error PerTxLimitExceeded(uint256 maxPerTx);
+    error PayeeNotApproved(address payee);
     error DailyCapExceeded(uint256 remaining);
+    error InvalidMandate();
     error ZeroAmount();
     error ZeroRecipient();
     error ZeroDailyCap();
@@ -162,24 +215,70 @@ contract FukuSpendGuard is Ownable {
         emit ComplianceSignerSet(previous, newSigner);
     }
 
-    // --- mandates (msg.sender is the funding wallet) ---------------------------------------
+    // --- mandates and payees (msg.sender is the funding wallet) ----------------------------
 
-    /// @notice Allow `agentId` to spend up to `dailyCap` of `token` per UTC day from the
-    ///         caller's wallet (the caller must also approve this contract on `token`).
-    ///         Re-opening replaces token and cap; the amount already spent today still counts.
+    /// @notice Allow `agentId` to move `token` from the caller's wallet within these limits
+    ///         (the caller must also approve this contract on `token`). Opening again replaces
+    ///         the previous terms; the amount already spent today still counts. Every open
+    ///         bumps the mandate version, voiding attestations issued under earlier terms.
+    /// @param dailyCap       Max total per UTC day, in token base units; must be > 0.
+    /// @param maxPerTx       Max per transfer; 0 = only the daily cap applies; must be <= dailyCap.
+    /// @param validUntil     Unix seconds, must be in the future; 0 = no expiry. Transfers
+    ///                       revert with `MandateExpired` once block.timestamp > validUntil.
+    /// @param restrictPayees Only pay addresses the caller approved with `setPayee`.
     /// @dev The agent does not have to exist yet; `execute` checks it.
-    function openMandate(bytes32 agentId, address token, uint256 dailyCap) external {
+    function openMandate(
+        bytes32 agentId,
+        address token,
+        uint256 dailyCap,
+        uint256 maxPerTx,
+        uint64 validUntil,
+        bool restrictPayees
+    ) external {
         if (token == address(0)) revert ZeroAddress();
         if (dailyCap == 0) revert ZeroDailyCap();
-        mandates[agentId][msg.sender] = Mandate({token: token, dailyCap: dailyCap, active: true});
-        emit MandateOpened(agentId, msg.sender, token, dailyCap);
+        if (maxPerTx > dailyCap || (validUntil != 0 && validUntil <= block.timestamp)) revert InvalidMandate();
+
+        uint64 version = _bumpMandateVersion(agentId, msg.sender);
+        mandates[agentId][msg.sender] = Mandate({
+            token: token,
+            dailyCap: dailyCap,
+            maxPerTx: maxPerTx,
+            validUntil: validUntil,
+            restrictPayees: restrictPayees,
+            version: version,
+            active: true
+        });
+        emit MandateOpened(agentId, msg.sender, token, dailyCap, maxPerTx, validUntil, restrictPayees, version);
     }
 
-    /// @notice Withdraw the caller's mandate for `agentId`.
+    /// @notice Withdraw the caller's mandate for `agentId`. Bumps the mandate version, so
+    ///         attestations issued before never work again, not even after a re-open.
     function closeMandate(bytes32 agentId) external {
         if (!mandates[agentId][msg.sender].active) revert NoMandate(agentId, msg.sender);
-        delete mandates[agentId][msg.sender];
-        emit MandateClosed(agentId, msg.sender);
+        uint64 version = _bumpMandateVersion(agentId, msg.sender);
+        // Clear the terms; keep the current version readable through `mandates`.
+        mandates[agentId][msg.sender] = Mandate({
+            token: address(0),
+            dailyCap: 0,
+            maxPerTx: 0,
+            validUntil: 0,
+            restrictPayees: false,
+            version: version,
+            active: false
+        });
+        emit MandateClosed(agentId, msg.sender, version);
+    }
+
+    /// @notice Approve (`allowed` = true) or remove `payee` on the caller's payee list for
+    ///         `agentId`. The list is enforced only while the caller's mandate has
+    ///         `restrictPayees`, and it survives close / re-open (it is the owner's address
+    ///         book). A removal takes effect immediately, including for attestations that
+    ///         were already signed.
+    function setPayee(bytes32 agentId, address payee, bool allowed) external {
+        if (payee == address(0)) revert ZeroRecipient();
+        _payees[agentId][msg.sender][payee] = allowed;
+        emit PayeeSet(agentId, msg.sender, payee, allowed);
     }
 
     // --- execution -----------------------------------------------------------------------
@@ -193,17 +292,24 @@ contract FukuSpendGuard is Ownable {
         _checkAgentAndPolicy(t);
         uint256 newSpent = _checkMandateAndCap(t);
 
-        // Effects.
+        // Effects: the attestation is single-use (nonce and action) and the day's spend grows.
         nonceUsed[t.nonce] = true;
+        actionExecuted[t.actionHash] = true;
         _spent[t.agentId][t.from][block.timestamp / 1 days] = newSpent;
 
-        // Interactions.
+        // Interactions. Any revert below (such as the token's own compliance check) rolls the
+        // effects back, so a failed transfer consumes no budget, nonce or action.
         _safeTransferFrom(t.token, t.from, t.to, t.amount);
         permissionRegistry.recordDecision(t.agentId, t.actionHash, true, t.proofHash, DECISION_RULE_ID);
         _emitExecuted(t);
     }
 
     // --- views ---------------------------------------------------------------------------
+
+    /// @notice True when `wallet` approved `payee` for `agentId` (see `setPayee`).
+    function isPayee(bytes32 agentId, address wallet, address payee) external view returns (bool) {
+        return _payees[agentId][wallet][payee];
+    }
 
     /// @notice Amount `agentId` has moved from `wallet` during the current UTC day.
     function spentToday(bytes32 agentId, address wallet) external view returns (uint256) {
@@ -212,8 +318,8 @@ contract FukuSpendGuard is Ownable {
 
     /// @notice Full EIP-712 digest of `t` (what the compliance signer signs).
     function hashTransfer(GuardedTransfer calldata t) public view returns (bytes32) {
-        // Every field is a static 32-byte ABI word, so abi.encode(typehash, t) is exactly
-        // the EIP-712 encodeData of the struct.
+        // Every field is a static type encoded as one 32-byte ABI word, so
+        // abi.encode(typehash, t) is exactly the EIP-712 encodeData of the struct.
         bytes32 structHash = keccak256(abi.encode(GUARDED_TRANSFER_TYPEHASH, t));
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
     }
@@ -226,10 +332,12 @@ contract FukuSpendGuard is Ownable {
 
     // --- internals -----------------------------------------------------------------------
 
-    /// @dev 1. Attestation: not expired, nonce unused, signed by the compliance signer.
+    /// @dev 1. Attestation: not expired, nonce unused, action not executed yet, and signed by
+    ///      the compliance signer for this chain and this contract.
     function _checkAttestation(GuardedTransfer calldata t, bytes calldata sig) private view {
         if (block.timestamp > t.deadline) revert AttestationExpired(t.deadline, block.timestamp);
         if (nonceUsed[t.nonce]) revert NonceUsed(t.nonce);
+        if (actionExecuted[t.actionHash]) revert ActionAlreadyExecuted(t.actionHash);
         if (_recover(hashTransfer(t), sig) != complianceSigner) revert BadAttestation();
     }
 
@@ -245,15 +353,24 @@ contract FukuSpendGuard is Ownable {
         if (policyHash != t.policyHash) revert PolicyMismatch(policyHash, t.policyHash);
     }
 
-    /// @dev 4. Mandate open for (agent, from) on this token; 5. sane amount / recipient;
-    ///      6. daily cap per (agent, wallet, UTC day). Returns today's spent total after `t`.
+    /// @dev 4. Mandate open for (agent, from), on this token, at the attested version and not
+    ///      expired; 5. sane amount / recipient; 6. per-transaction limit; 7. payee list when
+    ///      restricted; 8. daily cap per (agent, wallet, UTC day). Returns today's spent total
+    ///      after `t`.
     function _checkMandateAndCap(GuardedTransfer calldata t) private view returns (uint256 newSpent) {
         Mandate storage mandate = mandates[t.agentId][t.from];
         if (!mandate.active) revert NoMandate(t.agentId, t.from);
         if (mandate.token != t.token) revert TokenNotMandated(mandate.token, t.token);
+        if (t.mandateVersion != mandate.version) revert StaleMandate(mandate.version, t.mandateVersion);
+        uint64 validUntil = mandate.validUntil;
+        if (validUntil != 0 && block.timestamp > validUntil) revert MandateExpired(validUntil);
 
         if (t.amount == 0) revert ZeroAmount();
         if (t.to == address(0)) revert ZeroRecipient();
+
+        uint256 maxPerTx = mandate.maxPerTx;
+        if (maxPerTx != 0 && t.amount > maxPerTx) revert PerTxLimitExceeded(maxPerTx);
+        if (mandate.restrictPayees && !_payees[t.agentId][t.from][t.to]) revert PayeeNotApproved(t.to);
 
         uint256 spent = _spent[t.agentId][t.from][block.timestamp / 1 days];
         uint256 cap = mandate.dailyCap;
@@ -262,9 +379,25 @@ contract FukuSpendGuard is Ownable {
         return spent + t.amount;
     }
 
+    /// @dev Next version for (agentId, wallet): 1 on the first open, then +1 on every open
+    ///      and close.
+    function _bumpMandateVersion(bytes32 agentId, address wallet) private returns (uint64 version) {
+        version = _mandateVersions[agentId][wallet] + 1;
+        _mandateVersions[agentId][wallet] = version;
+    }
+
     function _emitExecuted(GuardedTransfer calldata t) private {
         emit GuardedTransferExecuted(
-            t.agentId, t.from, t.to, t.token, t.amount, t.proofHash, t.complianceRef, t.nonce
+            t.agentId,
+            t.from,
+            t.to,
+            t.token,
+            t.amount,
+            t.actionHash,
+            t.proofHash,
+            t.complianceRef,
+            t.mandateVersion,
+            t.nonce
         );
     }
 

@@ -2375,6 +2375,17 @@ export const FukuSpendGuardAbi = [
     "inputs": [
       {
         "internalType": "bytes32",
+        "name": "actionHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "ActionAlreadyExecuted",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
         "name": "agentId",
         "type": "bytes32"
       },
@@ -2431,6 +2442,22 @@ export const FukuSpendGuardAbi = [
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "InvalidMandate",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint64",
+        "name": "validUntil",
+        "type": "uint64"
+      }
+    ],
+    "name": "MandateExpired",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "bytes32",
@@ -2471,6 +2498,28 @@ export const FukuSpendGuardAbi = [
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "payee",
+        "type": "address"
+      }
+    ],
+    "name": "PayeeNotApproved",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "maxPerTx",
+        "type": "uint256"
+      }
+    ],
+    "name": "PerTxLimitExceeded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bytes32",
         "name": "onChain",
         "type": "bytes32"
@@ -2498,6 +2547,22 @@ export const FukuSpendGuardAbi = [
   {
     "inputs": [],
     "name": "ReentrantCall",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint64",
+        "name": "current",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "attested",
+        "type": "uint64"
+      }
+    ],
+    "name": "StaleMandate",
     "type": "error"
   },
   {
@@ -2602,6 +2667,12 @@ export const FukuSpendGuardAbi = [
       {
         "indexed": false,
         "internalType": "bytes32",
+        "name": "actionHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
         "name": "proofHash",
         "type": "bytes32"
       },
@@ -2610,6 +2681,12 @@ export const FukuSpendGuardAbi = [
         "internalType": "bytes32",
         "name": "complianceRef",
         "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "mandateVersion",
+        "type": "uint64"
       },
       {
         "indexed": false,
@@ -2635,6 +2712,12 @@ export const FukuSpendGuardAbi = [
         "internalType": "address",
         "name": "wallet",
         "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
       }
     ],
     "name": "MandateClosed",
@@ -2666,6 +2749,30 @@ export const FukuSpendGuardAbi = [
         "internalType": "uint256",
         "name": "dailyCap",
         "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "maxPerTx",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "validUntil",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "restrictPayees",
+        "type": "bool"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
       }
     ],
     "name": "MandateOpened",
@@ -2691,6 +2798,37 @@ export const FukuSpendGuardAbi = [
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "agentId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "wallet",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "payee",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "allowed",
+        "type": "bool"
+      }
+    ],
+    "name": "PayeeSet",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "DECISION_RULE_ID",
     "outputs": [
@@ -2711,6 +2849,25 @@ export const FukuSpendGuardAbi = [
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "name": "actionExecuted",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -2818,6 +2975,11 @@ export const FukuSpendGuardAbi = [
             "type": "bytes32"
           },
           {
+            "internalType": "uint64",
+            "name": "mandateVersion",
+            "type": "uint64"
+          },
+          {
             "internalType": "uint256",
             "name": "nonce",
             "type": "uint256"
@@ -2893,6 +3055,11 @@ export const FukuSpendGuardAbi = [
             "type": "bytes32"
           },
           {
+            "internalType": "uint64",
+            "name": "mandateVersion",
+            "type": "uint64"
+          },
+          {
             "internalType": "uint256",
             "name": "nonce",
             "type": "uint256"
@@ -2923,6 +3090,35 @@ export const FukuSpendGuardAbi = [
     "inputs": [
       {
         "internalType": "bytes32",
+        "name": "agentId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "wallet",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "payee",
+        "type": "address"
+      }
+    ],
+    "name": "isPayee",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
       },
@@ -2943,6 +3139,26 @@ export const FukuSpendGuardAbi = [
         "internalType": "uint256",
         "name": "dailyCap",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxPerTx",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "validUntil",
+        "type": "uint64"
+      },
+      {
+        "internalType": "bool",
+        "name": "restrictPayees",
+        "type": "bool"
+      },
+      {
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
       },
       {
         "internalType": "bool",
@@ -2988,6 +3204,21 @@ export const FukuSpendGuardAbi = [
         "internalType": "uint256",
         "name": "dailyCap",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxPerTx",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "validUntil",
+        "type": "uint64"
+      },
+      {
+        "internalType": "bool",
+        "name": "restrictPayees",
+        "type": "bool"
       }
     ],
     "name": "openMandate",
@@ -3030,6 +3261,29 @@ export const FukuSpendGuardAbi = [
       }
     ],
     "name": "setComplianceSigner",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "agentId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "payee",
+        "type": "address"
+      },
+      {
+        "internalType": "bool",
+        "name": "allowed",
+        "type": "bool"
+      }
+    ],
+    "name": "setPayee",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

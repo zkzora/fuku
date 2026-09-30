@@ -95,6 +95,7 @@ export type GuardedTransfer = {
   actionHash: Hex;
   proofHash: Hex;
   complianceRef: Hex;
+  mandateVersion: bigint;
   nonce: bigint;
   deadline: bigint;
 };
@@ -111,10 +112,14 @@ export const GUARDED_TRANSFER_TYPES = {
     { name: "actionHash", type: "bytes32" },
     { name: "proofHash", type: "bytes32" },
     { name: "complianceRef", type: "bytes32" },
+    { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint64" },
   ],
 } as const;
+
+/** Index of `version` in the tuple returned by FukuSpendGuard.mandates(agentId, wallet). */
+const MANDATE_VERSION_INDEX = 5;
 
 /**
  * deployFukuStack plus the Cleanverse simulators and FukuSpendGuard:
@@ -123,9 +128,12 @@ export const GUARDED_TRANSFER_TYPES = {
  *  - FukuSpendGuard whose compliance signer is wallet #6 (dedicated), set as a
  *    PermissionRegistry enforcer
  *  - POLICY_HASH set (active) for AGENT_ID by alice
- *  - alice opened a DAILY_CAP mandate for AGENT_ID on the aToken and approved the guard
- * `signed()` builds a GuardedTransfer (alice -> bob, 100 tokens, fresh nonce, deadline
- * latest block + 1h, any field overridable) and signs it with the compliance signer.
+ *  - alice opened a DAILY_CAP mandate for AGENT_ID on the aToken (no per-tx limit, no
+ *    expiry, any payee; mandate version 1) and approved the guard
+ * `signed()` builds a GuardedTransfer (alice -> bob, 100 tokens, fresh nonce and action,
+ * the current on-chain mandate version of (agentId, from), deadline latest block + 1h, any
+ * field overridable) and signs it with the compliance signer. `sign()` optionally takes
+ * domain overrides to sign for another chain id or verifying contract.
  */
 export async function deployCleanverseStack(connection: NetworkConnection) {
   const stack = await deployFukuStack(connection);
@@ -149,19 +157,26 @@ export async function deployCleanverseStack(connection: NetworkConnection) {
   await apass.write.issue([bob.account.address, activePass({ cvRecordId: id("cv:bob") })]);
   await atoken.write.mint([alice.account.address, MINT_AMOUNT]);
 
-  await guard.write.openMandate([AGENT_ID, atoken.address, DAILY_CAP], { account: alice.account });
+  await guard.write.openMandate([AGENT_ID, atoken.address, DAILY_CAP, 0n, 0n, false], { account: alice.account });
   await atoken.write.approve([guard.address, maxUint256], { account: alice.account });
 
   const chainId = await publicClient.getChainId();
   const domain = { name: "FukuSpendGuard", version: "1", chainId, verifyingContract: guard.address } as const;
 
+  /** Current mandate version of (agentId, wallet), as the Fuku server would attest to it. */
+  async function mandateVersionOf(agentId: Hex, wallet: Address): Promise<bigint> {
+    return (await guard.read.mandates([agentId, wallet]))[MANDATE_VERSION_INDEX];
+  }
+
   let nextNonce = 1n;
   async function buildTransfer(overrides: Partial<GuardedTransfer> = {}): Promise<GuardedTransfer> {
     const n = nextNonce++;
     const latest = await publicClient.getBlock();
+    const agentId = overrides.agentId ?? AGENT_ID;
+    const from = overrides.from ?? alice.account.address;
     return {
-      agentId: AGENT_ID,
-      from: alice.account.address,
+      agentId,
+      from,
       to: bob.account.address,
       token: atoken.address,
       amount: 100n * ONE_TOKEN,
@@ -169,16 +184,19 @@ export async function deployCleanverseStack(connection: NetworkConnection) {
       actionHash: id(`action:${n}`),
       proofHash: id(`proof:${n}`),
       complianceRef: id(`cleanverse:ref:${n}`),
+      mandateVersion: overrides.mandateVersion ?? (await mandateVersionOf(agentId, from)),
       nonce: n,
       deadline: latest.timestamp + 3600n,
       ...overrides,
     };
   }
 
-  async function sign(t: GuardedTransfer, signer = complianceSigner): Promise<Hex> {
+  type Domain = { name: string; version: string; chainId: number; verifyingContract: Address };
+
+  async function sign(t: GuardedTransfer, signer = complianceSigner, domainOverrides: Partial<Domain> = {}): Promise<Hex> {
     return signer.signTypedData({
       account: signer.account,
-      domain,
+      domain: { ...domain, ...domainOverrides },
       types: GUARDED_TRANSFER_TYPES,
       primaryType: "GuardedTransfer",
       message: t,
@@ -190,5 +208,18 @@ export async function deployCleanverseStack(connection: NetworkConnection) {
     return { t, sig: await sign(t) };
   }
 
-  return { ...stack, complianceSigner, carol, apass, atoken, guard, chainId, domain, buildTransfer, sign, signed };
+  return {
+    ...stack,
+    complianceSigner,
+    carol,
+    apass,
+    atoken,
+    guard,
+    chainId,
+    domain,
+    mandateVersionOf,
+    buildTransfer,
+    sign,
+    signed,
+  };
 }
