@@ -545,7 +545,9 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
 
   // 8. reorg: a confirmed transfer that disappears from the chain goes back to PENDING and loses its credit
   await signIn(true);
-  if (dbUrl) {
+  if (dbUrl && chainId !== 31337) {
+    console.log("   (reorg check skipped: evm_snapshot / evm_revert only exist on a local Hardhat node)");
+  } else if (dbUrl) {
     const snapshot = await publicClient.request({ method: "evm_snapshot", params: [] });
     const r = await pay$({ action: "transfer", amountUsdc: 5, to: nus, asset: "aUSDC" });
     await publicClient.request({ method: "evm_revert", params: [snapshot] });

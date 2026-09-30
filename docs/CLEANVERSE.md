@@ -12,12 +12,15 @@ Status on 2026-09-30:
 A passport that lists A-Tokens (`assets: ["aUSDC"]`) is an **A-Token passport**. Only those passports enter the Cleanverse perimeter. Trading Assistant and every other passport behave exactly as before.
 
 ~~~
-Owner's A-Pass wallet --approve + openMandate(agent, aUSDC, dailyCap)--> FukuSpendGuard
+Owner's A-Pass wallet --approve + openMandate(agent, aUSDC, dailyCap, maxPerTx, validUntil, restrictPayees)
+                      --setPayee(agent, supplier)--> FukuSpendGuard
 
 Agent request (transfer, to, asset)
   -> Fuku engine: R0-R4, then R9 asset rule, R7 owner A-Pass, R8 recipient A-Pass, then R5, R6
-  -> compliance signer (Fuku server) signs an EIP-712 GuardedTransfer for exactly this transfer
-  -> FukuSpendGuard.execute: attestation, agent status, current passport hash, mandate, daily cap
+  -> compliance signer (Fuku server) signs an EIP-712 GuardedTransfer for exactly this transfer,
+     bound to the action id, the passport hash and the mandate version
+  -> FukuSpendGuard.execute: attestation (single-use action), agent status, current passport hash,
+     mandate (token, version, expiry, per-transfer limit, approved payee), UTC daily cap
   -> aUSDC.transferFrom(owner, recipient)     <- the A-Token re-checks both A-Passes
   -> PermissionRegistry.recordDecision(R6)    <- same transaction
 ~~~
@@ -102,26 +105,32 @@ These contracts are **not** Cleanverse. They exist so the full flow can run on a
   - Unverified wallet: no pass.
 - Ava's pass is active, tier 2, record `cv-sim-ava-chen`.
 
-## FukuSpendGuard
+## FukuSpendGuard (v2)
 
 - **EIP-712 domain:** `{name: "FukuSpendGuard", version: "1", chainId, verifyingContract}`.
 - **Typed struct (field order is part of the typehash):**
-  `GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint256 nonce,uint64 deadline)`.
+  `GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 deadline)`.
+- **The owner's mandate:** `openMandate(agentId, token, dailyCap, maxPerTx, validUntil, restrictPayees)` and `setPayee(agentId, payee, allowed)`, both sent from the owner's own wallet.
+  - `mandates(agentId, wallet)` returns `(token, dailyCap, maxPerTx, validUntil, restrictPayees, version, active)`.
+  - The version increases on every open and close, so reopening a mandate voids attestations signed against the old one.
 - **Checks, in order:**
-  1. Deadline, unused nonce, and a low-s signature from the compliance signer.
+  1. Deadline; unused nonce; unused action hash (`ActionAlreadyExecuted`); a low-s signature from the compliance signer.
   2. The agent exists and is not Paused or Revoked.
   3. The policy is active and its hash equals the attested `policyHash`.
-  4. A mandate for `(agentId, from)` exists on this token.
-  5. The amount is non-zero, the recipient is not zero, and the amount fits the daily cap per `(agent, wallet, UTC day)`.
-- **Effects:** the guard then calls `transferFrom` and bubbles the token's revert data. It records `recordDecision(agentId, actionHash, true, proofHash, "R6")` as a PermissionRegistry enforcer, emits `GuardedTransferExecuted`, and is `nonReentrant`.
+  4. An active mandate for `(agentId, from)` on this token at the attested version (`StaleMandate`) that has not expired (`MandateExpired`).
+  5. The amount is non-zero and within `maxPerTx` (`PerTxLimitExceeded`), and the recipient is not zero and is an approved payee when payees are restricted (`PayeeNotApproved`).
+  6. The amount fits the daily cap per `(agent, wallet, UTC day)` (`DailyCapExceeded`).
+- **Effects:** the guard marks the nonce and the action hash used, calls `transferFrom` and bubbles the token's revert data. It records `recordDecision(agentId, actionHash, true, proofHash, "R6")` as a PermissionRegistry enforcer, emits `GuardedTransferExecuted` (with `actionHash`, `complianceRef` and `mandateVersion`), and is `nonReentrant`.
 - **What the server does per transfer:**
   1. Creates the `AgentAction` row first. `actionHash = keccak256(action id)`.
   2. Anchors the agent and passport if needed, and reads the on-chain policy hash.
-  3. Signs with a random 256-bit nonce, a deadline of now + 5 min, and `amount = parseUnits(amount.toFixed(6), 6)`.
-  4. Simulates the call, then sends it through the serialized write queue.
-  - A simulated revert becomes BLOCKED R10. The proof hash is recomputed and recorded with `recordDecision`.
-  - An RPC or signing failure returns HTTP 502 and marks the row "not sent". It never falls back to a mock receipt.
-  - In mock-chain mode the receipt is a labelled mock and no token moves.
+  3. Reserves the day's budget atomically, then signs with a random 256-bit nonce, a deadline of now + 5 min, the mandate version read from chain, and the amount in base units computed by the engine.
+  4. Simulates the call, broadcasts it through the signer lease, and stores the hash before waiting for the receipt.
+  - A simulated revert becomes BLOCKED R10 (lifecycle DENIED). The proof hash is recomputed and recorded with `recordDecision`, and the budget is released.
+  - A receipt that does not arrive in 90 s leaves the row PENDING (HTTP 202) for reconciliation. A mined revert is FAILED.
+  - An RPC or signing failure before broadcast returns HTTP 502 and marks the row FAILED. It never falls back to a mock receipt.
+  - In mock-chain mode the row is SIMULATED, the receipt is a labelled mock, and no token moves.
+  - The lifecycle, idempotency and reconciliation are described in `docs/SECURITY.md`.
 - **Kill switch on-chain:**
   - Revoke calls `PermissionRegistry.revokePolicy`, so outstanding attestations fail with `PolicyNotActive`.
   - Pause and resume call `AgentRegistry.setStatus`, so attestations fail with `AgentNotActive`.
@@ -151,16 +160,19 @@ COMPLIANCE_SIGNER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
 #    FUKU_CHAIN_MODE=live FUKU_CHAIN_ID=31337 MONAD_RPC_URL=http://127.0.0.1:8545
 #    DEPLOYER_PRIVATE_KEY=<#0> FUKU_COMPLIANCE_SIGNER_KEY=<#1> DEMO_OWNER_PRIVATE_KEY=<#2>
 #    the four FUKU_*_REGISTRY, CLEANVERSE_SIM_APASS, CLEANVERSE_SIM_ATOKEN, FUKU_SPEND_GUARD
-cd web && npm run cleanverse:setup                    # A-Passes, 10,000 aUSDC-SIM, approve, mandate
+cd web && npm run cleanverse:setup                    # A-Passes, 10,000 aUSDC-SIM, approve, mandate v2, payee
 npm run dev -- -p 3002                                 # terminal 2
-FUKU_BASE_URL=http://localhost:3002 node scripts/live-smoke.mjs
+DATABASE_URL=<the web instance's database> FUKU_BASE_URL=http://localhost:3002 node scripts/live-smoke.mjs
 ~~~
 
-Expected result: `36/36 checks passed`. The 17 Cleanverse checks cover the following:
-- 250 aUSDC-SIM to Nusantara is ALLOWED. The transfer, `GuardedTransferExecuted` and `ActionDecision` land in one transaction, and the balances move by exactly 250.
+Expected result: `44/44 checks passed`. The 25 Cleanverse and guard checks cover the following:
+- 250 aUSDC-SIM to Nusantara is CONFIRMED. The transfer, `GuardedTransferExecuted` (bound to the action id) and `ActionDecision` land in one transaction, and `GET /api/v1/actions/:id` returns the tx and its log index.
 - Frozen and Unverified are blocked with R8 `CVI_FROZEN` and `CVI_NOT_FOUND`, with no Transfer event.
-- An over-cap attestation sent straight to the guard reverts with `DailyCapExceeded`.
-- Revoking in the app emits `PolicyRevoked`, after which a pre-signed attestation reverts with `PolicyNotActive`.
+- A repeated `Idempotency-Key` replays instead of paying twice.
+- Direct attestations revert with `PerTxLimitExceeded`, `PayeeNotApproved` and `DailyCapExceeded`.
+- Two concurrent requests cannot spend the same remainder, and the balances move exactly once per confirmed transfer (900 in total).
+- Reconciliation, run as a separate process, recovers a transfer whose hash was never stored, without double credit. A confirmation removed by `evm_revert` goes back to PENDING and loses its credit.
+- Revoking in the app emits `PolicyRevoked`, after which a pre-signed attestation reverts with `PolicyNotActive` and the app blocks the agent.
 
 Without any chain env (mock mode), the demo runs with the fixture backend and mock receipts.
 
@@ -171,7 +183,7 @@ Without any chain env (mock mode), the demo runs with the fixture backend and mo
 3. Confirm the chain identifier with Cleanverse and set `CLEANVERSE_CHAIN` if it is not `monad`.
 4. Set `CLEANVERSE_ATOKEN_SYMBOL=aUSDC` and `CLEANVERSE_ATOKEN_ADDRESS` to the address from step 2.
 5. Get an A-Pass for the owner wallet and for a test recipient in the Cleanverse app. Fund the owner wallet with aUSDC (Cleanverse faucet or app).
-6. From the owner wallet, `approve(FUKU_SPEND_GUARD, amount)` on the real aUSDC and `openMandate(paymentsAgentKey, aUSDC, cap)` on the guard. The setup script targets the simulator token today, so do this by hand or add a live-token flag.
+6. From the owner wallet, `approve(FUKU_SPEND_GUARD, amount)` on the real aUSDC, then on the guard `openMandate(paymentsAgentKey, aUSDC, dailyCap, maxPerTx, validUntil, true)` and `setPayee(paymentsAgentKey, recipient, true)`. Bind that wallet to the owner's Fuku identity (Identity page or `/api/identity/wallet`). The setup script targets the simulator token today, so do this by hand or add a live-token flag.
 7. Restart the app. The Cleanverse card reads **configured** until the first successful call, then **live**.
 8. Run one transfer to the test recipient. Watch for a token-level revert (R10 with the token's error). That would mean the real A-Token does not let a third-party contract move funds, and CCP registration is needed (see open questions).
 
@@ -192,6 +204,10 @@ Without any chain env (mock mode), the demo runs with the fixture backend and mo
    - `wire-env.mjs` now masks keys in files with CRLF line endings.
 9. **Script order:** `npm run cleanverse:check` (P1 item 5) was built ahead of P1 items 1 to 4, because the flip-to-live checklist depends on it.
 10. **SDK tests:** the SDK workspace test script pointed at a missing folder. It now runs contract tests, so the root `npm test` passes.
+11. **Guard v2 (after the brief, for the technical-depth work):** the typehash gained `mandateVersion`, and `openMandate` gained `maxPerTx`, `validUntil` and `restrictPayees`, plus `setPayee`, a single-use action hash and new errors. The brief's struct was changed deliberately. The guard is not deployed on any public network, so nothing breaks.
+12. **R7 needs a verified wallet binding:** a verified Dynamic credential or a signed binding message. A wallet that is only declared fails with `CVI_NO_WALLET`, because its A-Pass would not prove anything about the owner. Without `DEMO_OWNER_PRIVATE_KEY`, Ava's wallet comes from a public demo key so the seed can sign a real binding. Never fund it.
+13. **A-Pass in the trust score (P1 item 2, done):** the flat "verified human +20" is now passkey +10 plus Cleanverse A-Pass +10, read from `CleanversePass`. Seeded scores are unchanged (Trading Assistant 96).
+14. **Remaining P1 items:** the Travel Rule record, the Envio events for the guard and simulators, and an owner mandate signed from the Dynamic wallet are not built. See the final report.
 
 ## Open questions for Cleanverse
 
