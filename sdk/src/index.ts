@@ -5,6 +5,10 @@
  *   createIdentity() · registerAgent() · verifyAgent() · requestPermission() · getTrustScore()
  * plus checkPermission() (dry run) and executeAction() (full workflow).
  *
+ * 0.2.0: Cleanverse A-Token payments. `executeAction` / `checkPermission` take `to` and `asset`;
+ * results carry `compliance` (the three Cleanverse checks and their complianceRef) and, for a
+ * guarded transfer, `transfer`. `verifyAgent` reports `owner.cleanverse`.
+ *
  * Works in Node 18+, browsers and edge runtimes (uses global fetch).
  */
 
@@ -25,6 +29,8 @@ export interface Policy {
   allowed: AllowedRule[];
   blocked?: string[];
   scopeApps?: string[];
+  /** Cleanverse A-Token symbols (e.g. ["aUSDC"]). A non-empty list makes this an A-Token passport. */
+  assets?: string[];
 }
 
 export interface Identity {
@@ -67,10 +73,57 @@ export interface Verification {
     capabilities: string[];
     registeredTx: string | null;
   };
-  owner?: { id: string; onChainId: string; displayName: string; humanVerified: boolean; authMethod: string };
-  passport?: { active: boolean; version: number; allowed: AllowedRule[]; blocked: string[]; scopeApps: string[] } | null;
+  owner?: {
+    id: string;
+    onChainId: string;
+    displayName: string;
+    humanVerified: boolean;
+    authMethod: string;
+    /** Last persisted A-Pass read for the owner's wallet. `source: "simulated"` means Fuku's simulator answered. */
+    cleanverse?: CleanverseOwner;
+  };
+  passport?: { active: boolean; version: number; allowed: AllowedRule[]; blocked: string[]; scopeApps: string[]; assets?: string[] } | null;
   trust?: { score: number; level: "High" | "Medium" | "Low" };
   error?: string;
+}
+
+export interface CleanverseOwner {
+  mode: "live" | "simulated" | "off";
+  source: "cleanverse" | "simulated";
+  found: boolean;
+  status: number | null;
+  tier: number | null;
+  subTier: number | null;
+  expiresAt: number | null;
+  checkedAt: string | null;
+}
+
+export type ComplianceSubCode =
+  | "OK"
+  | "CVI_NO_WALLET"
+  | "CVI_NOT_FOUND"
+  | "CVI_FROZEN"
+  | "CVI_EXPIRED"
+  | "CVI_RULE_REJECTED"
+  | "CVA_NOT_ALLOWED"
+  | "PROVIDER_ERROR"
+  | "PROVIDER_OFF";
+
+export interface ComplianceLeg {
+  ok: boolean;
+  subCode: ComplianceSubCode;
+  detail: string;
+}
+
+/** The Cleanverse checks for a value action on an A-Token passport (R9 asset, R7 owner, R8 counterparty). */
+export interface Compliance {
+  mode: "live" | "simulated" | "off";
+  asset: ComplianceLeg;
+  owner: ComplianceLeg;
+  counterparty: ComplianceLeg;
+  /** keccak256 of the canonical evidence JSON; bound into the proof hash and the on-chain attestation. */
+  complianceRef: string;
+  evidence: Record<string, unknown>;
 }
 
 export interface TrustScore {
@@ -87,6 +140,10 @@ export interface ActionRequest {
   action: string;
   amountUsdc?: number | null;
   app?: string | null;
+  /** Recipient wallet for `transfer`. */
+  to?: string | null;
+  /** A-Token symbol for `transfer` on an A-Token passport, e.g. "aUSDC". */
+  asset?: string | null;
   params?: Record<string, unknown>;
 }
 
@@ -95,9 +152,12 @@ export interface PermissionCheck {
   allowed: boolean;
   decision: "ALLOWED" | "BLOCKED";
   ruleId: string;
+  /** Cleanverse / guard sub-code for R7-R10, e.g. "CVI_FROZEN". */
+  subCode?: string | null;
   reason: string;
   limitUsdcPerDay?: number;
   remainingUsdc?: number;
+  compliance?: Compliance | null;
 }
 
 export interface ActionResult {
@@ -105,11 +165,19 @@ export interface ActionResult {
   agentId: string;
   agentName: string;
   action: string;
+  amountUsdc?: number | null;
+  app?: string | null;
+  to?: string | null;
+  asset?: string | null;
   decision: "ALLOWED" | "BLOCKED";
   ruleId: string;
+  subCode?: string | null;
   reason: string;
   proofHash: string;
   receipt: Receipt;
+  /** Set when an A-Token moved through FukuSpendGuard; the same transaction records the decision. */
+  transfer?: { txHash: string; explorerUrl: string; mode: "live" | "mock" } | null;
+  compliance?: Compliance | null;
   scoreBefore: number;
   scoreAfter: number;
   trustDelta: number;
@@ -117,6 +185,13 @@ export interface ActionResult {
   explanationProvider: string;
   workflow: { step: string; status: "ok" | "blocked" | "skipped"; detail: string; ms: number }[];
   createdAt: string;
+}
+
+/** Result of mirroring a kill switch on-chain. `ok: false` means the registries did not follow. */
+export interface ChainSync {
+  ok: boolean;
+  receipts: { op: string; txHash: string; mode: "live" | "mock" }[];
+  error?: string;
 }
 
 export class FukuError extends Error {
@@ -179,9 +254,9 @@ export class Fuku {
     return this.request<{ agent: Agent; receipt: Receipt }>("PUT", `/agents/${encodeURIComponent(agentId)}/permissions`, policy);
   }
 
-  /** Revoke the passport; the agent is paused. Owner only. */
+  /** Revoke the passport; the agent is paused, in Fuku and in the on-chain registries. Owner only. */
   revokePermission(agentId: string) {
-    return this.request<{ ok: true; score: number }>("DELETE", `/agents/${encodeURIComponent(agentId)}/permissions`);
+    return this.request<{ ok: true; score: number; chainSync: ChainSync }>("DELETE", `/agents/${encodeURIComponent(agentId)}/permissions`);
   }
 
   /** Portable trust score with breakdown and explanation. */
