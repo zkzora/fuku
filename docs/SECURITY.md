@@ -145,7 +145,7 @@ Local runs on 2026-09-30:
 | `npm test` (root: web + sdk) | 58 web tests, 8 SDK tests, all passing |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
-| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database) | `44/44 checks passed` |
+| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database) | `45/45 checks passed` |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 17 steps `ok`, exit 0 |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 

@@ -165,8 +165,9 @@ npm run dev -- -p 3002                                 # terminal 2
 DATABASE_URL=<the web instance's database> FUKU_BASE_URL=http://localhost:3002 node scripts/live-smoke.mjs
 ~~~
 
-Expected result: `44/44 checks passed`. The 25 Cleanverse and guard checks cover the following:
+Expected result: `45/45 checks passed`. The 26 Cleanverse and guard checks cover the following:
 - 250 aUSDC-SIM to Nusantara is CONFIRMED. The transfer, `GuardedTransferExecuted` (bound to the action id) and `ActionDecision` land in one transaction, and `GET /api/v1/actions/:id` returns the tx and its log index.
+- The Travel Rule record (simulator) is stored and its canonical-JSON hash equals the action's `travelRuleRef`.
 - Frozen and Unverified are blocked with R8 `CVI_FROZEN` and `CVI_NOT_FOUND`, with no Transfer event.
 - A repeated `Idempotency-Key` replays instead of paying twice.
 - Direct attestations revert with `PerTxLimitExceeded`, `PayeeNotApproved` and `DailyCapExceeded`.
@@ -207,7 +208,12 @@ Without any chain env (mock mode), the demo runs with the fixture backend and mo
 11. **Guard v2 (after the brief, for the technical-depth work):** the typehash gained `mandateVersion`, and `openMandate` gained `maxPerTx`, `validUntil` and `restrictPayees`, plus `setPayee`, a single-use action hash and new errors. The brief's struct was changed deliberately. The guard is not deployed on any public network, so nothing breaks.
 12. **R7 needs a verified wallet binding:** a verified Dynamic credential or a signed binding message. A wallet that is only declared fails with `CVI_NO_WALLET`, because its A-Pass would not prove anything about the owner. Without `DEMO_OWNER_PRIVATE_KEY`, Ava's wallet comes from a public demo key so the seed can sign a real binding. Never fund it.
 13. **A-Pass in the trust score (P1 item 2, done):** the flat "verified human +20" is now passkey +10 plus Cleanverse A-Pass +10, read from `CleanversePass`. Seeded scores are unchanged (Trading Assistant 96).
-14. **Remaining P1 items:** the Travel Rule record, the Envio events for the guard and simulators, and an owner mandate signed from the Dynamic wallet are not built. See the final report.
+14. **P1 items:**
+    - **Travel Rule:** done. After each guarded transfer Fuku stores a record: Cleanverse's `download_travel_rule` in live mode, a record marked `source: "simulated"` in the simulator. It is hashed into `travelRuleRef` and downloadable from the result dialog and `GET /api/v1/actions/:id/travel-rule`.
+    - **Envio:** done. The in-app HyperSync feed shows guard events, and the HyperIndex config and handlers cover the guard and the A-Pass simulator, with idempotent handlers. HyperIndex itself was not run here, because it needs Docker.
+    - **CRE:** done (see `cre/README.md`).
+    - **`cleanverse:check`:** done.
+    - **Owner mandate from the Dynamic wallet:** built but not exercised. `@dynamic-labs-sdk/evm/viem` exposes `createWalletClientForWalletAccount`, and the mandate panel uses it to send `approve`, `openMandate` and `setPayee` from the owner's Dynamic wallet. It needs the guard on a chain the Dynamic environment supports, plus gas in that wallet.
 
 ## Open questions for Cleanverse
 

@@ -36,7 +36,7 @@ Contracts (standalone, own `node_modules`):
 cd contracts && npm install && npm test        # 59 passing
 ```
 
-Web tests (`cd web && npm test`, node:test via tsx) cover the permission engine, the Cleanverse module, authorization (cross-owner calls, delegations, invalid keys), atomic budgets, idempotency, reputation farming and wallet binding against a throwaway database. `npm test` at the root also runs the SDK's contract tests. The end-to-end proof on a local chain is `web/scripts/live-smoke.mjs` (44 checks) and `examples/sdk-consumer`.
+Web tests (`cd web && npm test`, node:test via tsx) cover the permission engine, the Cleanverse module, authorization (cross-owner calls, delegations, invalid keys), atomic budgets, idempotency, reputation farming and wallet binding against a throwaway database. `npm test` at the root also runs the SDK's contract tests. The end-to-end proof on a local chain is `web/scripts/live-smoke.mjs` (45 checks) and `examples/sdk-consumer`.
 
 Without a deployment the web app runs in **mock settlement** mode: every decision is still hashed and gets a deterministic receipt, so the full flow works offline. To anchor real transactions, see the next section.
 
