@@ -5,11 +5,9 @@ import { KeyRound } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardTitle, Mono, Pill } from "@/components/bits";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, useJson } from "@/lib/client";
+import { useJson } from "@/lib/client";
 import type { OwnerAction, OwnerActionsView } from "@/lib/services/owner-actions";
-
-type Eip1193 = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
-const DYNAMIC_ENABLED = Boolean(process.env.NEXT_PUBLIC_DYNAMIC_ENV_ID);
+import { confirmWhenMined, sendOwnerTx } from "./send-owner-tx";
 
 /**
  * Who controls this identity on-chain, and the registry writes the owner's wallet still has to send.
@@ -24,29 +22,11 @@ export function OwnerActionsCard({ walletVerifiedBy, isDemo }: { walletVerifiedB
     const id = `${action.op}:${action.agentId ?? ""}`;
     setBusy(id);
     try {
-      let hash: string;
-      if (walletVerifiedBy === "dynamic" && DYNAMIC_ENABLED) {
-        const { sendViaDynamic } = await import("@/components/dynamic/dynamic-send");
-        hash = await sendViaDynamic(action.tx.from, action.tx);
-      } else {
-        const eth = (window as unknown as { ethereum?: Eip1193 }).ethereum;
-        if (!eth) throw new Error("No browser wallet found. Use the wallet bound to this identity.");
-        const [account] = (await eth.request({ method: "eth_requestAccounts" })) as string[];
-        if (account.toLowerCase() !== action.tx.from.toLowerCase()) throw new Error(`Switch the wallet to ${action.tx.from}.`);
-        hash = (await eth.request({ method: "eth_sendTransaction", params: [{ from: account, to: action.tx.to, data: action.tx.data, value: "0x0" }] })) as string;
-      }
-      // The server confirms from the chain; retry while the transaction is being mined.
-      for (let i = 0; i < 45; i++) {
-        try {
-          await api("/api/chain/owner-actions", { method: "POST", json: { op: action.op, txHash: hash, agentId: action.agentId } });
-          toast.success(`${action.description}: confirmed on-chain.`);
-          refetch({ silent: true });
-          return;
-        } catch (err) {
-          if (i === 44 || !/not found|could not be found|receipt/i.test((err as Error).message)) throw err;
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-      }
+      const hash = await sendOwnerTx(walletVerifiedBy, action.tx);
+      // The server confirms from the chain (receipt, sender, event), retrying while it is mined.
+      await confirmWhenMined("/api/chain/owner-actions", { op: action.op, txHash: hash, agentId: action.agentId });
+      toast.success(`${action.description}: confirmed on-chain.`);
+      refetch({ silent: true });
     } catch (err) {
       toast.error((err as Error).message);
     } finally {

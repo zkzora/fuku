@@ -95,6 +95,16 @@ model Agent {
   trustScore     Int?
   registeredTx   String?
   registeredMode String?                     // anchored | mock | pending | failed
+  // The agent's own key (lib/agent-keys.ts) and its ERC-8004 registration (lib/erc8004), both optional.
+  agentWallet     String?                    // the agent key's address; its ERC-8004 agentWallet
+  agentKey        String?                    // that key, sealed (AES-256-GCM under FUKU_AGENT_KEY_SECRET)
+  erc8004Id       String?                    // ERC-721 tokenId in the canonical Identity Registry
+  erc8004Registry String?
+  erc8004ChainId  Int?
+  erc8004Owner    String?                    // the owner wallet the NFT was minted to
+  erc8004Uri      String?                    // the agentURI it was registered with
+  erc8004Tx       String?                    // register() transaction
+  erc8004WalletTx String?                    // setAgentWallet() transaction
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

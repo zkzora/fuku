@@ -319,6 +319,36 @@ export interface OwnerActions {
   actions: OwnerAction[];
 }
 
+/**
+ * An agent on the canonical ERC-8004 Identity Registry (Monad testnet): the NFT the owner's wallet
+ * holds, and the agent's own key as its `agentWallet`. `actions` are the transactions the owner's
+ * wallet still has to send (register, then setAgentWallet signed by the agent key).
+ */
+export interface Erc8004Action {
+  op: "erc8004Register" | "erc8004SetAgentWallet";
+  description: string;
+  tx: { chainId: number; from: string; to: string; data: string; value: "0x0" };
+  /** setAgentWallet: unix time after which the agent key's signature is refused; send before it. */
+  deadline?: number;
+}
+
+export interface Erc8004Status {
+  chainId: number;
+  registry: string | null;
+  /** `eip155:{chainId}:{registry}`, the spec's global registry id. */
+  registryId: string | null;
+  reason: "mock-chain" | "unsupported-chain" | "no-owner-wallet" | "agent-keys-not-configured" | "owned-elsewhere" | null;
+  ownerWallet: string | null;
+  agentWallet: string | null;
+  agentId: string | null;
+  agentURI: string;
+  registerTx: string | null;
+  walletTx: string | null;
+  onChain: { owner: string; agentWallet: string; tokenURI: string } | null;
+  complete: boolean;
+  actions: Erc8004Action[];
+}
+
 /** Result of mirroring a kill switch on-chain. `ok: false` means the registries did not follow. */
 export interface ChainSync {
   ok: boolean;
@@ -430,6 +460,20 @@ export class Fuku {
   /** After the owner's wallet mined one of those transactions: Fuku checks it on-chain and records it. */
   confirmOwnerAction(identityId: string, input: { op: OwnerAction["op"]; txHash: string; agentId?: string | null }) {
     return this.request<{ ok: true; op: string; txHash: string; block: number; logIndex: number }>("POST", `/identities/${encodeURIComponent(identityId)}/owner-actions`, input);
+  }
+
+  /**
+   * The agent on the canonical ERC-8004 Identity Registry, and the owner-wallet transactions still
+   * to send. Fetch it right before sending setAgentWallet: the agent key's signature expires within
+   * minutes. Needs agents:manage for the agent's owner.
+   */
+  getErc8004(agentId: string) {
+    return this.request<Erc8004Status>("GET", `/agents/${encodeURIComponent(agentId)}/erc8004`);
+  }
+
+  /** After the owner's wallet mined one of those transactions: Fuku checks it on-chain and records it. */
+  confirmErc8004(agentId: string, input: { op: Erc8004Action["op"]; txHash: string }) {
+    return this.request<{ ok: true; op: string; agentId: string; txHash: string }>("POST", `/agents/${encodeURIComponent(agentId)}/erc8004`, input);
   }
 
   /**

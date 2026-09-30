@@ -385,3 +385,13 @@ describe("revocation is final (server side)", () => {
     }
   });
 });
+
+describe("ERC-8004", () => {
+  it("is not offered on a mocked chain: no registry, nothing prepared", async () => {
+    const ava = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
+    const agent = await m.db.agent.findFirstOrThrow({ where: { identityId: ava.id } });
+    const { erc8004View } = await import("./erc8004");
+    const view = await erc8004View(agent, ava);
+    assert.deepEqual([view.reason, view.actions.length, view.complete, view.agentWallet], ["mock-chain", 0, false, null]);
+  });
+});

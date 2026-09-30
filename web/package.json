@@ -15,7 +15,8 @@
     "cleanverse:setup": "tsx scripts/setup-cleanverse-demo.ts",
     "cleanverse:check": "tsx scripts/cleanverse-check.ts",
     "reconcile": "tsx scripts/reconcile.ts",
-    "adversarial:live": "tsx scripts/adversarial-live.ts"
+    "adversarial:live": "tsx scripts/adversarial-live.ts",
+    "erc8004:register": "tsx scripts/erc8004-register.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
