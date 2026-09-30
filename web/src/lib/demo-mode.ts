@@ -19,3 +19,6 @@ export function safeNextPath(next: string | null | undefined, fallback = "/dashb
 
 /** The seeded demo API key. Accepted only while the demo is enabled. */
 export const DEMO_API_KEY = "fk_live_demo_ava_chen_2026";
+
+/** The seeded demo identity (Ava Chen). It stays custodial on-chain: Fuku's relayer controls it. */
+export const DEMO_IDENTITY_ID = "fuku:id:0x3e91c4d0a71f4b2c9e8d5a6f0c1b2d3e4f5ab7a4";

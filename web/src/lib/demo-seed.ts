@@ -13,9 +13,9 @@ import { privateKeyToAccount } from "viem/accounts";
 import { DEMO_RECIPIENTS, demoOwnerKey, demoOwnerWallet } from "./cleanverse/demo";
 import { signWalletBinding } from "./wallet-binding";
 import { cleanverseChain } from "./cleanverse/mode";
-import { DEMO_API_KEY } from "./demo-mode";
+import { DEMO_API_KEY, DEMO_IDENTITY_ID } from "./demo-mode";
 
-export const DEMO_IDENTITY_ID = "fuku:id:0x3e91c4d0a71f4b2c9e8d5a6f0c1b2d3e4f5ab7a4";
+export { DEMO_IDENTITY_ID };
 export { DEMO_API_KEY };
 
 const TRADING = "fuku:agent:0x7a3f19c0b4d2e6f8a1c3e5b7d9f0a2c4e6b89c21";
@@ -57,6 +57,8 @@ export async function seedDemo(db: PrismaClient) {
       walletAddress: ownerWallet,
       walletVerifiedBy: "signature",
       walletVerifiedAt: issuedAt,
+      // The demo stays custodial: Fuku's relayer is its on-chain controller (labelled in the UI).
+      chainCustody: "relayer",
       walletProof: JSON.stringify(binding),
       proofHash: h("proof:" + DEMO_IDENTITY_ID),
       // Seeded history uses placeholder hashes, never real transactions: marked mock so every view says so.

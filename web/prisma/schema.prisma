@@ -29,6 +29,10 @@ model Identity {
   // Set when an API caller created this identity for one of its users (an explicit, recorded
   // management grant); such identities start unverified.
   managedById   String?
+  // Who controls this identity on-chain: "relayer" (Fuku's key, custodial) or "owner" (the bound
+  // wallet signs registerIdentity / registerAgent / setPolicy / revokePolicy / setStatus itself).
+  // Null until decided: at the first anchoring, from the bound wallet (see lib/custody.ts).
+  chainCustody  String?
   createdAt     DateTime @default(now())
 
   passkeys       Passkey[]

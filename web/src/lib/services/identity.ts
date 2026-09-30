@@ -2,13 +2,18 @@ import type { Identity } from "@prisma/client";
 import { isAddress, sha256, stringToHex, type Hex } from "viem";
 import { db } from "../db";
 import { newIdentityId, hashJson, randomToken } from "../ids";
-import { anchorIdentity, anchorStateOf, chainConfig, chainReader } from "../chain";
+import { chainConfig, chainReader } from "../chain";
 import { RequestError } from "../errors";
 import { consumeChallenge, storeChallenge } from "../webauthn";
 import { parseWalletBindingMessage, verifyWalletSignature, walletBindingMessage } from "../wallet-binding";
 import { storedAPass } from "./cleanverse";
 import { DEMO_API_KEY, demoEnabled } from "../demo-mode";
 
+/**
+ * Create a Fuku identity. Nothing is sent on-chain here: anchoring waits for the identity's first
+ * write, so an owner who binds a wallet first can register it from that wallet (owner custody; see
+ * lib/custody.ts). Identities without a bound wallet are anchored lazily by the relayer.
+ */
 export async function createIdentity(input: {
   displayName: string;
   authMethod: "passkey" | "wallet" | "demo" | "dynamic";
@@ -23,7 +28,6 @@ export async function createIdentity(input: {
 }) {
   const id = newIdentityId();
   const proofHash = hashJson({ id, key: input.passkeyPubKeyHash ?? input.walletAddress ?? null, at: Date.now() });
-  const receipt = await anchorIdentity(id, input.passkeyPubKeyHash ?? proofHash, proofHash, input.humanVerified);
   const identity = await db.identity.create({
     data: {
       id,
@@ -36,12 +40,11 @@ export async function createIdentity(input: {
       walletProof: input.walletAddress && input.walletVerifiedBy ? (input.walletProof ?? null) : null,
       managedById: input.managedById ?? null,
       proofHash,
-      proofTxHash: receipt.txHash,
-      proofBlock: receipt.block,
-      proofMode: anchorStateOf(receipt),
+      proofMode: "deferred",
     },
   });
-  return { identity, receipt };
+  // No receipt: the identity is anchored on its first on-chain write (see the doc comment).
+  return { identity, receipt: null };
 }
 
 export function hashApiKey(raw: string): string {

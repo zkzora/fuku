@@ -46,6 +46,7 @@ import {
   BaseError,
   ContractFunctionRevertedError,
   createPublicClient,
+  createWalletClient,
   decodeEventLog,
   formatUnits,
   http,
@@ -600,6 +601,100 @@ function runReconcile() {
   return out.trim().split("\n").pop();
 }
 
+// --- Owner custody: the owner's wallet, not the relayer, controls the identity on-chain -------
+
+async function v1(method, route, body) {
+  return api(method, `/api/v1${route}`, body, { authorization: `Bearer ${process.env.SMOKE_API_KEY ?? "fk_live_demo_ava_chen_2026"}` });
+}
+
+async function ownerCustodySmoke(publicClient, addresses) {
+  const ownerKey = process.env.SMOKE_OWNER_PRIVATE_KEY?.trim();
+  console.log("\nOwner custody (owner-signed registry writes):");
+  if (!ownerKey) {
+    console.log("   skipped: set SMOKE_OWNER_PRIVATE_KEY to a funded key (Hardhat account #3 locally)");
+    return;
+  }
+  const owner = privateKeyToAccount(ownerKey.startsWith("0x") ? ownerKey : `0x${ownerKey}`);
+  const wallet = createWalletClient({ account: owner, transport: http(RPC_URL), chain: { id: await publicClient.getChainId(), name: "smoke", nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [RPC_URL] } } } });
+  const identityAbi = loadAbi("HumanIdentityRegistry");
+  const agentAbi = loadAbi("AgentRegistry");
+  const permAbi = loadAbi("PermissionRegistry");
+  const integrations = await api("GET", "/api/integrations");
+  const relayer = integrations.json?.chain?.signer;
+
+  // 1. an identity for one of the app's users, with a wallet bound by signature
+  const created = await v1("POST", "/identities", { displayName: `Owner custody ${Date.now()}`, walletAddress: owner.address });
+  const identityId = created.json?.identity?.id;
+  check("create an identity via the API (not anchored at creation)", created.status === 201 && identityId && created.json.receipt === null, identityId ?? JSON.stringify(created.json).slice(0, 120));
+  if (!identityId) return;
+  const ch = await v1("POST", `/identities/${encodeURIComponent(identityId)}/wallet`, { wallet: owner.address });
+  const signature = await owner.signMessage({ message: ch.json.message });
+  const bound = await v1("PUT", `/identities/${encodeURIComponent(identityId)}/wallet`, { challengeId: ch.json.challengeId, signature });
+  check("bind the owner wallet with a signed challenge", bound.json?.identity?.walletVerifiedBy === "signature", bound.json?.identity?.walletAddress);
+
+  // 2. the relayer does not anchor anything for it
+  const reg = await v1("POST", "/agents", { name: "Owner-signed agent", capabilities: ["read_balances"], ownerIdentityId: identityId });
+  const agentId = reg.json?.agent?.id;
+  check("registering an agent returns awaiting-owner (the relayer sends nothing)", reg.status === 201 && reg.json?.receipt?.status === "awaiting-owner", reg.json?.receipt?.status);
+  const pol = await v1("PUT", `/agents/${encodeURIComponent(agentId)}/permissions`, { allowed: [{ action: "read_balances" }], blocked: ["withdraw"], scopeApps: [] });
+  check("approving its passport returns awaiting-owner", pol.status === 200 && pol.json?.receipt?.status === "awaiting-owner", pol.json?.receipt?.status);
+
+  // 3. the owner's wallet sends what Fuku prepared; Fuku confirms from the chain
+  const pending = await v1("GET", `/identities/${encodeURIComponent(identityId)}/owner-actions`);
+  const ops = (pending.json?.actions ?? []).map((a) => a.op);
+  check("Fuku lists the owner's pending writes", JSON.stringify(ops) === JSON.stringify(["registerIdentity", "registerAgent", "setPolicy"]), ops.join(", "));
+  for (const action of pending.json?.actions ?? []) {
+    const hash = await wallet.sendTransaction({ to: action.tx.to, data: action.tx.data });
+    const rc = await publicClient.waitForTransactionReceipt({ hash });
+    const conf = await v1("POST", `/identities/${encodeURIComponent(identityId)}/owner-actions`, { op: action.op, txHash: hash, agentId: action.agentId });
+    check(`owner-signed ${action.op} mined and confirmed by Fuku`, rc.status === "success" && conf.json?.ok === true, `tx ${short(hash)} log #${conf.json?.logIndex ?? "?"} ${conf.json?.error ?? ""}`);
+    ownerTxs.push({ op: action.op, hash });
+  }
+
+  // 4. independent reads: the controller is the owner's wallet; the relayer lost control
+  const identityKey = idToBytes32(identityId);
+  const agentKey = idToBytes32(agentId);
+  const controller = await publicClient.readContract({ address: addresses.identity, abi: identityAbi, functionName: "controllerOf", args: [identityKey] });
+  check("HumanIdentityRegistry.controllerOf(identity) is the owner's wallet", controller.toLowerCase() === owner.address.toLowerCase(), controller);
+  const [ownerCtl, relayerCtl] = await Promise.all([
+    publicClient.readContract({ address: addresses.agents, abi: agentAbi, functionName: "isOwnerController", args: [agentKey, owner.address] }),
+    relayer ? publicClient.readContract({ address: addresses.agents, abi: agentAbi, functionName: "isOwnerController", args: [agentKey, relayer] }) : Promise.resolve(null),
+  ]);
+  check("AgentRegistry: the owner controls the agent, the relayer does not", ownerCtl === true && relayerCtl === false, `owner ${ownerCtl}, relayer ${relayerCtl} (${relayer})`);
+  const tryAs = async (address, abi, functionName, args) => {
+    try {
+      await publicClient.simulateContract({ address, abi, functionName, args, account: relayer });
+      return "ok";
+    } catch (err) {
+      return revertName(err);
+    }
+  };
+  check("the relayer cannot revoke the passport on-chain (NotAgentOwner)", (await tryAs(addresses.permissions, permAbi, "revokePolicy", [agentKey])) === "NotAgentOwner");
+  check("the relayer cannot pause the agent on-chain (NotIdentityController)", (await tryAs(addresses.agents, agentAbi, "setStatus", [agentKey, 2])) === "NotIdentityController");
+
+  // 5. the relayer still records decisions for it (enforcer), and revoke needs the owner
+  const act = await v1("POST", `/agents/${encodeURIComponent(agentId)}/execute`, { action: "read_balances" });
+  check("a decision for the owner's agent is anchored by the relayer as enforcer", act.json?.receipt?.status === "confirmed", fmtReceipt(act.json?.receipt));
+  const rev = await v1("DELETE", `/agents/${encodeURIComponent(agentId)}/permissions`);
+  const revReceipt = rev.json?.chainSync?.receipts?.find((r) => r.op === "revokePolicy");
+  check("revoking in Fuku asks the owner to sign revokePolicy (awaiting-owner)", revReceipt?.status === "awaiting-owner", JSON.stringify(rev.json?.chainSync).slice(0, 120));
+  const pending2 = await v1("GET", `/identities/${encodeURIComponent(identityId)}/owner-actions`);
+  const revokeAction = pending2.json?.actions?.find((a) => a.op === "revokePolicy");
+  if (revokeAction) {
+    const hash = await wallet.sendTransaction({ to: revokeAction.tx.to, data: revokeAction.tx.data });
+    await publicClient.waitForTransactionReceipt({ hash });
+    const conf = await v1("POST", `/identities/${encodeURIComponent(identityId)}/owner-actions`, { op: "revokePolicy", txHash: hash, agentId });
+    const [, , , active] = await publicClient.readContract({ address: addresses.permissions, abi: permAbi, functionName: "policies", args: [agentKey] });
+    check("the owner's revokePolicy is mined, confirmed, and the policy is inactive on-chain", conf.json?.ok === true && active === false, `tx ${short(hash)}`);
+    ownerTxs.push({ op: "revokePolicy", hash });
+  } else {
+    check("the owner's revokePolicy is mined, confirmed, and the policy is inactive on-chain", false, "no revokePolicy action listed");
+  }
+  console.log(`   owner ${owner.address}; identity ${identityId}; agent ${agentId}`);
+  for (const t of ownerTxs) console.log(`   ${t.op.padEnd(16)} ${t.hash}`);
+}
+const ownerTxs = [];
+
 main()
   .then(async () => {
     const cv = loadCleanverse();
@@ -609,6 +704,10 @@ main()
     }
     const publicClient = createPublicClient({ transport: http(RPC_URL) });
     await cleanverseSmoke(publicClient, loadAddresses(), cv).catch((err) => check("Cleanverse section completed", false, err.stack ?? String(err)));
+  })
+  .then(async () => {
+    const publicClient = createPublicClient({ transport: http(RPC_URL) });
+    await ownerCustodySmoke(publicClient, loadAddresses()).catch((err) => check("Owner custody section completed", false, err.stack ?? String(err)));
   })
   .then(() => process.exit(printTable() ? 0 : 1))
   .catch((err) => {

@@ -1,6 +1,7 @@
 import type { Agent, Identity, Policy, ReputationEvent } from "@prisma/client";
 import { db } from "../db";
 import { apassEligibleFor } from "./cleanverse";
+import { custodyFor } from "../custody";
 import { newAgentId, hashJson } from "../ids";
 import { parsePolicy, policyHashDoc, writablePolicySchema, type PolicyDoc } from "../engine/policy";
 import { utcDayStart } from "../engine/permission";
@@ -111,7 +112,14 @@ export async function registerAgent(
   const id = newAgentId();
   const receipt = await registerAgentOnChain({
     id,
-    identity: { id: identity.id, humanVerified: identity.humanVerified, proofHash: identity.proofHash },
+    identity: {
+      id: identity.id,
+      humanVerified: identity.humanVerified,
+      proofHash: identity.proofHash,
+      // Owner-controlled identities are registered by their owner's wallet, never by the relayer.
+      custody: custodyFor(identity),
+      wallet: identity.walletVerifiedBy ? identity.walletAddress : null,
+    },
     name: input.name,
     version: input.version ?? "1.0",
     capabilities: input.capabilities,

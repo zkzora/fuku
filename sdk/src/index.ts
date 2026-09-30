@@ -64,12 +64,14 @@ export interface Agent {
 /**
  * confirmed: mined (live). pending: broadcast, receipt not seen yet. failed: nothing anchored
  * (live). simulated: a mock receipt from a mock-chain deployment, with no transaction behind it.
+ * awaiting-owner: the identity is owner-controlled; its owner's wallet must send this write
+ * (see getOwnerActions), Fuku sent nothing.
  */
 export interface Receipt {
   txHash: string | null;
   block: number | null;
   mode: "live" | "mock";
-  status: "confirmed" | "pending" | "failed" | "simulated";
+  status: "confirmed" | "pending" | "failed" | "simulated" | "awaiting-owner";
   chainId: number;
   explorerUrl: string | null;
   note?: string;
@@ -302,6 +304,21 @@ export interface Mandate {
   active: boolean;
 }
 
+export interface OwnerAction {
+  op: "registerIdentity" | "registerAgent" | "setPolicy" | "revokePolicy" | "setStatus";
+  agentId: string | null;
+  description: string;
+  tx: { chainId: number; from: string; to: string; data: string; value: "0x0" };
+}
+
+export interface OwnerActions {
+  custody: "relayer" | "owner";
+  wallet: string | null;
+  controller: string | null;
+  reason: "mock-chain" | "custodial" | "no-wallet" | null;
+  actions: OwnerAction[];
+}
+
 /** Result of mirroring a kill switch on-chain. `ok: false` means the registries did not follow. */
 export interface ChainSync {
   ok: boolean;
@@ -388,7 +405,31 @@ export class Fuku {
    * as managed by your API identity, which lets you register and run agents for it.
    */
   createIdentity(input: { displayName: string; walletAddress?: string }) {
-    return this.request<{ identity: Identity; receipt: Receipt }>("POST", "/identities", input);
+    // Nothing is anchored at creation: an owner who binds a wallet first registers it themselves.
+    return this.request<{ identity: Identity; receipt: null }>("POST", "/identities", input);
+  }
+
+  /** Start binding a wallet to an identity: sign the returned message with that wallet. */
+  walletChallenge(identityId: string, wallet: string) {
+    return this.request<{ challengeId: string; message: string; expiresAt: string }>("POST", `/identities/${encodeURIComponent(identityId)}/wallet`, { wallet });
+  }
+
+  /** Finish the binding with the wallet's signature over the challenge message. */
+  bindWallet(identityId: string, input: { challengeId: string; signature: string }) {
+    return this.request<{ identity: { id: string; walletAddress: string; walletVerifiedBy: string } }>("PUT", `/identities/${encodeURIComponent(identityId)}/wallet`, input);
+  }
+
+  /**
+   * For an owner-controlled identity: the registry writes its owner's wallet still has to send,
+   * with prepared calldata (`tx.to`, `tx.data`). Fuku never signs them.
+   */
+  getOwnerActions(identityId: string) {
+    return this.request<OwnerActions>("GET", `/identities/${encodeURIComponent(identityId)}/owner-actions`);
+  }
+
+  /** After the owner's wallet mined one of those transactions: Fuku checks it on-chain and records it. */
+  confirmOwnerAction(identityId: string, input: { op: OwnerAction["op"]; txHash: string; agentId?: string | null }) {
+    return this.request<{ ok: true; op: string; txHash: string; block: number; logIndex: number }>("POST", `/identities/${encodeURIComponent(identityId)}/owner-actions`, input);
   }
 
   /**

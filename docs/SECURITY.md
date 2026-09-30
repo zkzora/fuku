@@ -7,6 +7,7 @@ Checked against the code on 2026-09-30 (branch `feat/cleanverse-cvi-cva`). Where
 | Claim | Enforced by | Evidence a third party can check |
 | --- | --- | --- |
 | Only the owner (or someone the owner delegated to) can register, change, run or revoke an agent | `web/src/lib/services/authz.ts`, used by every web, SDK and CRE route | 403 responses; `Delegation` rows |
+| For an owner-controlled identity, only the owner's wallet can register the identity and its agents, anchor or revoke passports, and pause agents | The registries (`controllerOf` checks); Fuku only prepares calldata and confirms | `controllerOf(identity)` = the owner's wallet; relayer calls revert `NotAgentOwner` / `NotIdentityController` |
 | A value action needs a passkey-verified owner, a complete request and a daily limit | Engine rules R11, R12 (`web/src/lib/engine/permission.ts`) | The decision, rule id and proof hash anchored with `recordDecision` |
 | An A-Token transfer needs the asset rule, the owner's A-Pass and the recipient's A-Pass | Engine rules R9, R7, R8 plus Cleanverse evidence (`complianceRef`) | `complianceRef` in the attestation and in `GuardedTransferExecuted` |
 | A transfer moves only what the owner authorised: token, daily cap, per-transfer limit, expiry, approved payees, active agent, current passport | `FukuSpendGuard.execute` on-chain | The mandate (`mandates()`), `MandateOpened` and `PayeeSet` events |
@@ -127,7 +128,11 @@ Rules that follow from the lifecycle:
 
 ## 6. Remaining trust assumptions and admin powers
 
-1. **The relayer key** (`DEPLOYER_PRIVATE_KEY`) owns the four registries and is the on-chain controller of every identity (`HumanIdentityRegistry` sets the controller to `msg.sender`). It is also the enforcer and the scorer, and it sets the human-verified flag. It can therefore record any decision or score for any agent. Moving identity control to the owner's own key requires redeploying the registries, which is not done: see the open decision in the final report.
+1. **The relayer key** (`DEPLOYER_PRIVATE_KEY`) owns the four registries.
+   - It is the on-chain controller of every **custodial** identity: the seeded demo, identities without a bound wallet, and identities it registered before custody existed.
+   - For **owner-controlled** identities (a wallet bound before the first on-chain write), the owner's wallet is the controller. The relayer cannot register, re-anchor, revoke or pause for them; see `docs/MIGRATION.md`.
+   - For every identity it remains the enforcer and the scorer, and it sets the passkey flag. It can therefore still record decisions and scores for any agent.
+   - For owner-controlled agents, Fuku's kill switch acts off-chain immediately. The on-chain revoke or pause waits for the owner's signature, and `closeMandate` from the owner's wallet stops transfers too.
 2. **The compliance signer** (`FUKU_COMPLIANCE_SIGNER_KEY`) can attest any transfer that fits a mandate the owner opened, for an active agent whose on-chain passport hash matches. It cannot exceed the owner's token, cap, per-transfer limit, expiry or payee list.
 3. **The guard's owner** can rotate the compliance signer. The simulator contracts' owner issues simulator A-Passes and mints `aUSDC-SIM`; they are not Cleanverse.
 4. **The engine and database.** The passport's allowed actions, app scope and off-chain limits, and the reputation ledger, live in Fuku's database and are enforced by Fuku's server. On-chain commitments prove the integrity of a recorded decision, not that an AUTHORIZED action was executed or executed correctly.

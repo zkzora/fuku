@@ -26,6 +26,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { idToBytes32, hashJson, hashString } from "../ids";
 import { db } from "../db";
 import { policyHashDoc } from "../engine/policy";
+import { custodyFor, type Custody } from "../custody";
 import {
   AgentRegistryAbi,
   FukuSpendGuardAbi,
@@ -108,9 +109,10 @@ export type ChainMode = "live" | "mock";
 /**
  * confirmed: mined successfully (live). pending: broadcast, receipt not seen yet; reconciliation
  * settles it. failed: nothing was anchored (live). simulated: a mock receipt (mock mode only).
- * A live failure is never dressed up as a mock receipt.
+ * awaiting-owner: the identity is owner-controlled and this write must be signed by the owner's
+ * wallet (see lib/custody.ts); nothing was sent. A live failure is never dressed up as a mock receipt.
  */
-export type ReceiptStatus = "confirmed" | "pending" | "failed" | "simulated";
+export type ReceiptStatus = "confirmed" | "pending" | "failed" | "simulated" | "awaiting-owner";
 
 export interface ChainReceipt {
   txHash: Hex | null;
@@ -123,7 +125,7 @@ export interface ChainReceipt {
 }
 
 /** How a write should be recorded on its row: live-anchored, mock, pending or failed. */
-export function anchorStateOf(r: ChainReceipt | null): "anchored" | "mock" | "pending" | "failed" {
+export function anchorStateOf(r: ChainReceipt | null): "anchored" | "mock" | "pending" | "failed" | "awaiting-owner" {
   if (!r) return "failed";
   return r.status === "confirmed" ? "anchored" : r.status === "simulated" ? "mock" : r.status;
 }
@@ -132,6 +134,10 @@ export function anchorStateOf(r: ChainReceipt | null): "anchored" | "mock" | "pe
 export interface IdentityRef {
   id: string;
   humanVerified: boolean;
+  /** Who controls the identity on-chain; owner-controlled identities are never anchored by the relayer. */
+  custody?: Custody;
+  /** The bound owner wallet (the controller when custody is "owner"). */
+  wallet?: string | null;
   /** keccak256 ownership proof stored on the Identity row (falls back to a hash of the id). */
   proofHash?: string | null;
   passkeyPubKeyHash?: Hex | null;
@@ -157,7 +163,14 @@ export function toAgentRef(
     capabilities: string | string[];
     policy?: { allowed: string; blocked: string; scopeApps: string; assets?: string | null; version: number; active: boolean } | null;
   },
-  identity: { id: string; humanVerified: boolean; proofHash?: string | null },
+  identity: {
+    id: string;
+    humanVerified: boolean;
+    proofHash?: string | null;
+    walletAddress?: string | null;
+    walletVerifiedBy?: string | null;
+    chainCustody?: string | null;
+  },
 ): AgentRef {
   let policy: AgentRef["policy"] = null;
   if (agent.policy) {
@@ -192,7 +205,13 @@ export function toAgentRef(
     name: agent.name,
     version: agent.version,
     capabilities,
-    identity: { id: identity.id, humanVerified: identity.humanVerified, proofHash: identity.proofHash ?? null },
+    identity: {
+      id: identity.id,
+      humanVerified: identity.humanVerified,
+      proofHash: identity.proofHash ?? null,
+      custody: custodyFor(identity),
+      wallet: identity.walletVerifiedBy ? (identity.walletAddress ?? null) : null,
+    },
     policy,
   };
 }
@@ -419,7 +438,28 @@ function proofHashOf(identity: IdentityRef): Hex {
   return p && isHex(p) && p.length === 66 ? (p as Hex) : hashString(identity.id);
 }
 
-/** Register the identity on-chain if it is missing; sync the human-verified flag. Idempotent. */
+/**
+ * An owner-controlled identity needs its owner's wallet for this write; the relayer does not send
+ * it. Surfaced as an `awaiting-owner` receipt (or an R10 rejection for a guarded transfer).
+ */
+export class OwnerSignatureRequired extends Error {
+  constructor(
+    readonly op: "registerIdentity" | "registerAgent" | "setPolicy" | "revokePolicy" | "setStatus",
+    readonly subject: string,
+  ) {
+    super(`${op} for ${subject} must be signed by the owner's wallet`);
+    this.name = "OwnerSignatureRequired";
+  }
+}
+
+async function rememberCustody(identityId: string, custody: Custody) {
+  await db.identity.updateMany({ where: { id: identityId, chainCustody: null }, data: { chainCustody: custody } }).catch(() => undefined);
+}
+
+/**
+ * Register the identity on-chain if it is missing; sync the human-verified flag. Idempotent.
+ * Owner-controlled identities are never registered by the relayer: their owner's wallet must.
+ */
 async function ensureIdentityOnChain(ctx: LiveCtx, identity: IdentityRef): Promise<void> {
   const key = idToBytes32(identity.id);
   const [controller, , , , humanVerified] = await ctx.publicClient.readContract({
@@ -429,6 +469,7 @@ async function ensureIdentityOnChain(ctx: LiveCtx, identity: IdentityRef): Promi
     args: [key],
   });
 
+  if (controller === zeroAddress && identity.custody === "owner") throw new OwnerSignatureRequired("registerIdentity", identity.id);
   if (controller === zeroAddress) {
     const proofHash = proofHashOf(identity);
     await write(ctx, "registerIdentity", {
@@ -438,16 +479,17 @@ async function ensureIdentityOnChain(ctx: LiveCtx, identity: IdentityRef): Promi
       args: [key, identity.passkeyPubKeyHash ?? proofHash, proofHash],
     });
     ctx.notes.push(`identity ${identity.id} anchored`);
+    await rememberCustody(identity.id, "relayer");
     if (identity.humanVerified) await markHumanVerified(ctx, identity, key);
     return;
   }
 
   if (!isAddressEqual(controller, ctx.account.address)) {
-    console.warn(
-      `[fuku-chain] identity ${identity.id} is controlled on-chain by ${controller}, not by the signer ${ctx.account.address}; owner-only writes will revert`,
-    );
+    // Owner-controlled (or foreign). The relayer may still attest the passkey flag as registry owner.
+    if (identity.custody === "owner" && identity.humanVerified && !humanVerified) await markHumanVerified(ctx, identity, key);
     return;
   }
+  await rememberCustody(identity.id, "relayer");
   if (identity.humanVerified && !humanVerified) await markHumanVerified(ctx, identity, key);
 }
 
@@ -496,6 +538,7 @@ async function ensureAgentOnChain(ctx: LiveCtx, agent: AgentRef, opts: { syncPol
   });
   if (!exists) {
     await ensureIdentityOnChain(ctx, agent.identity);
+    if (agent.identity.custody === "owner") throw new OwnerSignatureRequired("registerAgent", agent.id);
     await write(ctx, "registerAgent", registerAgentCall(ctx, agent));
     ctx.notes.push(`agent ${agent.id} anchored`);
   }
@@ -516,6 +559,7 @@ async function ensurePolicyOnChain(ctx: LiveCtx, agent: AgentRef): Promise<void>
     args: [idToBytes32(agent.id)],
   });
   if (active && onChainHash.toLowerCase() === expected.toLowerCase()) return;
+  if (agent.identity.custody === "owner") throw new OwnerSignatureRequired("setPolicy", agent.id);
   await write(ctx, "setPolicy", {
     address: ctx.addresses.permissions,
     abi: PermissionRegistryAbi,
@@ -586,6 +630,18 @@ function liveReceipt(c: ChainConfig, mined: Mined, ctx: LiveCtx): ChainReceipt {
   };
 }
 
+function awaitingOwnerReceipt(c: ChainConfig, err: OwnerSignatureRequired): ChainReceipt {
+  return {
+    txHash: null,
+    block: null,
+    mode: "live",
+    status: "awaiting-owner",
+    chainId: c.id,
+    explorerUrl: null,
+    note: `${err.op} must be signed by the owner's wallet (owner-controlled identity); nothing was sent by Fuku.`,
+  };
+}
+
 function pendingReceipt(c: ChainConfig, hash: Hex): ChainReceipt {
   return {
     txHash: hash,
@@ -619,6 +675,7 @@ async function send(
     return liveReceipt(c, mined, ctx);
   } catch (err) {
     if (err instanceof ReceiptTimeoutError && err.label === op) return pendingReceipt(c, err.hash);
+    if (err instanceof OwnerSignatureRequired) return awaitingOwnerReceipt(c, err);
     const reason = describeChainError(err);
     noteHealth(false, op, reason);
     console.error(`[fuku-chain] ${op} failed on ${c.name} (chain ${c.id}). Reason: ${reason}`);
@@ -647,6 +704,7 @@ async function sendStrict(op: string, payload: unknown, run: (ctx: LiveCtx) => P
     mined = await serialized(() => run(ctx));
   } catch (err) {
     if (err instanceof ReceiptTimeoutError && err.label === op) return pendingReceipt(c, err.hash);
+    if (err instanceof OwnerSignatureRequired) return awaitingOwnerReceipt(c, err);
     noteHealth(false, op, describeChainError(err));
     throw new ChainWriteError(op, describeChainError(err), err);
   }
@@ -681,6 +739,7 @@ export function revokePolicyOnChain(agent: AgentRef) {
       args: [key],
     });
     if (!active) return null;
+    if (agent.identity.custody === "owner") throw new OwnerSignatureRequired("revokePolicy", agent.id);
     return write(ctx, "revokePolicy", { address: ctx.addresses.permissions, abi: PermissionRegistryAbi, functionName: "revokePolicy", args: [key] });
   });
 }
@@ -702,6 +761,7 @@ export function setAgentStatusOnChain(agent: AgentRef, status: "active" | "pause
       args: [key],
     })) as readonly unknown[];
     if (Number(record[5]) === code) return null;
+    if (agent.identity.custody === "owner") throw new OwnerSignatureRequired("setStatus", agent.id);
     return write(ctx, "setStatus", { address: ctx.addresses.agents, abi: AgentRegistryAbi, functionName: "setStatus", args: [key, code] });
   });
 }
@@ -908,6 +968,7 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
         message: transfer,
       });
     } catch (err) {
+      if (err instanceof OwnerSignatureRequired) return { status: "rejected", reason: `OWNER_SIGNATURE_REQUIRED(${err.op})` };
       throw new ChainWriteError("guardedTransfer", describeChainError(err), err);
     }
 
@@ -1028,6 +1089,29 @@ export async function readAgentOnChain(agentId: string): Promise<AgentOnChain | 
     client.readContract({ address: a.permissions, abi: PermissionRegistryAbi, functionName: "policies", args: [key] }),
   ]);
   return { exists: true, status: Number(record[5]), policyHash: policy[0], policyVersion: Number(policy[1]), policyActive: policy[3] };
+}
+
+/** The four registry addresses (null when not configured). */
+export function registryAddresses() {
+  return addresses();
+}
+
+/** The relayer's address (the live signer), or null in mock mode. */
+export function relayerAddress(): Address | null {
+  const key = signerKey();
+  return chainMode() === "live" && key ? privateKeyToAccount(key).address : null;
+}
+
+/** The relayer attests the passkey flag for an identity (it is the registry owner). */
+export function setHumanVerifiedOnChain(identityId: string) {
+  return send("setHumanVerified", { identityId }, async (ctx, onSubmitted) =>
+    write(
+      ctx,
+      "setHumanVerified",
+      { address: ctx.addresses.identity, abi: HumanIdentityRegistryAbi, functionName: "setHumanVerified", args: [idToBytes32(identityId), true] },
+      onSubmitted,
+    ),
+  );
 }
 
 export async function latestBlock(): Promise<bigint | null> {

@@ -8,6 +8,8 @@ import { Card, CardTitle, Mono, PageHeader, Pill, Row, StatusPill } from "@/comp
 import { IdentityCard } from "@/components/app/identity-card";
 import { APassCard } from "@/components/app/apass-card";
 import { VerificationCard } from "@/components/app/verification-card";
+import { OwnerActionsCard } from "@/components/app/owner-actions-card";
+import { DEMO_IDENTITY_ID } from "@/lib/demo-mode";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, useJson } from "@/lib/client";
 import { fmtDate } from "@/lib/format";
@@ -32,6 +34,7 @@ interface IdentityData {
     proofTxHash: string | null;
     proofBlock: number | null;
     walletAddress: string | null;
+    walletVerifiedBy?: string | null;
     dynamicUserId: string | null;
     email: string | null;
     createdAt: string;
@@ -174,6 +177,7 @@ export default function IdentityPage() {
 
         <div className="space-y-4">
           <VerificationCard verification={data.verification} onChanged={() => refetch({ silent: true })} />
+          <OwnerActionsCard walletVerifiedBy={data.identity.walletVerifiedBy ?? null} isDemo={data.identity.id === DEMO_IDENTITY_ID} />
           <APassCard
             apass={data.apass}
             onChanged={() => refetch({ silent: true })}

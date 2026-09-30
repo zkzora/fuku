@@ -99,7 +99,9 @@ export async function reconcile(opts: { agentId?: string; identityId?: string; a
 
   // 3. decision anchors that failed or are pending
   const anchors = await db.agentAction.findMany({
-    where: { ...scope, anchorStatus: { in: ["failed", "pending"] }, NOT: { status: { in: ["SUBMITTED", "PENDING", "CONFIRMED"] } } },
+    // awaiting-owner: an owner-controlled agent that was not registered yet; retried at no cost (no tx
+    // is sent until the owner has registered it).
+    where: { ...scope, anchorStatus: { in: ["failed", "pending", "awaiting-owner"] }, NOT: { status: { in: ["SUBMITTED", "PENDING", "CONFIRMED"] } } },
     include,
     take,
   });
