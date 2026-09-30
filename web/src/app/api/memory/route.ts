@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { json, withSession } from "@/lib/api";
+import { assertVaultWritable, vaultStateOf } from "@/lib/services/vault";
 
 const body = z.object({
   category: z.enum(["preferences", "knowledge", "workflow", "rules"]),
@@ -18,6 +19,7 @@ export const GET = withSession(async (_req, identity) => {
   ]);
   return json({
     identityId: identity.id,
+    vault: vaultStateOf(identity),
     items,
     requests,
     approvedApps: apps
@@ -28,6 +30,7 @@ export const GET = withSession(async (_req, identity) => {
 
 export const POST = withSession(async (req, identity) => {
   const input = body.parse(await req.json());
+  assertVaultWritable(identity);
   const item = await db.memoryItem.create({ data: { identityId: identity.id, ...input } });
   return json({ item }, { status: 201 });
 });

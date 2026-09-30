@@ -6,10 +6,16 @@ import { ExternalLink, Wallet } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardTitle, Mono, PageHeader, Pill, Row, StatusPill } from "@/components/bits";
 import { IdentityCard } from "@/components/app/identity-card";
+import { APassCard } from "@/components/app/apass-card";
+import { VerificationCard } from "@/components/app/verification-card";
+import { OwnerActionsCard } from "@/components/app/owner-actions-card";
+import { DEMO_IDENTITY_ID } from "@/lib/demo-mode";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, useJson } from "@/lib/client";
 import { fmtDate } from "@/lib/format";
 import { shortHex } from "@/lib/ids";
+import type { APassView } from "@/lib/services/cleanverse";
+import type { VerificationStatus } from "@/lib/services/identity";
 
 const DynamicLogin = dynamic(() => import("@/components/dynamic/dynamic-login"), {
   ssr: false,
@@ -28,6 +34,7 @@ interface IdentityData {
     proofTxHash: string | null;
     proofBlock: number | null;
     walletAddress: string | null;
+    walletVerifiedBy?: string | null;
     dynamicUserId: string | null;
     email: string | null;
     createdAt: string;
@@ -36,7 +43,8 @@ interface IdentityData {
   chain: { mode: string; explorer: string; network: string };
   passkeys: { id: string; label: string; deviceType: string; backedUp: boolean; createdAt: string }[];
   connectedApps: { id: string; name: string; scopes: string[]; status: string; connectedAt: string }[];
-  credentials: { id: string; issuer: string; kind: string; status: string; validUntil: string | null }[];
+  apass: APassView;
+  verification: VerificationStatus;
   accessRequests: { id: string; app: string; resource: string; status: string; createdAt: string }[];
 }
 
@@ -60,7 +68,7 @@ export default function IdentityPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Identity" subtitle="The verified human behind your agents." />
+      <PageHeader title="Identity" subtitle="The passkey-verified owner behind your agents." />
       <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
         <div className="space-y-4">
           <IdentityCard identity={data.identity} passkeyLabel={data.passkeys[0]?.label} />
@@ -168,25 +176,13 @@ export default function IdentityPage() {
         </div>
 
         <div className="space-y-4">
-          <Card>
-            <CardTitle>Credentials</CardTitle>
-            {data.credentials.length === 0 ? (
-              <p className="text-[13.5px] text-ink-3">No credentials attached.</p>
-            ) : (
-              data.credentials.map((c) => (
-                <div key={c.id} className="flex items-center justify-between py-1">
-                  <div>
-                    <div className="text-[14px] font-medium text-ink">{c.kind}</div>
-                    <div className="text-[12.5px] text-ink-3">
-                      Issued by {c.issuer}
-                      {c.validUntil ? ` · valid to ${fmtDate(c.validUntil, { day: undefined })}` : ""}
-                    </div>
-                  </div>
-                  <StatusPill status={c.status} />
-                </div>
-              ))
-            )}
-          </Card>
+          <VerificationCard verification={data.verification} onChanged={() => refetch({ silent: true })} />
+          <OwnerActionsCard walletVerifiedBy={data.identity.walletVerifiedBy ?? null} isDemo={data.identity.id === DEMO_IDENTITY_ID} />
+          <APassCard
+            apass={data.apass}
+            onChanged={() => refetch({ silent: true })}
+            onLinkWallet={DYNAMIC_ENABLED ? () => setLinking(true) : undefined}
+          />
 
           <Card>
             <CardTitle>

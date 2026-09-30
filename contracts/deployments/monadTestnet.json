@@ -3,10 +3,14 @@
   "chainId": 10143,
   "deployer": "0x248a9aca0146b0112f102455fbc11b45338fd3de",
   "deployedAt": "2026-09-24T09:11:51.289Z",
+  "complianceSigner": "0xe50e45a4102b8d625b10793d1698a3d53810f62e",
   "contracts": {
     "HumanIdentityRegistry": "0x9fe852bddcb71b765af9ca1b8390d9ccfe024a2b",
     "AgentRegistry": "0x41a176a946ab83cd26cfad4f07e6afdf61475e29",
     "PermissionRegistry": "0xfe5caf3a4521ead0c8dce0f851461cdc072746cc",
-    "ReputationRegistry": "0x33a216af5621adab5a10aef7f538db4ff3d4efad"
+    "ReputationRegistry": "0x33a216af5621adab5a10aef7f538db4ff3d4efad",
+    "CleanverseAPassSim": "0x0607ba109cf19e0ca3b8d6606a142b38c61fc579",
+    "CleanverseATokenSim": "0xb67038fc577315f0646fc4d1b84ee2d428878a14",
+    "FukuSpendGuard": "0x3d5d3d38362fcb9ecc26250867cc3f30c99746dc"
   }
 }

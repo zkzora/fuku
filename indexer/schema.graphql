@@ -42,3 +42,60 @@ type ScoreChange {
   reason: String!
   timestamp: BigInt!
 }
+
+# --- FukuSpendGuard (owner mandates and guarded transfers) ----------------------------------
+
+type Mandate {
+  id: ID! # agentId-wallet
+  agentId: String!
+  wallet: String!
+  token: String!
+  dailyCap: BigInt!
+  maxPerTx: BigInt!
+  validUntil: BigInt!
+  restrictPayees: Boolean!
+  version: BigInt!
+  active: Boolean!
+  updatedAt: BigInt!
+}
+
+type Payee {
+  id: ID! # agentId-wallet-payee
+  agentId: String!
+  wallet: String!
+  payee: String!
+  allowed: Boolean!
+  updatedAt: BigInt!
+}
+
+type GuardedTransfer {
+  id: ID! # txHash-logIndex
+  agentId: String!
+  from: String!
+  to: String!
+  token: String!
+  amount: BigInt!
+  actionHash: String!
+  proofHash: String!
+  complianceRef: String!
+  mandateVersion: BigInt!
+  nonce: BigInt!
+  txHash: String!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+}
+
+# --- Cleanverse simulator (NOT Cleanverse: Fuku's stand-in until the API invite lands) ----------
+
+type SimAPass {
+  id: ID! # wallet
+  issuer: String!
+  status: Int!
+  tier: Int!
+  subTier: Int!
+  group: String!
+  subGroup: String!
+  expiresAt: BigInt!
+  cvRecordId: String!
+  updatedAt: BigInt!
+}

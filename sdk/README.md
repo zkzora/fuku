@@ -1,28 +1,71 @@
 # @fuku/sdk
 
-The developer surface of Fuku Protocol: human-backed AI agent identity, permission passports and portable reputation on Monad.
+The developer surface of Fuku Protocol: agent identity bound to a passkey-verified owner, permission passports, one enforced payment flow, and an explainable trust score on Monad.
 
 ```ts
 import { Fuku } from "@fuku/sdk";
 
 const fuku = new Fuku({ apiKey: process.env.FUKU_API_KEY!, baseUrl: "http://localhost:3001" });
 
-// Who is behind this agent, and is it safe to work with?
+// What backs this agent? One check per claim; `verified` needs all of them (never just a DB row).
 const v = await fuku.verifyAgent("fuku:agent:0x7a3f…9c21");
-// v.owner.humanVerified === true, v.trust.score === 96
+// v.checks.owner.passkey.status, v.checks.owner.wallet.status, v.checks.anchoring.status, v.checks.executable.ok
 
-// Dry run (nothing recorded)
+// Preview (nothing recorded, reserved or signed)
 const check = await fuku.checkPermission(agentId, { action: "withdraw", amountUsdc: 4800 });
-// check.allowed === false, check.ruleId === "R2"
+// check.preview === true, check.allowed === false, check.ruleId === "R2"
 
-// Full workflow: evaluate → execute/block → anchor on Monad → score → explain
-const result = await fuku.executeAction(agentId, { action: "swap", amountUsdc: 1200, app: "Monad DEX" });
+// Full workflow: authorize → evaluate → execute or block → anchor → score → explain
+const key = Fuku.newIdempotencyKey();
+const result = await fuku.executeAction(agentId, { action: "swap", amountUsdc: 1200, app: "Monad DEX" }, { idempotencyKey: key });
+// result.decision, result.status ("AUTHORIZED": Fuku recorded the decision, your integration executes it)
 
-// Register your own agent and attach a passport
+// Register your own agent and attach a passport (value actions need a daily limit)
 const { agent } = await fuku.registerAgent({ name: "Support Agent", capabilities: ["read_vault", "summarize"] });
 await fuku.requestPermission(agent.id, { allowed: [{ action: "read_vault" }], blocked: ["withdraw"] });
 const trust = await fuku.getTrustScore(agent.id);
 ```
+
+## The enforced flow: Cleanverse A-Token payments
+
+A passport that lists A-Tokens (`assets: ["aUSDC"]`) lets its agent `transfer` only after several checks:
+
+1. Cleanverse checks the asset rule (R9), the owner's A-Pass on a *verified* wallet (R7) and the recipient's A-Pass (R8).
+2. Fuku's compliance signer attests to that exact transfer (EIP-712). The attestation is bound to the action, the amount, the recipient, the passport hash and the owner's mandate version.
+3. `FukuSpendGuard` moves the token from the owner's wallet. It does so only inside the mandate that the owner's own wallet opened on-chain: token, daily cap, per-transfer limit, expiry and approved payees. It also checks that the agent is active and that the passport hash matches.
+4. Each action executes at most once on-chain.
+
+```ts
+const { mandate } = await fuku.getMandate(paymentsAgentId);  // the owner's on-chain mandate
+const pay = await fuku.executeAction(
+  paymentsAgentId,
+  { action: "transfer", amountUsdc: 250, asset: "aUSDC", to: supplierWallet },
+  { idempotencyKey: Fuku.newIdempotencyKey() },
+);
+pay.status;       // "CONFIRMED" (mined), "PENDING" (broadcast, HTTP 202), "DENIED", "FAILED", "SIMULATED" (mock chain)
+pay.transfer;     // { txHash, explorerUrl, mode, status, block, logIndex }
+const receipt = await fuku.getAction(pay.id);   // lifecycle + evidence: actionHash, chainId, block, logIndex
+```
+
+A few rules for reading results:
+
+- `compliance.mode === "simulated"` means Fuku's Cleanverse simulator answered, not Cleanverse. A receipt with `mode: "mock"` has no transaction behind it.
+- In live mode a write that failed says `status: "failed"`. It is never presented as a mock success.
+- Retrying with the same `idempotencyKey` replays the stored result (`replayed: true`). The same key with a different body is rejected with `idempotency_mismatch`.
+
+## Authorization
+
+A key acts for its own identity, and for identities it created with `createIdentity()` (recorded as managed by it). To act for any other owner, that owner must grant it a delegation in the Developer Console, with scopes `agents:register`, `agents:manage` or `agents:execute`.
+
+Delegations cannot be granted through the SDK. That is deliberate: an API key can never give itself rights. Without a delegation, calls are refused with `403 forbidden`, and an invalid key gets `401`. There is no fallback.
+
+## Errors
+
+Blocked actions resolve with the result (HTTP 403). Everything else that fails throws `FukuError` with `status`, `code`, `body` and, for 429, `retryAfter`. The codes are:
+
+- `unauthorized`, `forbidden`, `rate_limited`, `invalid_request`, `not_found`
+- `idempotency_mismatch`, `idempotency_in_progress`, `idempotency_failed`
+- `chain_write_failed` (502: the guarded transfer was not sent, nothing moved)
 
 | Method | Endpoint |
 | --- | --- |
@@ -33,7 +76,30 @@ const trust = await fuku.getTrustScore(agent.id);
 | `getTrustScore()` | `GET /api/v1/agents/:id/trust` |
 | `checkPermission()` | `POST /api/v1/agents/:id/check` |
 | `executeAction()` | `POST /api/v1/agents/:id/execute` |
+| `getAction()` | `GET /api/v1/actions/:id` |
+| `getMandate()` | `GET /api/v1/agents/:id/mandate` |
 
-Get an API key from the Developer Console in the Fuku app. The seeded demo key is `fk_live_demo_ava_chen_2026`.
+Get an API key from the Developer Console in the Fuku app. The seeded demo key is `fk_live_demo_ava_chen_2026`; it only works while the demo is enabled (development, or `FUKU_DEMO_ENABLED=true`).
 
-Build: `npm run build` (emits `dist/`).
+- Build: `npm run build` (emits `dist/`).
+- Test: `npm test` (contract tests against a fake HTTP server).
+- A complete consumer lives in [`examples/sdk-consumer`](../examples/sdk-consumer). It previews, pays, retries, verifies on-chain, revokes and shows the next attempt fail.
+
+## Changes
+
+### 0.3.0 (breaking)
+
+- `Receipt.txHash`, `block` and `explorerUrl` can be `null`: a failed live write has no hash, and a mock receipt has no explorer link. `Receipt.status` and `chainId` are new.
+- `verifyAgent().verified` is true only when every check holds. It is false in mock mode and for unanchored or stale agents. Read `checks` for the reasons.
+- `ActionResult.status` (the lifecycle) is new. An allowed action Fuku does not execute is `AUTHORIZED` and earns no reputation. Only confirmed transfers do.
+- Engine rules applied to every client, including CRE:
+  - R4 now requires `app` for scoped passports.
+  - R11 blocks value actions for an owner without passkey verification.
+  - R12 requires a positive amount (6 decimals at most), a valid `to` for transfer, and a daily limit on every allowed value action.
+- `registerAgent({ ownerIdentityId })` needs a delegation (403 otherwise). Invalid keys are 401 instead of falling back to a session.
+- New: `executeAction(…, { idempotencyKey })`, `getAction()`, `getMandate()`, `FukuError.code`, `Fuku.newIdempotencyKey()`. The trust score adds `scoringVersion`, `dimensions`, `evidence` and `uncertainty`.
+
+### 0.2.0
+
+- Cleanverse A-Token payments: `to`, `asset`, `compliance`, `transfer`, `owner.cleanverse`.
+- `revokePermission()` returns `chainSync`.

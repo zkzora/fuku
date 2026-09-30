@@ -4,7 +4,8 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { json, withErrors } from "@/lib/api";
 import { createSession } from "@/lib/session";
-import { rpFromRequest } from "@/lib/webauthn";
+import { consumeChallenge, rpFromRequest } from "@/lib/webauthn";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
 import { createIdentity } from "@/lib/services/identity";
 
 const body = z.object({
@@ -15,27 +16,26 @@ const body = z.object({
 });
 
 export const POST = withErrors(async (req) => {
+  rateLimit("auth", clientIp(req));
   const input = body.parse(await req.json());
-  const challenge = await db.challenge.findUnique({ where: { id: input.challengeId } });
-  if (!challenge || challenge.kind !== "register" || challenge.expiresAt < new Date()) {
-    return json({ error: "Challenge expired. Please try again." }, { status: 400 });
-  }
-  await db.challenge.delete({ where: { id: challenge.id } });
-
   const { rpID, origin } = rpFromRequest(req);
+  const challenge = await consumeChallenge(input.challengeId, "register");
+
   const verification = await verifyRegistrationResponse({
     response: input.response,
     expectedChallenge: challenge.challenge,
     expectedOrigin: origin,
     expectedRPID: rpID,
-    requireUserVerification: false,
+    requireUserVerification: true,
   });
-  if (!verification.verified || !verification.registrationInfo) {
+  if (!verification.verified || !verification.registrationInfo?.userVerified) {
     return json({ error: "Passkey could not be verified." }, { status: 400 });
   }
   const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
   const passkeyPubKeyHash = keccak256(toHex(credential.publicKey));
 
+  // "humanVerified" means: a passkey ceremony with user verification (PIN or biometric) succeeded.
+  // It is evidence that the key holder was present, not proof of a unique or KYC-verified human.
   const { identity, receipt } = await createIdentity({
     displayName: input.displayName,
     authMethod: "passkey",

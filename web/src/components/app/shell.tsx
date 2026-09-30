@@ -74,7 +74,7 @@ export function Shell({
           <div className="min-w-0 flex-1">
             <div className="truncate text-[13.5px] font-semibold text-ink">{identity.displayName}</div>
             <div className={cn("text-[12px]", identity.humanVerified ? "text-allow" : "text-warn")}>
-              {identity.humanVerified ? "Human verified" : "Not verified"}
+              {identity.humanVerified ? "Passkey verified" : "Not verified"}
             </div>
           </div>
           <button onClick={signOut} title="Sign out" className="rounded-lg p-1.5 text-ink-3 hover:bg-surface hover:text-ink">

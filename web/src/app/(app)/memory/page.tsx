@@ -1,13 +1,21 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Lock, Plus, Trash2, Unlock } from "lucide-react";
+import { KeyRound, Lock, Plus, Trash2, Unlock } from "lucide-react";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Card, CardTitle, Empty, Mono, PageHeader, Pill, StatusPill } from "@/components/bits";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, useJson } from "@/lib/client";
-import { decryptText, deriveVaultKey, DEMO_VAULT_PASSPHRASE, encryptText } from "@/lib/vault-crypto";
+import {
+  decryptText,
+  deriveVaultKey,
+  DEMO_VAULT_PASSPHRASE,
+  encryptText,
+  MIN_VAULT_PASSPHRASE_LENGTH,
+  VAULT_CHECK_PLAINTEXT,
+  vaultKeyMatches,
+} from "@/lib/vault-crypto";
 import { fmtDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -20,33 +28,48 @@ const CATEGORIES = [
 
 interface VaultData {
   identityId: string;
+  vault: { mode: "demo" | "passphrase"; hasPassphrase: boolean; check: { ciphertext: string; iv: string } | null };
   items: { id: string; category: string; title: string; ciphertext: string; iv: string; sizeBytes: number; createdAt: string }[];
   requests: { id: string; app: string; resource: string; status: string; createdAt: string }[];
   approvedApps: { id: string; name: string; scopes: string[] }[];
 }
 
+/** Unlocked vault keys, in memory only for this tab (never the passphrase, never localStorage). */
+const unlockedKeys = new Map<string, CryptoKey>();
+
 export default function MemoryPage() {
   const { data, loading, refetch } = useJson<VaultData>("/api/memory");
   const [category, setCategory] = useState<string>("preferences");
-  const [key, setKey] = useState<CryptoKey | null>(null);
+  const [unlockedKey, setUnlockedKey] = useState<CryptoKey | null>(null);
+  const [demoKey, setDemoKey] = useState<CryptoKey | null>(null);
   const [plain, setPlain] = useState<Record<string, string>>({});
   const [addOpen, setAddOpen] = useState(false);
+  const [changing, setChanging] = useState(false);
+  const identityId = data?.identityId;
+  const mode = data?.vault.mode;
 
-  // The vault key lives only on this device: derived from a passphrase kept in localStorage.
+  // The key is derived on this device. The seeded demo opens with its public passphrase; everyone
+  // else unlocks with their own, which is never stored.
   useEffect(() => {
-    if (!data?.identityId) return;
-    let passphrase: string | null = null;
+    if (!identityId || !mode) return;
     try {
-      passphrase = localStorage.getItem(`fuku:vault:${data.identityId}`);
+      localStorage.removeItem(`fuku:vault:${identityId}`); // earlier builds kept a passphrase here
     } catch {}
-    if (!passphrase) {
-      passphrase = DEMO_VAULT_PASSPHRASE;
-      try {
-        localStorage.setItem(`fuku:vault:${data.identityId}`, passphrase);
-      } catch {}
-    }
-    deriveVaultKey(data.identityId, passphrase).then(setKey);
-  }, [data?.identityId]);
+    if (mode === "demo") deriveVaultKey(identityId, DEMO_VAULT_PASSPHRASE).then(setDemoKey);
+  }, [identityId, mode]);
+  const key = mode === "demo" ? demoKey : (unlockedKey ?? (identityId ? (unlockedKeys.get(identityId) ?? null) : null));
+
+  function unlocked(k: CryptoKey) {
+    if (!identityId) return;
+    unlockedKeys.set(identityId, k);
+    setUnlockedKey(k);
+    setChanging(false);
+  }
+  function lock() {
+    if (identityId) unlockedKeys.delete(identityId);
+    setUnlockedKey(null);
+    setPlain({});
+  }
 
   // Decrypt everything locally whenever the key or the item list changes.
   useEffect(() => {
@@ -94,13 +117,37 @@ export default function MemoryPage() {
         title="Memory Vault"
         subtitle="Your AI context, encrypted on this device. Applications and agents only read it with your approval."
         actions={
-          <button onClick={() => setAddOpen(true)} className="inline-flex h-10 items-center gap-2 rounded-xl bg-ink px-4 text-[14px] font-medium text-white hover:bg-ink-2">
-            <Plus className="size-4" /> Add to vault
-          </button>
+          <>
+            {data.vault.mode === "passphrase" && key && (
+              <>
+                <button onClick={() => setChanging(true)} className="inline-flex h-10 items-center rounded-xl bg-surface px-4 text-[14px] font-medium text-ink hover:bg-line">
+                  Change passphrase
+                </button>
+                <button onClick={lock} className="inline-flex h-10 items-center gap-2 rounded-xl bg-surface px-4 text-[14px] font-medium text-ink hover:bg-line">
+                  <Lock className="size-4" /> Lock
+                </button>
+              </>
+            )}
+            <button
+              onClick={() => setAddOpen(true)}
+              disabled={!key}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-ink px-4 text-[14px] font-medium text-white hover:bg-ink-2 disabled:opacity-50"
+            >
+              <Plus className="size-4" /> Add to vault
+            </button>
+          </>
         }
       />
+      {data.vault.mode === "demo" && (
+        <p className="-mt-2 text-[12.5px] text-ink-3">
+          Demo vault: it opens with a public demo passphrase, so it is not secret. Your own identity uses a passphrase only you know.
+        </p>
+      )}
       <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
         <div className="space-y-4">
+          {data.vault.mode === "passphrase" && (!key || changing) && (
+            <VaultGate data={data} currentKey={changing ? key : null} onUnlocked={unlocked} onCancel={changing ? () => setChanging(false) : undefined} onChanged={() => refetch({ silent: true })} />
+          )}
           <div className="flex flex-wrap gap-2">
             {CATEGORIES.map((c) => {
               const count = data.items.filter((i) => i.category === c.key).length;
@@ -232,6 +279,123 @@ export default function MemoryPage() {
         onAdded={() => refetch({ silent: true })}
       />
     </div>
+  );
+}
+
+/**
+ * Unlock, create or change the vault passphrase. Creating one over items from earlier builds (which
+ * used the public demo passphrase for every identity) re-encrypts them under the new key first.
+ */
+function VaultGate({
+  data,
+  currentKey,
+  onUnlocked,
+  onCancel,
+  onChanged,
+}: {
+  data: VaultData;
+  currentKey: CryptoKey | null;
+  onUnlocked: (k: CryptoKey) => void;
+  onCancel?: () => void;
+  onChanged: () => void;
+}) {
+  const creating = currentKey !== null || !data.vault.hasPassphrase;
+  const legacy = currentKey === null && !data.vault.hasPassphrase && data.items.length > 0;
+  const [pass, setPass] = useState("");
+  const [again, setAgain] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function unlock() {
+    setBusy(true);
+    setError(null);
+    try {
+      const k = await deriveVaultKey(data.identityId, pass);
+      if (data.vault.check && (await vaultKeyMatches(k, data.vault.check))) onUnlocked(k);
+      else setError("That passphrase does not open this vault.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save() {
+    setError(null);
+    if (pass.length < MIN_VAULT_PASSPHRASE_LENGTH) return setError(`Use at least ${MIN_VAULT_PASSPHRASE_LENGTH} characters.`);
+    if (pass !== again) return setError("The two passphrases differ.");
+    if (pass === DEMO_VAULT_PASSPHRASE) return setError("That is the public demo passphrase. Choose your own.");
+    setBusy(true);
+    try {
+      const next = await deriveVaultKey(data.identityId, pass);
+      // Re-encrypt every item under the new key: from the current key, or the demo key for old items.
+      const from = currentKey ?? (legacy ? await deriveVaultKey(data.identityId, DEMO_VAULT_PASSPHRASE) : null);
+      const items = [];
+      for (const it of data.items) {
+        if (!from) throw new Error("Unlock the vault first.");
+        let text: string;
+        try {
+          text = await decryptText(from, it.ciphertext, it.iv);
+        } catch {
+          throw new Error(`"${it.title}" cannot be decrypted, so it cannot be moved to the new passphrase.`);
+        }
+        const enc = await encryptText(next, text);
+        items.push({ id: it.id, ciphertext: enc.ciphertext, iv: enc.iv });
+      }
+      const check = await encryptText(next, VAULT_CHECK_PLAINTEXT);
+      await api("/api/memory/vault", { method: "POST", json: { check: { ciphertext: check.ciphertext, iv: check.iv }, items } });
+      toast.success(legacy ? "Your vault is now encrypted under your own passphrase." : currentKey ? "Passphrase changed." : "Vault passphrase set.");
+      onUnlocked(next);
+      onChanged();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reset() {
+    if (!window.confirm("Delete every item in your vault and choose a new passphrase? Without the old passphrase they cannot be recovered.")) return;
+    try {
+      await api("/api/memory/vault", { method: "DELETE", json: { confirm: true } });
+      toast.success("Vault emptied. Choose a new passphrase.");
+      onChanged();
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  }
+
+  return (
+    <Card>
+      <CardTitle action={onCancel ? <button onClick={onCancel} className="text-[13px] font-medium text-ink-3 hover:underline">Cancel</button> : null}>
+        {currentKey ? "Change your vault passphrase" : creating ? "Choose a vault passphrase" : "Unlock your vault"}
+      </CardTitle>
+      <div className="flex items-start gap-3">
+        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-violet-soft">
+          <KeyRound className="size-4 text-violet" />
+        </span>
+        <div className="min-w-0 flex-1 space-y-3">
+          <p className="text-[13px] text-ink-3">
+            {creating
+              ? legacy
+                ? "Your items were encrypted with the shared demo passphrase. Choose your own: they are re-encrypted in this browser before anything is sent."
+                : "The key is derived from it in this browser. Fuku never sees it and cannot recover it."
+              : "Enter your passphrase. It stays in this browser; Fuku only checks it against an encrypted value."}
+          </p>
+          <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="Passphrase" autoComplete={creating ? "new-password" : "current-password"} className={inputCls} />
+          {creating && <input type="password" value={again} onChange={(e) => setAgain(e.target.value)} placeholder="Repeat passphrase" autoComplete="new-password" className={inputCls} />}
+          {error && <p className="text-[13px] text-block">{error}</p>}
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={creating ? save : unlock} disabled={busy || !pass} className="inline-flex items-center gap-2 rounded-xl bg-ink px-4 py-2.5 text-[14px] font-medium text-white hover:bg-ink-2 disabled:opacity-50">
+              <Unlock className="size-4" /> {busy ? "Working…" : creating ? "Save passphrase" : "Unlock"}
+            </button>
+            {!creating && (
+              <button onClick={reset} className="rounded-xl px-3 py-2.5 text-[13px] font-medium text-ink-3 hover:bg-surface">
+                Forgot it? Start over
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
 

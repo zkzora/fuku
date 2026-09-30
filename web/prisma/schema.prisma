@@ -21,6 +21,25 @@ model Identity {
   proofHash     String?                 // keccak256 ownership proof
   proofTxHash   String?
   proofBlock    Int?
+  proofMode     String?                 // anchored | mock | pending | failed: how the ownership proof was anchored
+  // Wallet binding evidence. walletAddress alone is a declaration; these say how control was proven.
+  walletVerifiedBy String?              // dynamic (verified JWT credential) | signature (EIP-191/1271) | null
+  walletVerifiedAt DateTime?
+  walletProof      String?              // JSON: the signed message and signature, or the Dynamic user id
+  // Set when an API caller created this identity for one of its users (an explicit, recorded
+  // management grant); such identities start unverified.
+  managedById   String?
+  // Who controls this identity on-chain: "relayer" (Fuku's key, custodial) or "owner" (the bound
+  // wallet signs registerIdentity / registerAgent / setPolicy / revokePolicy / setStatus itself).
+  // Null until decided: at the first anchoring, from the bound wallet (see lib/custody.ts).
+  chainCustody  String?
+  // Memory Vault: a known string encrypted in the browser with the owner's vault key (JSON
+  // { v, ciphertext, iv }), so a wrong passphrase is told apart from a right one. The server never
+  // sees the passphrase or the key. Null until the owner sets one; the seeded demo uses none.
+  vaultCheck    String?
+  // Last block scanned for Approval events from the bound wallet to FukuSpendGuard (reconcile bumps
+  // the wallet's validAfter when the allowance changed). Null until watching starts.
+  allowanceScanBlock Int?
   createdAt     DateTime @default(now())
 
   passkeys       Passkey[]
@@ -31,6 +50,24 @@ model Identity {
   credentials    Credential[]
   apiKeys        ApiKey[]
   actions        AgentAction[]
+  delegationsGiven    Delegation[] @relation("DelegationOwner")
+  delegationsReceived Delegation[] @relation("DelegationDelegate")
+}
+
+/// An owner lets another identity (typically an application's API identity) act for them.
+/// Scopes: agents:register, agents:manage (passport, status, revoke), agents:execute.
+model Delegation {
+  id         String    @id @default(cuid())
+  ownerId    String
+  delegateId String
+  scopes     String                    // JSON string[]
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  owner      Identity  @relation("DelegationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  delegate   Identity  @relation("DelegationDelegate", fields: [delegateId], references: [id], onDelete: Cascade)
+
+  @@index([delegateId, ownerId])
 }
 
 model Passkey {
@@ -49,7 +86,7 @@ model Passkey {
 model Challenge {
   id         String   @id @default(cuid())
   challenge  String
-  kind       String                    // register | authenticate
+  kind       String                    // register | authenticate | wallet
   identityId String?
   expiresAt  DateTime
 }
@@ -64,6 +101,17 @@ model Agent {
   description    String?
   trustScore     Int?
   registeredTx   String?
+  registeredMode String?                     // anchored | mock | pending | failed
+  // The agent's own key (lib/agent-keys.ts) and its ERC-8004 registration (lib/erc8004), both optional.
+  agentWallet     String?                    // the agent key's address; its ERC-8004 agentWallet
+  agentKey        String?                    // that key, sealed (AES-256-GCM under FUKU_AGENT_KEY_SECRET)
+  erc8004Id       String?                    // ERC-721 tokenId in the canonical Identity Registry
+  erc8004Registry String?
+  erc8004ChainId  Int?
+  erc8004Owner    String?                    // the owner wallet the NFT was minted to
+  erc8004Uri      String?                    // the agentURI it was registered with
+  erc8004Tx       String?                    // register() transaction
+  erc8004WalletTx String?                    // setAgentWallet() transaction
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -71,6 +119,7 @@ model Agent {
   policy           Policy?
   actions          AgentAction[]
   reputationEvents ReputationEvent[]
+  budgetWindows    BudgetWindow[]
 }
 
 model Policy {
@@ -79,9 +128,11 @@ model Policy {
   allowed   String   @default("[]")   // JSON: [{ action, limitUsdcPerDay? }]
   blocked   String   @default("[]")   // JSON: string[]
   scopeApps String   @default("[]")   // JSON: string[]
+  assets    String   @default("[]")   // JSON: Cleanverse A-Token symbols (non-empty = A-Token passport)
   version   Int      @default(1)
   active    Boolean  @default(true)
   txHash    String?
+  anchorMode String?                  // anchored | mock | pending | failed
   policyHash String?
   updatedAt DateTime @updatedAt
   agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -102,17 +153,104 @@ model AgentAction {
   txHash      String?
   trustDelta  Int      @default(0)
   explanation String?
+  counterparty   String?              // recipient wallet for value actions
+  asset          String?              // A-Token symbol for value actions on an A-Token passport
+  compliance     String?              // JSON: Cleanverse legs + evidence
+  complianceRef  String?              // keccak256 of the canonical evidence JSON
+  transferTxHash String?              // FukuSpendGuard.execute transaction
+  travelRuleRef  String?              // keccak256 of the canonical Travel Rule record
+  travelRule     String?              // JSON: the Travel Rule record (Cleanverse's, or the simulator's)
+  // Execution lifecycle, separate from the policy decision (see docs/SECURITY.md, section 5):
+  // RECEIVED -> DENIED | AUTHORIZED; AUTHORIZED -> SUBMITTED -> CONFIRMED | FAILED | PENDING;
+  // AUTHORIZED -> SIMULATED (mock chain) | FAILED (not sent). Null on rows written before it existed.
+  status         String?
+  amountMicros   BigInt?              // authoritative amount in 6-decimal base units
+  policyVersion  Int?
+  idempotencyKey String?
+  requestHash    String?              // hash of the request body bound to the idempotency key
+  resultJson     String?              // stored response, replayed for a repeated idempotency key
+  anchorStatus   String?              // decision anchoring: anchored | mock | failed | pending
+  receiptMode    String?              // live | mock
+  chainId        Int?
+  blockNumber    Int?
+  blockHash      String?
+  logIndex       Int?                 // GuardedTransferExecuted log index within the tx
+  errorClass     String?              // guard_revert | rpc | timeout | signing | anchor
+  errorDetail    String?
+  submittedAt    DateTime?
+  settledAt      DateTime?
+  lastCheckedAt  DateTime?
   createdAt   DateTime @default(now())
   agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
   identity    Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, idempotencyKey])
+  @@index([status])
+}
+
+/// Preimages of anchored decision proofs (commit-reveal, lib/records.ts): proofHash = keccak256(record)
+/// at actionHash = keccak256(actionId). No relation on purpose: records survive agent deletion and
+/// demo resets, so everything Fuku anchored can still be revealed.
+model DecisionRecord {
+  actionId  String   @id
+  agentId   String
+  proofHash String
+  record    String
+  // Where this proof was anchored, when `reconcile --anchor-seeded` anchored it: a demo reset then
+  // rebuilds the seeded row as anchored on the same chain and PermissionRegistry.
+  anchorChainId  Int?
+  anchorRegistry String?
+  anchorTx       String?
+  anchorBlock    Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([agentId])
+}
+
+/// Settings that survive demo resets. "demo.cohort": the label the seeded demo agents' ids and seeded
+/// action ids derive from (lib/demo-seed.ts); `npm run demo:cohort` moves the demo to a fresh cohort.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/// What a demo reset must not lose about a seeded demo agent (JSON): its ERC-8004 registration, its
+/// sealed agent key, and the transactions that registered it and anchored its passport. No relation on
+/// purpose, like DecisionRecord: seedDemo saves it before deleting the demo identity and restores it.
+model DemoAgentState {
+  agentId   String   @id
+  state     String
+  updatedAt DateTime @updatedAt
+}
+
+/// Authoritative off-chain spend per agent, action and UTC day, reserved atomically before an
+/// allowed value action and released when execution fails. Key: agentId:action:YYYY-MM-DD.
+model BudgetWindow {
+  id          String   @id
+  agentId     String
+  action      String
+  day         String
+  spentMicros BigInt   @default(0)
+  updatedAt   DateTime @updatedAt
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+}
+
+/// Cross-process lease for the single on-chain signer (nonce ordering across server instances).
+model ChainLock {
+  id        String   @id
+  holder    String
+  expiresAt DateTime
 }
 
 model ReputationEvent {
   id        String   @id @default(cuid())
   agentId   String
-  kind      String                      // registration | human_verified | success | violation | security
+  kind      String                      // registration | human_verified | success | violation | security | neutral
   delta     Int
   note      String
+  actionId  String?  @unique            // one reputation event per action, at most
   createdAt DateTime @default(now())
   agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 }
@@ -170,4 +308,26 @@ model ApiKey {
   createdAt  DateTime  @default(now())
   lastUsedAt DateTime?
   identity   Identity  @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+/** Every A-Pass (CVI) read, from the Cleanverse API or the Fuku simulator. The UI and the trust
+ *  score read this table and never call the provider synchronously. */
+model CleanversePass {
+  id         String   @id @default(cuid())
+  chain      String
+  wallet     String                    // lowercased
+  source     String                    // cleanverse | simulated
+  found      Boolean  @default(true)   // false = the provider reported no A-Pass
+  cvRecordId String?
+  status     Int?                      // 1 active, 2 frozen
+  tier       Int?
+  subTier    Int?
+  group      String?
+  subGroup   String?
+  expiresAt  Int?                      // unix seconds, 0 = no expiry
+  countries  String   @default("[]")   // JSON string[]
+  raw        String?                   // JSON as returned by the provider
+  checkedAt  DateTime @default(now())
+
+  @@unique([chain, wallet, source])
 }

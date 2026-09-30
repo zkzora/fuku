@@ -1,4 +1,5 @@
 import { db } from "../db";
+import type { ExecutionStatus } from "./actions";
 
 export interface ActivityItem {
   id: string;
@@ -12,9 +13,22 @@ export interface ActivityItem {
   ruleId: string | null;
   proofHash: string;
   txHash: string | null;
+  /** Execution lifecycle (legacy rows: AUTHORIZED / DENIED from the decision). */
+  status: ExecutionStatus;
+  /**
+   * How the decision or transfer receipt was produced. "mock" rows never had a real transaction;
+   * "unknown" rows predate stored receipt modes (use Verify on-chain to check them).
+   */
+  receiptMode: "live" | "mock" | "unknown";
+  /** Decision anchoring: anchored | mock | pending | failed (null for guard-recorded transfers). */
+  anchorStatus: string | null;
+  chainId: number | null;
+  transferTxHash: string | null;
+  counterparty: string | null;
+  asset: string | null;
   trustDelta: number;
   explanation: string | null;
-  /** Set when an orchestrator (e.g. "chainlink-cre") submitted the action through the public API. */
+  /** A label the caller put in `params.orchestrator` (e.g. "chainlink-cre"). Declared, not verified. */
   orchestrator: string | null;
   createdAt: string;
 }
@@ -41,6 +55,13 @@ export async function listActivity(
     ruleId: r.ruleId,
     proofHash: r.proofHash,
     txHash: r.txHash,
+    status: (r.status ?? (r.decision === "ALLOWED" ? "AUTHORIZED" : "DENIED")) as ExecutionStatus,
+    receiptMode: r.receiptMode === "live" || r.receiptMode === "mock" ? r.receiptMode : "unknown",
+    anchorStatus: r.anchorStatus,
+    chainId: r.chainId,
+    transferTxHash: r.transferTxHash,
+    counterparty: r.counterparty,
+    asset: r.asset,
     trustDelta: r.trustDelta,
     explanation: r.explanation,
     orchestrator: orchestratorOf(r.params),

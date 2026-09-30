@@ -3,7 +3,8 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { json, withErrors } from "@/lib/api";
 import { createSession } from "@/lib/session";
-import { rpFromRequest } from "@/lib/webauthn";
+import { consumeChallenge, rpFromRequest } from "@/lib/webauthn";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
 
 const body = z.object({
   challengeId: z.string(),
@@ -11,23 +12,20 @@ const body = z.object({
 });
 
 export const POST = withErrors(async (req) => {
+  rateLimit("auth", clientIp(req));
   const input = body.parse(await req.json());
-  const challenge = await db.challenge.findUnique({ where: { id: input.challengeId } });
-  if (!challenge || challenge.kind !== "authenticate" || challenge.expiresAt < new Date()) {
-    return json({ error: "Challenge expired. Please try again." }, { status: 400 });
-  }
-  await db.challenge.delete({ where: { id: challenge.id } });
+  const { rpID, origin } = rpFromRequest(req);
+  const challenge = await consumeChallenge(input.challengeId, "authenticate");
 
   const passkey = await db.passkey.findUnique({ where: { id: input.response.id }, include: { identity: true } });
   if (!passkey) return json({ error: "This passkey is not registered with Fuku." }, { status: 404 });
 
-  const { rpID, origin } = rpFromRequest(req);
   const verification = await verifyAuthenticationResponse({
     response: input.response,
     expectedChallenge: challenge.challenge,
     expectedOrigin: origin,
     expectedRPID: rpID,
-    requireUserVerification: false,
+    requireUserVerification: true,
     credential: {
       id: passkey.id,
       publicKey: passkey.publicKey,
@@ -35,7 +33,9 @@ export const POST = withErrors(async (req) => {
       transports: passkey.transports ? JSON.parse(passkey.transports) : undefined,
     },
   });
-  if (!verification.verified) return json({ error: "Passkey signature invalid." }, { status: 401 });
+  if (!verification.verified || !verification.authenticationInfo.userVerified) {
+    return json({ error: "Passkey signature invalid or user verification missing." }, { status: 401 });
+  }
 
   await db.passkey.update({ where: { id: passkey.id }, data: { counter: verification.authenticationInfo.newCounter } });
   await createSession(passkey.identityId);

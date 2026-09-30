@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { json, withSession } from "@/lib/api";
+import { rateLimit } from "@/lib/rate-limit";
 import { agentReport } from "@/lib/services/reputation";
 import { setAgentStatus } from "@/lib/services/agents";
 import { listActivity } from "@/lib/services/activity";
@@ -18,11 +19,12 @@ export const GET = withSession<P>(async (req, identity, { id }) => {
 const patch = z.object({ status: z.enum(["active", "paused"]) });
 
 export const PATCH = withSession<P>(async (req, identity, { id }) => {
+  rateLimit("manage", identity.id);
   const input = patch.parse(await req.json());
   const report = await agentReport(id, identity, false);
   if (!report.agent.policy?.active && input.status === "active") {
     return json({ error: "Attach a permission passport before activating this agent." }, { status: 400 });
   }
-  const score = await setAgentStatus(id, input.status);
-  return json({ ok: true, score: score.score });
+  const { score, chainSync } = await setAgentStatus(id, input.status);
+  return json({ ok: true, score: score.score, chainSync });
 });

@@ -10,6 +10,15 @@ import { shortHex } from "@/lib/ids";
 import { cn } from "@/lib/utils";
 import { VerifyOnChain } from "./verify-onchain";
 
+const STATUS_TEXT: Partial<Record<ActivityItem["status"], string>> = {
+  AUTHORIZED: "Authorized (decision only)",
+  CONFIRMED: "Executed on-chain",
+  SIMULATED: "Simulated (mock chain)",
+  PENDING: "Broadcast, pending",
+  SUBMITTED: "Broadcast, pending",
+  FAILED: "Allowed, execution failed",
+};
+
 export function ActivityTimeline({ items, compact, emptyBody }: { items: ActivityItem[]; compact?: boolean; emptyBody?: string }) {
   const [open, setOpen] = useState<string | null>(null);
   if (items.length === 0) {
@@ -37,9 +46,10 @@ export function ActivityTimeline({ items, compact, emptyBody }: { items: Activit
                     </span>
                   </div>
                   <div className={cn("mt-0.5 text-[12.5px]", blocked ? "text-block" : "text-ink-3")}>
-                    {blocked ? "Blocked by policy · proof recorded" : `Allowed${it.app ? ` · via ${it.app}` : ""}`}
+                    {blocked ? "Blocked by policy · proof recorded" : `${STATUS_TEXT[it.status] ?? "Allowed"}${it.app ? ` · via ${it.app}` : ""}`}
                     {it.ruleId ? ` · rule ${it.ruleId}` : ""}
-                    {it.orchestrator === "chainlink-cre" ? " · via Chainlink CRE" : ""}
+                    {it.orchestrator ? ` · declared via ${it.orchestrator === "chainlink-cre" ? "Chainlink CRE" : it.orchestrator}` : ""}
+                    {it.receiptMode !== "live" ? ` · ${it.receiptMode === "mock" ? "mock receipt" : "legacy receipt"}` : ""}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
@@ -71,8 +81,29 @@ export function ActivityTimeline({ items, compact, emptyBody }: { items: Activit
                   </div>
                   <div className="space-y-2">
                     <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3">Execution</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <Pill tone={it.status === "CONFIRMED" ? "allow" : it.status === "DENIED" || it.status === "FAILED" ? "block" : it.status === "AUTHORIZED" ? "neutral" : "warn"}>
+                          {it.status}
+                        </Pill>
+                        <Pill tone={it.receiptMode === "live" ? "violet" : "neutral"} className="normal-case tracking-normal">
+                          {it.receiptMode === "live" ? `live · chain ${it.chainId ?? "?"}` : it.receiptMode === "mock" ? "mock: no transaction" : "legacy: verify on-chain"}
+                        </Pill>
+                        {it.anchorStatus && it.anchorStatus !== "anchored" && it.anchorStatus !== "mock" && (
+                          <Pill tone="warn" className="normal-case tracking-normal">
+                            anchor {it.anchorStatus}
+                          </Pill>
+                        )}
+                      </div>
+                    </div>
+                    <div>
                       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3">Transaction proof</div>
-                      <Mono className="text-ink">{it.txHash ? shortHex(it.txHash, 12, 8) : "pending"}</Mono>
+                      <Mono className="text-ink">{it.txHash ? shortHex(it.txHash, 12, 8) : it.anchorStatus === "failed" ? "not anchored (retrying)" : "pending"}</Mono>
+                      {it.transferTxHash && it.transferTxHash !== it.txHash && (
+                        <div className="mt-1 text-[12px] text-ink-3">
+                          transfer <Mono>{shortHex(it.transferTxHash, 10, 6)}</Mono>
+                        </div>
+                      )}
                     </div>
                     <div>
                       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3">Decision hash</div>
@@ -84,7 +115,7 @@ export function ActivityTimeline({ items, compact, emptyBody }: { items: Activit
                         <Delta value={it.trustDelta} />
                       </div>
                     </div>
-                    {it.txHash && <VerifyOnChain actionId={it.id} />}
+                    {it.txHash && it.receiptMode !== "mock" && <VerifyOnChain actionId={it.id} />}
                   </div>
                 </div>
               )}

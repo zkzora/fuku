@@ -20,7 +20,7 @@ export function IdentityCard({
       <div className="flex items-center justify-between">
         <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">Fuku identity</div>
         <Pill tone={identity.humanVerified ? "allow" : "warn"} className="whitespace-nowrap" dot>
-          {identity.humanVerified ? "Human verified" : "Unverified"}
+          {identity.humanVerified ? "Passkey verified" : "Unverified"}
         </Pill>
       </div>
       <div className="mt-5 flex items-center gap-4">
@@ -37,7 +37,7 @@ export function IdentityCard({
       </div>
       {!compact && (
         <p className="mt-4 text-[13px] text-ink-3">
-          The root of ownership for every agent you register. Anchored on Monad; verified with WebAuthn (P-256).
+          The root of ownership for every agent you register: a passkey (WebAuthn, P-256, with user verification), anchored on Monad. It proves the key holder was present, not that they are a unique person.
         </p>
       )}
     </div>

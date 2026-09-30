@@ -6,6 +6,7 @@
   "monad": {
     "chainSelectorName": "monad-testnet",
     "permissionRegistry": "0xfe5caf3a4521ead0c8dce0f851461cdc072746cc",
-    "reputationRegistry": "0x33a216af5621adab5a10aef7f538db4ff3d4efad"
+    "reputationRegistry": "0x33a216af5621adab5a10aef7f538db4ff3d4efad",
+    "spendGuard": ""
   }
 }

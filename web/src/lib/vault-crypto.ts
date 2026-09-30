@@ -46,5 +46,21 @@ export async function decryptText(key: CryptoKey, ciphertext: string, iv: string
   return new TextDecoder().decode(buf);
 }
 
-/** Demo passphrase used for the seeded identity so its vault opens without setup. */
+/**
+ * Public passphrase of the seeded demo identity (Ava) only, so the demo vault opens without setup.
+ * Anyone can derive that key: the demo vault is not secret. Every other identity chooses its own.
+ */
 export const DEMO_VAULT_PASSPHRASE = "fuku-demo-vault";
+
+/** Encrypted under the owner's key as `Identity.vaultCheck`; decrypting it proves the passphrase. */
+export const VAULT_CHECK_PLAINTEXT = "fuku-vault-check:v1";
+export const MIN_VAULT_PASSPHRASE_LENGTH = 10;
+
+/** True when `key` opens the stored check, i.e. it was derived from the owner's passphrase. */
+export async function vaultKeyMatches(key: CryptoKey, check: { ciphertext: string; iv: string }): Promise<boolean> {
+  try {
+    return (await decryptText(key, check.ciphertext, check.iv)) === VAULT_CHECK_PLAINTEXT;
+  } catch {
+    return false;
+  }
+}

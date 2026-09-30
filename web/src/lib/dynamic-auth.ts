@@ -40,7 +40,25 @@ export interface DynamicUser {
 
 export class DynamicAuthError extends Error {}
 
+const dynHealth = globalThis as unknown as { __fukuDynamicHealth?: { ok: boolean; at: string; error?: string } };
+
+/** Outcome of the last Dynamic JWT verification in this process, or null before the first one. */
+export function lastDynamicVerification() {
+  return dynHealth.__fukuDynamicHealth ?? null;
+}
+
 export async function verifyDynamicToken(token: string): Promise<DynamicUser> {
+  try {
+    const user = await verifyDynamicTokenInner(token);
+    dynHealth.__fukuDynamicHealth = { ok: true, at: new Date().toISOString() };
+    return user;
+  } catch (err) {
+    dynHealth.__fukuDynamicHealth = { ok: false, at: new Date().toISOString(), error: (err as Error).message.slice(0, 160) };
+    throw err;
+  }
+}
+
+async function verifyDynamicTokenInner(token: string): Promise<DynamicUser> {
   const envId = dynamicEnvironmentId();
   if (!envId) throw new DynamicAuthError("Dynamic is not configured (NEXT_PUBLIC_DYNAMIC_ENV_ID).");
   let payload: JWTPayload & {

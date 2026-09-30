@@ -5,14 +5,32 @@ import { Play } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/client";
 import { ACTIONS, labelFor, VALUE_ACTIONS } from "@/lib/engine/policy";
+import { DEMO_RECIPIENTS } from "@/lib/cleanverse/demo";
 import type { ActionResult } from "@/lib/services/actions";
 import type { AgentView } from "@/lib/services/agents";
 import { ActionResultDialog } from "./action-result-dialog";
 import { cn } from "@/lib/utils";
 
+type Preset = {
+  agentName: string;
+  action: string;
+  amountUsdc?: number;
+  app?: string;
+  to?: string;
+  asset?: string;
+  title: string;
+  body: string;
+};
+
+const ASSET_OPTIONS = [
+  { value: "aUSDC", label: "aUSDC (A-Token)" },
+  { value: "USDC", label: "USDC" },
+];
+
 /**
  * Runs an agent action through the full Fuku workflow and shows the outcome.
- * `preset` powers the one-click demo climax (Trading Assistant tries to withdraw 4,800 USDC).
+ * `preset` powers the one-click demos (Trading Assistant tries to withdraw 4,800 USDC; the
+ * Payments Agent pays a verified supplier in aUSDC).
  */
 export function RunAction({
   agents,
@@ -22,7 +40,7 @@ export function RunAction({
 }: {
   agents: AgentView[];
   onDone?: () => void;
-  preset?: { agentName: string; action: string; amountUsdc?: number; app?: string; title: string; body: string };
+  preset?: Preset;
   compact?: boolean;
 }) {
   const presetAgent = preset ? agents.find((a) => a.name === preset.agentName) : undefined;
@@ -30,10 +48,12 @@ export function RunAction({
   const [action, setAction] = useState(preset?.action ?? "swap");
   const [amount, setAmount] = useState<string>(preset?.amountUsdc ? String(preset.amountUsdc) : "1200");
   const [app, setApp] = useState(preset?.app ?? "Monad DEX");
+  const [to, setTo] = useState(preset?.to ?? DEMO_RECIPIENTS[0].address);
+  const [asset, setAsset] = useState(preset?.asset ?? "aUSDC");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ActionResult | null>(null);
 
-  async function run(overrides?: { agentId?: string; action?: string; amountUsdc?: number; app?: string }) {
+  async function run(overrides?: { agentId?: string; action?: string; amountUsdc?: number; app?: string; to?: string; asset?: string }) {
     const target = overrides?.agentId ?? agentId;
     if (!target) return toast.error("Register an agent first.");
     const act = overrides?.action ?? action;
@@ -44,7 +64,8 @@ export function RunAction({
         json: {
           action: act,
           amountUsdc: VALUE_ACTIONS.has(act) ? (overrides?.amountUsdc ?? (Number(amount) || 0)) : null,
-          app: overrides?.app ?? app ?? null,
+          app: (overrides ? overrides.app : app) || null,
+          ...(act === "transfer" ? { to: overrides?.to ?? to, asset: overrides?.asset ?? asset } : {}),
         },
       });
       setResult(res);
@@ -67,7 +88,7 @@ export function RunAction({
           </div>
           <button
             onClick={() =>
-              run({ agentId: presetAgent?.id, action: preset.action, amountUsdc: preset.amountUsdc, app: preset.app })
+              run({ agentId: presetAgent?.id, action: preset.action, amountUsdc: preset.amountUsdc, app: preset.app, to: preset.to, asset: preset.asset })
             }
             disabled={busy || !presetAgent}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-ink px-4 text-[14px] font-medium text-white transition hover:bg-ink-2 disabled:opacity-50"
@@ -118,6 +139,38 @@ export function RunAction({
               {busy ? "Running…" : "Run"}
             </button>
           </div>
+          {action === "transfer" && (
+            <div className="mt-3 grid gap-3 border-t border-line pt-3 md:grid-cols-[2fr_1fr] md:items-end">
+              <Field label="Recipient wallet">
+                <input value={to} onChange={(e) => setTo(e.target.value.trim())} placeholder="0x…" className={cn(inputCls, "mono text-[13px]")} />
+              </Field>
+              <Field label="Asset">
+                <select value={asset} onChange={(e) => setAsset(e.target.value)} className={inputCls}>
+                  {ASSET_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="flex flex-wrap gap-2 md:col-span-2">
+                {DEMO_RECIPIENTS.map((r) => (
+                  <button
+                    key={r.label}
+                    type="button"
+                    onClick={() => setTo(r.address)}
+                    className={cn(
+                      "rounded-lg px-2.5 py-1 text-[12.5px] font-medium transition",
+                      to.toLowerCase() === r.address.toLowerCase() ? "bg-ink text-white" : "bg-surface text-ink-2 hover:text-ink",
+                    )}
+                  >
+                    {r.name} {r.expect === "ok" ? "✓" : "✗"}
+                  </button>
+                ))}
+                <span className="self-center text-[12px] text-ink-3">Demo wallets with simulator A-Passes: active, frozen, none.</span>
+              </div>
+            </div>
+          )}
         </div>
       )}
       <ActionResultDialog result={result} onClose={() => setResult(null)} />
