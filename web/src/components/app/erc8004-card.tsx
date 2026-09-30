@@ -15,6 +15,7 @@ const REASON_TEXT: Record<Erc8004Reason, string> = {
   "no-owner-wallet": "Bind the owner's wallet first: the agent NFT is minted to it.",
   "agent-keys-not-configured": "Registered. Binding the agent's own key needs FUKU_AGENT_KEY_SECRET on the server.",
   "owned-elsewhere": "The agent NFT is no longer held by the owner's bound wallet.",
+  "agent-uri-not-public": "The agent's registration file must resolve publicly before it is registered:",
 };
 
 const short = (a: string) => `${a.slice(0, 8)}…${a.slice(-4)}`;
@@ -97,7 +98,12 @@ export function Erc8004Card({ agentId }: { agentId: string }) {
                 <div>The owner&apos;s wallet mints the agent NFT, then binds the agent&apos;s own key as its agentWallet.</div>
               )}
               {data.registryId && <Mono className="block break-all text-[11px]">{data.registryId}</Mono>}
-              {data.reason && <div>{REASON_TEXT[data.reason]}</div>}
+              {data.reason && (
+                <div>
+                  {REASON_TEXT[data.reason]}
+                  {data.agentURIProblem ? ` ${data.agentURIProblem}.` : ""}
+                </div>
+              )}
             </div>
           </div>
           {data.actions.length > 0 && (

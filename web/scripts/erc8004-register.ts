@@ -7,7 +7,8 @@
  *
  * Environment: web/.env, where exported variables take precedence. Needs FUKU_CHAIN_MODE=live on
  * chain 10143, DATABASE_URL (the app's database, demo seeded), DEMO_OWNER_PRIVATE_KEY and
- * FUKU_AGENT_KEY_SECRET; the agentURI base is FUKU_ERC8004_URI_BASE or NEXT_PUBLIC_APP_URL.
+ * FUKU_AGENT_KEY_SECRET. The agentURI is FUKU_PUBLIC_URL's registration endpoint (checked to resolve
+ * first) or, when that is unset, a self-contained data: URI.
  * Sends transactions from Ava's wallet: refuses any RPC but a local node (a fork of Monad testnet)
  * unless --allow-testnet is given.
  *

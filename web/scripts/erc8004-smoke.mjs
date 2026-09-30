@@ -140,12 +140,16 @@ async function main() {
   check("ownerOf(agentId) is the owner's wallet", isAddressEqual(nftOwner, owner.address), nftOwner);
   check("getAgentWallet(agentId) is the agent's own key, not the owner", isAddressEqual(agentWallet, done.json?.agentWallet) && !isAddressEqual(agentWallet, owner.address), agentWallet);
   check("tokenURI(agentId) is the agentURI Fuku registered; Fuku reports complete", tokenURI === done.json?.agentURI && done.json?.complete === true, tokenURI);
-  const fileRes = await fetch(tokenURI.replace(/^https?:\/\/[^/]+/, BASE_URL));
+  // A data: URI carries the file itself (minted before the agent id existed, so no registrations yet);
+  // a public URL is fetched here and names this registration.
+  const isData = tokenURI.startsWith("data:");
+  const fileRes = await fetch(isData ? tokenURI : tokenURI.replace(/^https?:\/\/[^/]+/, BASE_URL));
   const file = await fileRes.json().catch(() => null);
+  const typed = fileRes.status === 200 && file?.type === "https://eips.ethereum.org/EIPS/eip-8004#registration-v1" && file?.name === "ERC-8004 smoke agent";
   check(
-    "the registration file resolves and names this registration",
-    fileRes.status === 200 && file?.type === "https://eips.ethereum.org/EIPS/eip-8004#registration-v1" && file?.registrations?.[0]?.agentId === Number(id) && file?.registrations?.[0]?.agentRegistry === `eip155:${chainId}:${REGISTRY}`,
-    JSON.stringify(file?.registrations ?? file).slice(0, 120),
+    isData ? "the agentURI is a self-contained data: URI holding the registration file" : "the registration file resolves and names this registration",
+    typed && (isData || (file?.registrations?.[0]?.agentId === Number(id) && file?.registrations?.[0]?.agentRegistry === `eip155:${chainId}:${REGISTRY}`)),
+    isData ? `${tokenURI.length} characters` : JSON.stringify(file?.registrations ?? file).slice(0, 120),
   );
 
   // 5. a mismatched confirmation is refused

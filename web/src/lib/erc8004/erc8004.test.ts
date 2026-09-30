@@ -28,6 +28,7 @@ import {
   readErc8004Domain,
   registerCalldata,
   registeredIn,
+  registrationDataUri,
   registrationFile,
   setAgentWalletCalldata,
   signAgentWalletSet,
@@ -132,6 +133,24 @@ describe("ERC-8004 identity registry", () => {
     assert.deepEqual(file.registrations, [{ agentId: 12, agentRegistry: "eip155:10143:0x8004A818BFB912233c491871b3d84c89A494BD9e" }]);
     assert.deepEqual(file.supportedTrust, []);
     assert.deepEqual(file.services, [{ name: "web", endpoint: "https://fuku.example" }]);
+  });
+});
+
+describe("ERC-8004 agentURI", () => {
+  it("without a public URL: a self-contained data: URI with no web service and no image", () => {
+    const file = registrationFile({ name: "Trading Assistant", description: "Swaps", image: "", url: "", active: true, registration: null });
+    assert.deepEqual(file.services, []);
+    const uri = registrationDataUri(file);
+    assert.ok(uri.startsWith("data:application/json;base64,"));
+    assert.deepEqual(JSON.parse(Buffer.from(uri.slice(uri.indexOf(",") + 1), "base64").toString("utf8")), file);
+  });
+
+  it("a public URL must be https on a public host before anything is registered", async () => {
+    const { publicUriProblem } = await import("../services/erc8004");
+    assert.match((await publicUriProblem("http://fuku.example/a.json"))!, /not https/);
+    for (const host of ["localhost:3001", "127.0.0.1", "192.168.1.5", "10.0.0.2", "172.20.0.1"]) {
+      assert.match((await publicUriProblem(`https://${host}/a.json`))!, /not a public host/, host);
+    }
   });
 });
 

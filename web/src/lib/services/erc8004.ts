@@ -16,6 +16,8 @@ import {
   readErc8004Domain,
   registerCalldata,
   registeredIn,
+  registrationDataUri,
+  registrationFile,
   setAgentWalletCalldata,
   signAgentWalletSet,
 } from "../erc8004";
@@ -40,7 +42,7 @@ export interface Erc8004Action {
   deadline?: number;
 }
 
-export type Erc8004Reason = "mock-chain" | "unsupported-chain" | "no-owner-wallet" | "agent-keys-not-configured" | "owned-elsewhere";
+export type Erc8004Reason = "mock-chain" | "unsupported-chain" | "no-owner-wallet" | "agent-keys-not-configured" | "owned-elsewhere" | "agent-uri-not-public";
 
 export interface Erc8004View {
   chainId: number;
@@ -57,6 +59,10 @@ export interface Erc8004View {
   agentWallet: Address | null;
   agentId: string | null;
   agentURI: string;
+  /** public-url: FUKU_PUBLIC_URL, checked to resolve before registering; data: a self-contained data: URI. */
+  agentURIKind: "public-url" | "data";
+  /** Why the public URL does not resolve (reason agent-uri-not-public). */
+  agentURIProblem: string | null;
   registerTx: string | null;
   walletTx: string | null;
   onChain: { owner: Address; agentWallet: Address; tokenURI: string } | null;
@@ -68,14 +74,66 @@ export interface Erc8004View {
 
 type Env = Record<string, string | undefined>;
 
-/** The public base URL of agent URIs and registration files (FUKU_ERC8004_URI_BASE, else the app URL). */
-export function erc8004BaseUrl(env: Env = process.env): string {
-  return (env.FUKU_ERC8004_URI_BASE?.trim() || env.NEXT_PUBLIC_APP_URL?.trim() || "http://localhost:3001").replace(/\/+$/, "");
+/** The app's public base URL (FUKU_PUBLIC_URL), or null: registration files then travel as data: URIs. */
+export function erc8004PublicBase(env: Env = process.env): string | null {
+  const raw = env.FUKU_PUBLIC_URL?.trim();
+  return raw ? raw.replace(/\/+$/, "") : null;
 }
 
-/** Where the agent's registration file is served (app/api/erc8004/agents/[id]/registration.json). */
-export function agentUriFor(agentId: string, env: Env = process.env): string {
-  return `${erc8004BaseUrl(env)}/api/erc8004/agents/${encodeURIComponent(agentId)}/registration.json`;
+/** The registration file Fuku publishes for an agent. */
+export function agentRegistrationFile(agent: Pick<Agent, "name" | "description" | "status" | "erc8004Id" | "erc8004ChainId" | "erc8004Registry">) {
+  const base = erc8004PublicBase();
+  return registrationFile({
+    name: agent.name,
+    description: agent.description ?? `${agent.name}, an AI agent whose owner governs it through Fuku.`,
+    image: base ? `${base}/fuku-logo.png` : "",
+    url: base ?? "",
+    active: agent.status === "active",
+    registration:
+      agent.erc8004Id && agent.erc8004ChainId && agent.erc8004Registry
+        ? { agentId: BigInt(agent.erc8004Id), chainId: agent.erc8004ChainId, registry: agent.erc8004Registry as Address }
+        : null,
+  });
+}
+
+const PRIVATE_HOST = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.0\.0\.0|\[?::1\]?$)/i;
+const resolved = new Set<string>();
+
+/**
+ * Why `uri` would not resolve for a third party, or null when it does: it must be https on a public
+ * host and serve this agent's registration file right now (fetched once, then remembered).
+ */
+export async function publicUriProblem(uri: string): Promise<string | null> {
+  if (resolved.has(uri)) return null;
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return `${uri} is not a URL`;
+  }
+  if (url.protocol !== "https:") return `${uri} is not https`;
+  if (PRIVATE_HOST.test(url.hostname)) return `${url.hostname} is not a public host`;
+  try {
+    const res = await fetch(uri, { signal: AbortSignal.timeout(8000), headers: { accept: "application/json" } });
+    if (!res.ok) return `${uri} answered ${res.status}`;
+    const file = (await res.json()) as { type?: string };
+    if (file?.type !== "https://eips.ethereum.org/EIPS/eip-8004#registration-v1") return `${uri} does not serve a registration file`;
+  } catch (err) {
+    return `${uri} did not resolve: ${(err as Error).message}`;
+  }
+  resolved.add(uri);
+  return null;
+}
+
+/**
+ * The agentURI to register, fixed on the agent (so the confirmation checks the same string) before it
+ * is checked: FUKU_PUBLIC_URL's registration endpoint when set, else a data: URI of the file.
+ */
+async function prepareAgentUri(agent: Agent): Promise<{ uri: string; kind: "public-url" | "data"; problem: string | null }> {
+  const base = erc8004PublicBase();
+  const uri = base ? `${base}/api/erc8004/agents/${encodeURIComponent(agent.id)}/registration.json` : registrationDataUri(agentRegistrationFile(agent));
+  if (agent.erc8004Uri !== uri) await db.agent.update({ where: { id: agent.id }, data: { erc8004Uri: uri } });
+  return { uri, kind: base ? "public-url" : "data", problem: base ? await publicUriProblem(uri) : null };
 }
 
 function ownerWalletOf(identity: Pick<Identity, "walletAddress" | "walletVerifiedBy">): Address | null {
@@ -124,7 +182,7 @@ export async function erc8004View(agent: Agent, identity: Identity): Promise<Erc
   const c = chainConfig();
   const registry = erc8004IdentityRegistry(c.id);
   const ownerWallet = ownerWalletOf(identity);
-  const agentURI = agent.erc8004Uri ?? agentUriFor(agent.id);
+  const agentURI = agent.erc8004Uri ?? "";
   const view: Erc8004View = {
     chainId: c.id,
     explorer: c.explorer,
@@ -137,6 +195,8 @@ export async function erc8004View(agent: Agent, identity: Identity): Promise<Erc
     agentWallet: agent.agentWallet ? getAddress(agent.agentWallet) : null,
     agentId: agent.erc8004Id,
     agentURI,
+    agentURIKind: agentURI.startsWith("data:") ? "data" : "public-url",
+    agentURIProblem: null,
     registerTx: agent.erc8004Tx,
     walletTx: agent.erc8004WalletTx,
     onChain: null,
@@ -150,10 +210,14 @@ export async function erc8004View(agent: Agent, identity: Identity): Promise<Erc
   const client = chainReader()!;
 
   if (!agent.erc8004Id) {
+    const prepared = await prepareAgentUri(agent);
+    view.agentURI = prepared.uri;
+    view.agentURIKind = prepared.kind;
+    if (prepared.problem) return { ...view, reason: "agent-uri-not-public", agentURIProblem: prepared.problem };
     view.actions.push({
       op: "erc8004Register",
       description: `Register ${agent.name} on the ERC-8004 Identity Registry; the agent NFT is minted to your wallet`,
-      tx: { chainId: c.id, from: ownerWallet, to: registry, data: registerCalldata(agentURI), value: "0x0" },
+      tx: { chainId: c.id, from: ownerWallet, to: registry, data: registerCalldata(prepared.uri), value: "0x0" },
     });
     return view;
   }
@@ -192,7 +256,8 @@ export async function confirmErc8004(agent: Agent, identity: Identity, input: { 
   if (!tx.to || !isAddressEqual(tx.to, registry)) return { ok: false, error: `sent to ${tx.to}, not the ERC-8004 Identity Registry ${registry}` };
 
   if (input.op === "erc8004Register") {
-    const agentURI = agent.erc8004Uri ?? agentUriFor(agent.id);
+    const agentURI = agent.erc8004Uri;
+    if (!agentURI) return { ok: false, error: "prepare the registration first (the agentURI is fixed when it is prepared)" };
     const minted = registeredIn(receipt.logs, registry, ownerWallet, agentURI);
     if (minted === null) return { ok: false, error: `no Registered event for ${agentURI} and ${ownerWallet}` };
     const owner = await client.readContract({ address: registry, abi: Erc8004IdentityRegistryAbi, functionName: "ownerOf", args: [minted] });

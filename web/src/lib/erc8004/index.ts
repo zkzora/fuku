@@ -110,7 +110,10 @@ export function setAgentWalletCalldata(m: Pick<AgentWalletSet, "agentId" | "newW
   return encodeFunctionData({ abi: Erc8004IdentityRegistryAbi, functionName: "setAgentWallet", args: [m.agentId, m.newWallet, m.deadline, signature] });
 }
 
-/** The registration file (ERC8004SPEC.md). `supportedTrust` is empty: Fuku claims discovery only. */
+/**
+ * The registration file (ERC8004SPEC.md). `supportedTrust` is empty: Fuku claims discovery only.
+ * Without a public URL there is no web service and no image to point at, so both are left empty.
+ */
 export function registrationFile(input: {
   name: string;
   description: string;
@@ -124,7 +127,7 @@ export function registrationFile(input: {
     name: input.name,
     description: input.description,
     image: input.image,
-    services: [{ name: "web", endpoint: input.url }],
+    services: input.url ? [{ name: "web", endpoint: input.url }] : [],
     x402Support: false,
     active: input.active,
     registrations: input.registration
@@ -132,6 +135,11 @@ export function registrationFile(input: {
       : [],
     supportedTrust: [] as string[],
   };
+}
+
+/** A self-contained agentURI: the registration file as a base64 JSON data URI (the spec's on-chain option). */
+export function registrationDataUri(file: ReturnType<typeof registrationFile>): string {
+  return `data:application/json;base64,${Buffer.from(JSON.stringify(file), "utf8").toString("base64")}`;
 }
 
 /** The agentId minted by a register() receipt: the registry's Registered event for `owner` and `agentURI`. */
