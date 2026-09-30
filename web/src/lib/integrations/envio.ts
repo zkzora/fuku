@@ -2,6 +2,7 @@ import { decodeEventLog, isHex, type Abi, type Hex } from "viem";
 import { chainConfig } from "../chain";
 import {
   AgentRegistryAbi,
+  FukuSpendGuardAbi,
   HumanIdentityRegistryAbi,
   PermissionRegistryAbi,
   ReputationRegistryAbi,
@@ -19,13 +20,15 @@ import { idToBytes32 } from "../ids";
  * HyperRPC does not support eth_call, so contract writes and simulations stay on MONAD_RPC_URL.
  */
 
-type RegistryKey = "identity" | "agents" | "permissions" | "reputation";
+type RegistryKey = "identity" | "agents" | "permissions" | "reputation" | "guard";
 
 const ABIS: Record<RegistryKey, Abi> = {
   identity: HumanIdentityRegistryAbi as unknown as Abi,
   agents: AgentRegistryAbi as unknown as Abi,
   permissions: PermissionRegistryAbi as unknown as Abi,
   reputation: ReputationRegistryAbi as unknown as Abi,
+  // Mandate, payee and guarded-transfer events carry the agent id as their first indexed topic too.
+  guard: FukuSpendGuardAbi as unknown as Abi,
 };
 
 function registries(): Partial<Record<RegistryKey, string>> {
@@ -34,6 +37,7 @@ function registries(): Partial<Record<RegistryKey, string>> {
   if (process.env.FUKU_AGENT_REGISTRY) r.agents = process.env.FUKU_AGENT_REGISTRY.toLowerCase();
   if (process.env.FUKU_PERMISSION_REGISTRY) r.permissions = process.env.FUKU_PERMISSION_REGISTRY.toLowerCase();
   if (process.env.FUKU_REPUTATION_REGISTRY) r.reputation = process.env.FUKU_REPUTATION_REGISTRY.toLowerCase();
+  if (process.env.FUKU_SPEND_GUARD) r.guard = process.env.FUKU_SPEND_GUARD.toLowerCase();
   return r;
 }
 
@@ -206,9 +210,14 @@ export async function fetchRegistryEvents(opts: {
   }
 
   const events: OnChainEvent[] = [];
+  const seen = new Set<string>();
   for (const log of logs) {
     const registry = byAddress.get(log.address.toLowerCase());
     if (!registry) continue;
+    // Pages can overlap; an event is identified by its transaction and log index, so it counts once.
+    const eventId = `${log.transaction_hash}-${log.log_index}`;
+    if (seen.has(eventId)) continue;
+    seen.add(eventId);
     const topics = [log.topic0, log.topic1, log.topic2, log.topic3].filter((t): t is string => Boolean(t)) as [Hex, ...Hex[]];
     let decoded: { eventName: string; args: Record<string, unknown> };
     try {
@@ -271,12 +280,37 @@ function describe(
         detail: `proof ${short(a.proofHash)}`,
         tone: a.allowed ? "allow" : "block",
       };
+    case "MandateOpened":
+      return {
+        title: `${who} mandate v${a.version} opened by the owner`,
+        detail: `cap ${units(a.dailyCap)}/day · max ${units(a.maxPerTx)} per transfer · payees ${a.restrictPayees ? "restricted" : "open"}`,
+        tone: "violet",
+      };
+    case "MandateClosed":
+      return { title: `${who} mandate closed by the owner`, detail: `version ${a.version}`, tone: "block" };
+    case "PayeeSet":
+      return { title: `${who} payee ${a.allowed ? "approved" : "removed"} by the owner`, detail: `payee ${short(a.payee)}`, tone: a.allowed ? "allow" : "neutral" };
+    case "GuardedTransferExecuted":
+      return {
+        title: `${who} moved ${units(a.amount)} through FukuSpendGuard`,
+        detail: `to ${short(a.to)} · action ${short(a.actionHash)} · compliance ${short(a.complianceRef)}`,
+        tone: "allow",
+      };
     case "ScoreUpdated": {
       const d = Number(a.delta);
       return { title: `${who} trust score ${a.newScore} (${d > 0 ? "+" : ""}${d})`, detail: String(a.reason), tone: d < 0 ? "block" : "allow" };
     }
     default:
       return { title: `${who} ${kind}`, detail: "", tone: "neutral" };
+  }
+}
+
+/** Token base units (6 decimals) as a plain amount. */
+function units(v: unknown) {
+  try {
+    return (Number(BigInt(String(v))) / 1e6).toLocaleString("en-US");
+  } catch {
+    return String(v);
   }
 }
 
