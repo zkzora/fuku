@@ -25,7 +25,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
 import { idToBytes32, hashJson, hashString } from "../ids";
 import { db } from "../db";
-import { policyHashDoc } from "../engine/policy";
+import { parsePolicy, policyAnchorHash } from "../engine/policy";
 import { custodyFor, type Custody } from "../custody";
 import {
   AgentRegistryAbi,
@@ -150,8 +150,6 @@ export interface AgentRef {
   version: string;
   capabilities: string[];
   identity: IdentityRef;
-  /** The agent's current passport, so a passport approved in mock mode is anchored lazily too. */
-  policy?: { doc: unknown; version: number; active: boolean } | null;
 }
 
 /** Build an AgentRef from Prisma rows (capabilities are stored as a JSON string). */
@@ -161,7 +159,6 @@ export function toAgentRef(
     name: string;
     version: string;
     capabilities: string | string[];
-    policy?: { allowed: string; blocked: string; scopeApps: string; assets?: string | null; version: number; active: boolean } | null;
   },
   identity: {
     id: string;
@@ -172,24 +169,6 @@ export function toAgentRef(
     chainCustody?: string | null;
   },
 ): AgentRef {
-  let policy: AgentRef["policy"] = null;
-  if (agent.policy) {
-    try {
-      policy = {
-        // Same document (and key order) that setAgentPolicy hashes, so the anchored hash matches.
-        doc: policyHashDoc({
-          allowed: JSON.parse(agent.policy.allowed),
-          blocked: JSON.parse(agent.policy.blocked),
-          scopeApps: JSON.parse(agent.policy.scopeApps),
-          assets: agent.policy.assets ? JSON.parse(agent.policy.assets) : [],
-        }),
-        version: agent.policy.version,
-        active: agent.policy.active,
-      };
-    } catch {
-      policy = null;
-    }
-  }
   let capabilities: string[] = [];
   if (Array.isArray(agent.capabilities)) capabilities = agent.capabilities;
   else {
@@ -212,7 +191,6 @@ export function toAgentRef(
       custody: custodyFor(identity),
       wallet: identity.walletVerifiedBy ? (identity.walletAddress ?? null) : null,
     },
-    policy,
   };
 }
 
@@ -525,8 +503,8 @@ function registerAgentCall(ctx: LiveCtx, agent: AgentRef): Call {
 }
 
 /**
- * Register the agent (and its identity) on-chain if missing, and, when `syncPolicy` is set,
- * push its current passport if the registry has none (passports approved in mock mode were
+ * Register the agent (and its identity) on-chain if missing, and, when `syncPolicy` is set, anchor
+ * the database's current passport if the registry lacks it (passports approved in mock mode were
  * never anchored). Idempotent.
  */
 async function ensureAgentOnChain(ctx: LiveCtx, agent: AgentRef, opts: { syncPolicy?: boolean } = {}): Promise<void> {
@@ -542,31 +520,58 @@ async function ensureAgentOnChain(ctx: LiveCtx, agent: AgentRef, opts: { syncPol
     await write(ctx, "registerAgent", registerAgentCall(ctx, agent));
     ctx.notes.push(`agent ${agent.id} anchored`);
   }
-  if (opts.syncPolicy && agent.policy?.active) await ensurePolicyOnChain(ctx, agent);
+  if (opts.syncPolicy) await ensurePolicyOnChain(ctx, agent);
+}
+
+const sameHex = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/**
+ * The agent's passport as the database holds it now. The chain follows the database, never a
+ * caller's snapshot: this is read under the signer lease, right before a policy write or an
+ * attestation, so an agent row loaded before a revoke (by a concurrent request, a queued anchor or a
+ * reconcile pass) can neither re-activate the revoked passport nor anchor a replaced one.
+ */
+async function currentPassport(agentId: string): Promise<{ hash: Hex; version: number; active: boolean } | null> {
+  const row = await db.policy.findUnique({ where: { agentId } });
+  if (!row) return null;
+  if (row.policyHash && isHex(row.policyHash) && row.policyHash.length === 66) return { hash: row.policyHash as Hex, version: row.version, active: row.active };
+  const doc = parsePolicy(row);
+  return doc ? { hash: policyAnchorHash(doc, row.version), version: row.version, active: row.active } : null;
+}
+
+/** The passport a write was prepared for is no longer the database's active one; nothing was sent. */
+export class PassportSuperseded extends Error {
+  constructor(
+    readonly agentId: string,
+    readonly version: number,
+  ) {
+    super(`passport v${version} of ${agentId} was revoked or replaced before it was anchored`);
+    this.name = "PassportSuperseded";
+  }
 }
 
 /**
- * Anchor the agent's current passport when the registry has no active policy for it, or when the
- * anchored `policyHash` differs from the passport Fuku enforces (a stale passport).
+ * Anchor the database's current passport when the registry lacks it (never anchored, or another
+ * hash). A passport the database has revoked is never anchored again. Idempotent.
  */
 async function ensurePolicyOnChain(ctx: LiveCtx, agent: AgentRef): Promise<void> {
-  if (!agent.policy?.active) return;
-  const expected = hashJson(agent.policy.doc);
+  const passport = await currentPassport(agent.id);
+  if (!passport?.active) return;
   const [onChainHash, , , active] = await ctx.publicClient.readContract({
     address: ctx.addresses.permissions,
     abi: PermissionRegistryAbi,
     functionName: "policies",
     args: [idToBytes32(agent.id)],
   });
-  if (active && onChainHash.toLowerCase() === expected.toLowerCase()) return;
+  if (active && sameHex(onChainHash, passport.hash)) return;
   if (agent.identity.custody === "owner") throw new OwnerSignatureRequired("setPolicy", agent.id);
   await write(ctx, "setPolicy", {
     address: ctx.addresses.permissions,
     abi: PermissionRegistryAbi,
     functionName: "setPolicy",
-    args: [idToBytes32(agent.id), expected, agent.policy.version, `fuku://agents/${agent.id}/policy`],
+    args: [idToBytes32(agent.id), passport.hash, passport.version, `fuku://agents/${agent.id}/policy`],
   });
-  ctx.notes.push(`passport v${agent.policy.version} for agent ${agent.id} ${active ? "re-anchored (hash changed)" : "anchored"}`);
+  ctx.notes.push(`passport v${passport.version} for agent ${agent.id} ${active ? "re-anchored (hash changed)" : "anchored"}`);
 }
 
 /**
@@ -642,6 +647,18 @@ function awaitingOwnerReceipt(c: ChainConfig, err: OwnerSignatureRequired): Chai
   };
 }
 
+function supersededReceipt(c: ChainConfig, err: PassportSuperseded): ChainReceipt {
+  return {
+    txHash: null,
+    block: null,
+    mode: "live",
+    status: "failed",
+    chainId: c.id,
+    explorerUrl: null,
+    note: `Not anchored: ${err.message}. Nothing was sent.`,
+  };
+}
+
 function pendingReceipt(c: ChainConfig, hash: Hex): ChainReceipt {
   return {
     txHash: hash,
@@ -676,6 +693,7 @@ async function send(
   } catch (err) {
     if (err instanceof ReceiptTimeoutError && err.label === op) return pendingReceipt(c, err.hash);
     if (err instanceof OwnerSignatureRequired) return awaitingOwnerReceipt(c, err);
+    if (err instanceof PassportSuperseded) return supersededReceipt(c, err);
     const reason = describeChainError(err);
     noteHealth(false, op, reason);
     console.error(`[fuku-chain] ${op} failed on ${c.name} (chain ${c.id}). Reason: ${reason}`);
@@ -788,9 +806,17 @@ export function registerAgentOnChain(agent: AgentRef) {
   });
 }
 
-export function setPolicyOnChain(agent: AgentRef, policy: unknown, version: number) {
+/**
+ * Anchor passport `version` under `policyHash` (see policyAnchorHash). Sent only if it is still the
+ * database's active passport once the signer lease is held; a revoke or a newer version that won the
+ * race is left alone (the receipt says nothing was sent). Owner-controlled agents: awaiting-owner.
+ */
+export function setPolicyOnChain(agent: AgentRef, policyHash: Hex, version: number) {
   return send("setPolicy", { agentId: agent.id, version }, async (ctx, onSubmitted) => {
     await ensureAgentOnChain(ctx, agent);
+    const passport = await currentPassport(agent.id);
+    if (!passport?.active || passport.version !== version || !sameHex(passport.hash, policyHash)) throw new PassportSuperseded(agent.id, version);
+    if (agent.identity.custody === "owner") throw new OwnerSignatureRequired("setPolicy", agent.id);
     return write(
       ctx,
       "setPolicy",
@@ -798,7 +824,7 @@ export function setPolicyOnChain(agent: AgentRef, policy: unknown, version: numb
         address: ctx.addresses.permissions,
         abi: PermissionRegistryAbi,
         functionName: "setPolicy",
-        args: [idToBytes32(agent.id), hashJson(policy), version, `fuku://agents/${agent.id}/policy`],
+        args: [idToBytes32(agent.id), policyHash, version, `fuku://agents/${agent.id}/policy`],
       },
       onSubmitted,
     );
@@ -858,6 +884,8 @@ export interface GuardedTransferInput {
   amount: bigint;
   proofHash: Hex;
   complianceRef: Hex;
+  /** The passport version the engine authorized this transfer under; re-checked before signing. */
+  policyVersion: number;
   /** Persist the transaction hash as soon as it is broadcast (before waiting for the receipt). */
   onSubmitted?: (hash: Hex) => Promise<void> | void;
 }
@@ -910,9 +938,24 @@ function executionLog(logs: Log[], guard: Address, actionHash: Hex) {
 }
 
 /**
- * Move `amount` of an A-Token from the owner's funding wallet through FukuSpendGuard. The
- * compliance signer attests to exactly this transfer (EIP-712) against the policy hash and the
- * owner's mandate version that are on chain right now; the guard re-checks agent status, passport,
+ * Re-check, right before signing, that what authorized a transfer still holds in the database: the
+ * agent is active and passport `policyVersion` is still its active passport. The kill switch writes
+ * the database first, so a revoke, a pause or a newer passport committed before this read wins and
+ * nothing is signed. Returns the passport to attest to, or why the transfer is refused.
+ */
+async function freshAuthorization(agentId: string, policyVersion: number): Promise<{ passport: { hash: Hex; version: number } } | { reason: string }> {
+  const [agent, passport] = await Promise.all([db.agent.findUnique({ where: { id: agentId }, select: { status: true } }), currentPassport(agentId)]);
+  if (!agent || agent.status !== "active") return { reason: `AUTHORIZATION_CHANGED(agent ${agent?.status ?? "missing"})` };
+  if (!passport?.active) return { reason: "AUTHORIZATION_CHANGED(passport revoked)" };
+  if (passport.version !== policyVersion) return { reason: `AUTHORIZATION_CHANGED(passport v${passport.version} replaced v${policyVersion})` };
+  return { passport };
+}
+
+/**
+ * Move `amount` of an A-Token from the owner's funding wallet through FukuSpendGuard. Under the
+ * signer lease, Fuku first re-checks the authorization in the database (freshAuthorization); the
+ * compliance signer then attests to exactly this transfer (EIP-712) against that passport's hash,
+ * once it is the active one on-chain, and the owner's current mandate version; the guard re-checks agent status, passport,
  * mandate (token, cap, per-tx limit, expiry, payees), the token applies its own compliance, and
  * the guard records the decision (R6) itself. The action hash is single-use on-chain.
  *
@@ -922,6 +965,8 @@ function executionLog(logs: Log[], guard: Address, actionHash: Hex) {
  */
 export async function executeGuardedTransfer(input: GuardedTransferInput): Promise<GuardedTransferOutcome> {
   if (chainMode() !== "live") {
+    const auth = await freshAuthorization(input.agent.id, input.policyVersion);
+    if ("reason" in auth) return { status: "rejected", reason: auth.reason };
     return {
       status: "executed",
       receipt: mockReceipt("guardedTransfer", { agentId: input.agent.id, to: input.to, amount: input.amount.toString() }, "Mock guarded transfer (chain in mock mode; no tokens moved)"),
@@ -938,22 +983,26 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
   const actionHash = hashString(input.actionId);
 
   return serialized(async (): Promise<GuardedTransferOutcome> => {
+    const auth = await freshAuthorization(input.agent.id, input.policyVersion);
+    if ("reason" in auth) return { status: "rejected", reason: auth.reason };
     let transfer;
     let signature: Hex;
     try {
       await ensureAgentOnChain(ctx, input.agent, { syncPolicy: true });
       const agentId = idToBytes32(input.agent.id);
-      const [[policyHash], mandate] = await Promise.all([
+      const [[onChainHash, , , policyActive], mandate] = await Promise.all([
         ctx.publicClient.readContract({ address: ctx.addresses.permissions, abi: PermissionRegistryAbi, functionName: "policies", args: [agentId] }),
         ctx.publicClient.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "mandates", args: [agentId, input.from] }),
       ]);
+      // Attest only to the passport the database authorized, and only once it is the active one on-chain.
+      if (!policyActive || !sameHex(onChainHash, auth.passport.hash)) return { status: "rejected", reason: "AUTHORIZATION_CHANGED(on-chain passport differs)" };
       transfer = {
         agentId,
         from: input.from,
         to: input.to,
         token: input.token,
         amount: input.amount,
-        policyHash,
+        policyHash: auth.passport.hash,
         actionHash,
         proofHash: input.proofHash,
         complianceRef: input.complianceRef,

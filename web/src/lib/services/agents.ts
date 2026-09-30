@@ -2,8 +2,8 @@ import type { Agent, Identity, Policy, ReputationEvent } from "@prisma/client";
 import { db } from "../db";
 import { apassEligibleFor } from "./cleanverse";
 import { custodyFor } from "../custody";
-import { newAgentId, hashJson } from "../ids";
-import { parsePolicy, policyHashDoc, writablePolicySchema, type PolicyDoc } from "../engine/policy";
+import { newAgentId } from "../ids";
+import { parsePolicy, policyAnchorHash, writablePolicySchema, type PolicyDoc } from "../engine/policy";
 import { utcDayStart } from "../engine/permission";
 import { computeScore, type ScoreResult } from "../engine/reputation";
 import { anchorStateOf, ChainWriteError, registerAgentOnChain, revokePolicyOnChain, setAgentStatusOnChain, setPolicyOnChain, toAgentRef, type ChainReceipt } from "../chain";
@@ -150,13 +150,18 @@ export async function registerAgent(
   return { agent: toAgentView({ ...agent, trustScore: score.score }), receipt };
 }
 
+/**
+ * Approve a new passport version. The database is written first and the chain follows it: the relayer
+ * anchors only the passport the database holds when it has the signer lease (see chain
+ * currentPassport), so a concurrent write can neither revive an older version nor race this one. The
+ * anchored hash commits to the version (policyAnchorHash): approving the same rules again, after a
+ * revoke say, never revives attestations issued under the earlier version.
+ */
 export async function setAgentPolicy(agentId: string, raw: unknown) {
   const doc = writablePolicySchema.parse(raw);
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
-  const existing = agent.policy;
-  const version = (existing?.version ?? 0) + 1;
-  const hashDoc = policyHashDoc(doc);
-  const receipt = await setPolicyOnChain(toAgentRef(agent, agent.identity), hashDoc, version);
+  const version = (agent.policy?.version ?? 0) + 1;
+  const policyHash = policyAnchorHash(doc, version);
   const data = {
     allowed: JSON.stringify(doc.allowed),
     blocked: JSON.stringify(doc.blocked),
@@ -164,13 +169,15 @@ export async function setAgentPolicy(agentId: string, raw: unknown) {
     assets: JSON.stringify(doc.assets),
     version,
     active: true,
-    txHash: receipt.txHash,
-    anchorMode: anchorStateOf(receipt),
-    policyHash: hashJson(hashDoc),
+    txHash: null,
+    anchorMode: null,
+    policyHash,
   };
-  const policy = existing
-    ? await db.policy.update({ where: { agentId }, data })
-    : await db.policy.create({ data: { agentId, ...data } });
+  await db.policy.upsert({ where: { agentId }, create: { agentId, ...data }, update: data });
+  const receipt = await setPolicyOnChain(toAgentRef(agent, agent.identity), policyHash, version);
+  // Record the receipt on this version only (a newer approval or a revoke may have landed meanwhile).
+  await db.policy.updateMany({ where: { agentId, version }, data: { txHash: receipt.txHash, anchorMode: anchorStateOf(receipt) } });
+  const policy = await db.policy.findUniqueOrThrow({ where: { agentId } });
   // Attaching a passport activates a freshly registered agent.
   await db.agent.updateMany({ where: { id: agentId, status: "registered" }, data: { status: "active" } });
   const score = await refreshScore(agentId);

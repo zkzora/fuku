@@ -32,7 +32,7 @@ The guard never holds funds. The owner keeps the tokens and gives the guard an a
 | R9 asset (CVA) | The value action is `transfer`, the asset is on the passport, and it resolves to an A-Token in the current mode | `CVA_NOT_ALLOWED`, `PROVIDER_ERROR` |
 | R7 owner (CVI) | The owner has a wallet with an active, unexpired A-Pass, and `verify_apass(owner, atoken) == 4` | `CVI_NO_WALLET`, `CVI_NOT_FOUND`, `CVI_FROZEN`, `CVI_EXPIRED`, `CVI_RULE_REJECTED`, `PROVIDER_ERROR`, `PROVIDER_OFF` |
 | R8 counterparty (CVI) | `to` is a valid address and `verify_apass(to, atoken) == 4`. For any other code, `query_apass(to)` tells frozen, expired and rule-rejected apart | same as R7 |
-| R10 on-chain guard | The guard would revert. The reason is the decoded custom error, or `GUARD_NOT_CONFIGURED` when the chain is live but the guard or signer is not set | `GUARD_REJECTED`, `GUARD_NOT_CONFIGURED` |
+| R10 on-chain guard | The guard would revert. The reason is the decoded custom error, or `GUARD_NOT_CONFIGURED` when the chain is live but the guard or signer is not set, or `AUTHORIZATION_CHANGED` when the owner revoked or replaced the passport, or paused the agent, between the decision and the signature (nothing is signed) | `GUARD_REJECTED`, `GUARD_NOT_CONFIGURED`, `AUTHORIZATION_CHANGED` |
 
 Evaluation order: R0, R1, R2, R3, R4, R9, R7, R8, R5, R6, then R10 at execution. R0 to R6 keep their ids and meanings. Evidence is gathered only after R0 to R4 pass, so a request those rules block never reaches Cleanverse. Everything fails closed: any error, timeout, missing field or unknown code blocks the action.
 
@@ -162,10 +162,13 @@ COMPLIANCE_SIGNER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
 #    the four FUKU_*_REGISTRY, CLEANVERSE_SIM_APASS, CLEANVERSE_SIM_ATOKEN, FUKU_SPEND_GUARD
 cd web && npm run cleanverse:setup                    # A-Passes, 10,000 aUSDC-SIM, approve, mandate v2, payee
 npm run dev -- -p 3002                                 # terminal 2
-DATABASE_URL=<the web instance's database> FUKU_BASE_URL=http://localhost:3002 node scripts/live-smoke.mjs
+DATABASE_URL=<the web instance's database> SMOKE_OWNER_PRIVATE_KEY=<#3> \
+  FUKU_BASE_URL=http://localhost:3002 node scripts/live-smoke.mjs
 ~~~
 
-Expected result: `45/45 checks passed`. The 26 Cleanverse and guard checks cover the following:
+Expected result on a fresh node: `63/63 checks passed`. That is 19 demo-flow and chain checks, 27 Cleanverse and guard checks and 17 owner-custody checks. Without `SMOKE_OWNER_PRIVATE_KEY` the owner-custody section is skipped. The Cleanverse section spends most of Ava's 1,000 aUSDC-SIM daily cap, so a second run on the same node in the same UTC day fails with `DailyCapExceeded`.
+
+The 27 Cleanverse and guard checks cover the following:
 - 250 aUSDC-SIM to Nusantara is CONFIRMED. The transfer, `GuardedTransferExecuted` (bound to the action id) and `ActionDecision` land in one transaction, and `GET /api/v1/actions/:id` returns the tx and its log index.
 - The Travel Rule record (simulator) is stored and its canonical-JSON hash equals the action's `travelRuleRef`.
 - Frozen and Unverified are blocked with R8 `CVI_FROZEN` and `CVI_NOT_FOUND`, with no Transfer event.
@@ -173,7 +176,7 @@ Expected result: `45/45 checks passed`. The 26 Cleanverse and guard checks cover
 - Direct attestations revert with `PerTxLimitExceeded`, `PayeeNotApproved` and `DailyCapExceeded`.
 - Two concurrent requests cannot spend the same remainder, and the balances move exactly once per confirmed transfer (900 in total).
 - Reconciliation, run as a separate process, recovers a transfer whose hash was never stored, without double credit. A confirmation removed by `evm_revert` goes back to PENDING and loses its credit.
-- Revoking in the app emits `PolicyRevoked`, after which a pre-signed attestation reverts with `PolicyNotActive` and the app blocks the agent.
+- Revoking in the app emits `PolicyRevoked`, after which a pre-signed attestation reverts with `PolicyNotActive` and the app blocks the agent. A later decision anchor and a reconcile pass leave the passport inactive.
 
 Without any chain env (mock mode), the demo runs with the fixture backend and mock receipts.
 

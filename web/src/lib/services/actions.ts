@@ -349,6 +349,7 @@ export async function executeAction(
         amount: amountMicros,
         proofHash,
         complianceRef: compliance.complianceRef,
+        policyVersion: agent.policy?.version ?? 0,
         onSubmitted: async (hash) => {
           await setStatus({ status: "SUBMITTED", transferTxHash: hash, txHash: hash, submittedAt: new Date(), receiptMode: "live" });
         },
@@ -427,13 +428,17 @@ export async function executeAction(
     } else {
       await release();
       const notConfigured = outcome.reason === "GUARD_NOT_CONFIGURED";
+      // The owner revoked or replaced the passport, or paused the agent, after the decision above.
+      const changed = /^AUTHORIZATION_CHANGED\((.*)\)$/.exec(outcome.reason);
       evaluation = {
         decision: "BLOCKED",
         ruleId: "R10",
-        subCode: notConfigured ? "GUARD_NOT_CONFIGURED" : "GUARD_REJECTED",
+        subCode: notConfigured ? "GUARD_NOT_CONFIGURED" : changed ? "AUTHORIZATION_CHANGED" : "GUARD_REJECTED",
         reason: notConfigured
           ? "GUARD_NOT_CONFIGURED: the chain is live but FUKU_SPEND_GUARD or FUKU_COMPLIANCE_SIGNER_KEY is not set, so no A-Token can move."
-          : `GUARD_REJECTED: the on-chain FukuSpendGuard would revert with ${outcome.reason}.`,
+          : changed
+            ? `AUTHORIZATION_CHANGED: ${changed[1]} after this transfer was authorized. The owner's change wins, so nothing was signed or sent.`
+            : `GUARD_REJECTED: the on-chain FukuSpendGuard would revert with ${outcome.reason}.`,
       };
       status = "DENIED";
       proofHash = proofOf(evaluation);

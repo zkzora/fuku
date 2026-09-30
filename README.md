@@ -7,7 +7,7 @@ web/        Next.js 16 app: landing, dashboard, identity, agents, permissions, r
             activity, memory vault, developer console + the API (session and public v1)
 contracts/  Solidity for Monad (Hardhat 3): HumanIdentityRegistry, AgentRegistry,
             PermissionRegistry, ReputationRegistry, FukuSpendGuard (owner-bounded mandates),
-            and the Cleanverse simulators CleanverseAPassSim / CleanverseATokenSim — 59 passing tests
+            and the Cleanverse simulators CleanverseAPassSim / CleanverseATokenSim — 67 passing tests
 sdk/        @fuku/sdk 0.3.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
             getTrustScore, checkPermission, executeAction, getAction, getMandate
 examples/   sdk-consumer: an external program using only the SDK, verifying results on-chain
@@ -33,7 +33,7 @@ npm run dev -- -p 3001      # http://localhost:3001
 Contracts (standalone, own `node_modules`):
 
 ```bash
-cd contracts && npm install && npm test        # 59 passing
+cd contracts && npm install && npm test        # 67 passing
 ```
 
 Web tests (`cd web && npm test`, node:test via tsx) cover the permission engine, the Cleanverse module, authorization (cross-owner calls, delegations, invalid keys), atomic budgets, idempotency, reputation farming and wallet binding against a throwaway database. `npm test` at the root also runs the SDK's contract tests. The end-to-end proof on a local chain is `web/scripts/live-smoke.mjs` (45 checks) and `examples/sdk-consumer`.

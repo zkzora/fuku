@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { Hex } from "viem";
+import { hashJson } from "../ids";
 
 export const ACTIONS = [
   "swap",
@@ -127,6 +129,16 @@ export function isATokenPassport(doc: PolicyDoc | null | undefined): boolean {
 export function policyHashDoc(doc: PolicyDoc): Record<string, unknown> {
   const base = { allowed: doc.allowed, blocked: doc.blocked, scopeApps: doc.scopeApps };
   return doc.assets.length > 0 ? { ...base, assets: doc.assets } : base;
+}
+
+/**
+ * The `policyHash` anchored in PermissionRegistry for passport `version`. It commits to the version,
+ * so approving the same rules again (after a revoke, say) anchors a new hash, and FukuSpendGuard
+ * rejects every attestation issued under an earlier one with PolicyMismatch. The guard compares only
+ * the hash, so without the version a re-approval would revive unexpired attestations.
+ */
+export function policyAnchorHash(doc: PolicyDoc, version: number): Hex {
+  return hashJson({ ...policyHashDoc(doc), version });
 }
 
 export function labelFor(action: string) {

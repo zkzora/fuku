@@ -7,8 +7,7 @@ import { keccak256, stringToHex } from "viem";
 import { deriveVaultKey, encryptText, DEMO_VAULT_PASSPHRASE } from "./vault-crypto";
 import { hashApiKey } from "./services/identity";
 import { computeScore } from "./engine/reputation";
-import { labelFor, policyHashDoc, type PolicyDoc } from "./engine/policy";
-import { hashJson } from "./ids";
+import { labelFor, policyAnchorHash, type PolicyDoc } from "./engine/policy";
 import { privateKeyToAccount } from "viem/accounts";
 import { DEMO_RECIPIENTS, demoOwnerKey, demoOwnerWallet } from "./cleanverse/demo";
 import { signWalletBinding } from "./wallet-binding";
@@ -115,7 +114,7 @@ export async function seedDemo(db: PrismaClient) {
   }
 
   // ---- Agents ----
-  const tradingPolicy = {
+  const tradingPolicy: PolicyDoc = {
     allowed: [
       { action: "swap", limitUsdcPerDay: 5000 },
       { action: "read_balances" },
@@ -123,6 +122,7 @@ export async function seedDemo(db: PrismaClient) {
     ],
     blocked: ["withdraw", "change_owner", "transfer"],
     scopeApps: ["Monad DEX"],
+    assets: [],
   };
   await db.agent.create({
     data: {
@@ -145,16 +145,17 @@ export async function seedDemo(db: PrismaClient) {
           active: true,
           txHash: h("tx:policy:" + TRADING),
           anchorMode: "mock",
-          policyHash: keccak256(stringToHex(JSON.stringify(tradingPolicy))),
+          policyHash: policyAnchorHash(tradingPolicy, 2),
         },
       },
     },
   });
 
-  const researchPolicy = {
+  const researchPolicy: PolicyDoc = {
     allowed: [{ action: "read_vault" }, { action: "web_search" }, { action: "summarize" }],
     blocked: ["withdraw", "change_owner", "swap", "transfer"],
     scopeApps: ["Notion"],
+    assets: [],
   };
   await db.agent.create({
     data: {
@@ -177,7 +178,7 @@ export async function seedDemo(db: PrismaClient) {
           active: true,
           txHash: h("tx:policy:" + RESEARCH),
           anchorMode: "mock",
-          policyHash: keccak256(stringToHex(JSON.stringify(researchPolicy))),
+          policyHash: policyAnchorHash(researchPolicy, 1),
         },
       },
     },
@@ -241,7 +242,7 @@ export async function seedDemo(db: PrismaClient) {
           active: true,
           txHash: h("tx:policy:" + PAYMENTS_AGENT_ID),
           anchorMode: "mock",
-          policyHash: hashJson(policyHashDoc(paymentsPolicy)),
+          policyHash: policyAnchorHash(paymentsPolicy, 1),
         },
       },
     },

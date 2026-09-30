@@ -14,7 +14,8 @@
     "test": "tsx --test \"src/**/*.test.ts\"",
     "cleanverse:setup": "tsx scripts/setup-cleanverse-demo.ts",
     "cleanverse:check": "tsx scripts/cleanverse-check.ts",
-    "reconcile": "tsx scripts/reconcile.ts"
+    "reconcile": "tsx scripts/reconcile.ts",
+    "adversarial:live": "tsx scripts/adversarial-live.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

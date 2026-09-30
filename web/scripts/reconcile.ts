@@ -16,13 +16,22 @@ async function main() {
   const limit = i >= 0 ? Number(process.argv[i + 1]) : 100;
   // Imported after the env file is loaded, so the database and chain settings come from it.
   const { reconcile } = await import("../src/lib/services/reconcile");
-  console.log(JSON.stringify(await reconcile({ limit })));
+  const { db } = await import("../src/lib/db");
+  try {
+    console.log(JSON.stringify(await reconcile({ limit })));
+  } finally {
+    await db.$disconnect();
+  }
 }
 
+// Exit by draining, not process.exit(): on Windows, exiting while the database engine or an HTTP
+// socket is still closing aborts Node (libuv UV_HANDLE_CLOSING assertion) with a non-zero code.
 main().then(
-  () => process.exit(0),
+  () => {
+    process.exitCode = 0;
+  },
   (err) => {
     console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

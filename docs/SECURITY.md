@@ -13,7 +13,7 @@ Checked against the code on 2026-09-30 (branch `feat/cleanverse-cvi-cva`). Where
 | A transfer moves only what the owner authorised: token, daily cap, per-transfer limit, expiry, approved payees, active agent, current passport | `FukuSpendGuard.execute` on-chain | The mandate (`mandates()`), `MandateOpened` and `PayeeSet` events |
 | Each action executes at most once; retries do not pay twice | `actionExecuted` in the guard, plus `Idempotency-Key` in the API | `ActionAlreadyExecuted` revert; replayed responses |
 | Parallel requests cannot spend the same remainder | Off-chain: one conditional `UPDATE` on `BudgetWindow`. On-chain: the guard's per-day cap | R5 decisions; `DailyCapExceeded` |
-| Revoking or pausing stops outstanding authorisations | `revokePolicy` and `setStatus` on the registries, checked by the guard | `PolicyNotActive` / `AgentNotActive` reverts |
+| Revoking stops every earlier attestation for good; pausing stops them until the agent is resumed | `revokePolicy` and `setStatus` on the registries, checked by the guard. Fuku anchors a passport hash that commits to its version, and never re-anchors a passport its database has revoked (section 7) | `PolicyNotActive`, `PolicyMismatch` and `AgentNotActive` reverts |
 | A live write is never reported as a successful mock | `send`, `sendStrict`, `executeGuardedTransfer` in `web/src/lib/chain/index.ts` | `receipt.status` and `receiptMode` on every stored action |
 
 What is **not** enforced on-chain:
@@ -133,28 +133,79 @@ Rules that follow from the lifecycle:
    - For **owner-controlled** identities (a wallet bound before the first on-chain write), the owner's wallet is the controller. The relayer cannot register, re-anchor, revoke or pause for them; see `docs/MIGRATION.md`.
    - For every identity it remains the enforcer and the scorer, and it sets the passkey flag. It can therefore still record decisions and scores for any agent.
    - For owner-controlled agents, Fuku's kill switch acts off-chain immediately. The on-chain revoke or pause waits for the owner's signature, and `closeMandate` from the owner's wallet stops transfers too.
+   - As the controller of a custodial identity, the relayer could re-activate a revoked passport on-chain. Fuku's code never does (section 7), but that is the server's discipline, not the contract's. Owner-controlled identities remove it.
 2. **The compliance signer** (`FUKU_COMPLIANCE_SIGNER_KEY`) can attest any transfer that fits a mandate the owner opened, for an active agent whose on-chain passport hash matches. It cannot exceed the owner's token, cap, per-transfer limit, expiry or payee list.
+   - Each attestation names the passport hash (bound to the passport version) and the mandate version, so a revoke, a new passport version or a closed mandate voids it.
+   - A pause or a withdrawn allowance does not void it: an attestation signed before them executes after a resume or re-approval, until its 5-minute deadline.
 3. **The guard's owner** can rotate the compliance signer. The simulator contracts' owner issues simulator A-Passes and mints `aUSDC-SIM`; they are not Cleanverse.
 4. **The engine and database.** The passport's allowed actions, app scope and off-chain limits, and the reputation ledger, live in Fuku's database and are enforced by Fuku's server. On-chain commitments prove the integrity of a recorded decision, not that an AUTHORIZED action was executed or executed correctly.
 5. **Cleanverse** runs in simulator mode until the API invite lands (`docs/CLEANVERSE.md`). The real A-Token's transfer rules for third-party contracts are unverified.
 6. **Memory vault.** Every identity derives its key from a fixed demo passphrase, so the encryption is structural, not secret. Agents get no key access, and there are no scoped grants.
 7. **Not claimed:** unique-human proof, KYC, ERC-8004 conformance (the registries are inspired by it), decentralised verification, and production readiness.
 
-## 7. Reproduce
+## 7. Adversarial checks, and what still depends on the server
+
+The attacker in these checks is Fuku's own server. It holds the compliance signer key, relays every transaction, is the registries' enforcer and scorer, and runs the engine.
+
+**Checks.**
+- `contracts/test/FukuSpendGuard.adversarial.test.ts`, 8 tests of direct guard calls:
+  - A leaked signer key moves nothing outside the owner's mandate: not from another wallet, for another agent or in another token, and not with a forged mandate version or passport hash. Inside the mandate it moves at most the daily cap.
+  - Only the funding wallet opens, closes or re-points its mandate and payee list. The guard owner can only rotate the signer, and the new signer is bounded the same way.
+  - As enforcer, scorer or registry owner, the server cannot set, revoke or pause a passport.
+  - `revokePolicy` and `closeMandate` are final for earlier attestations, including a retry of one the token rejected. A pause and a withdrawn allowance are temporary.
+  - A frozen, revoked or expired A-Pass blocks an agent whose on-chain score is 100.
+- `web/src/lib/services/services.test.ts`, "revocation is final (server side)", 4 tests:
+  - the version-bound passport hash;
+  - `AUTHORIZATION_CHANGED` before signing;
+  - an idempotent replay after the kill switch;
+  - R7 for an agent scored 100.
+- `web/scripts/adversarial-live.ts` (`npm run adversarial:live`), 12 checks on a live chain. It goes through Fuku's own code paths while holding an agent snapshot taken before the revoke.
+- The live smoke checks two more things:
+  - a later decision anchor and a reconcile pass leave a revoked passport inactive;
+  - a passport update for an owner-controlled agent waits for the owner's signature.
+
+**Found and fixed on 2026-09-30.** On the previous code the live probe failed 6 of its 12 checks.
+1. **A stale snapshot re-activated a revoked passport.** A decision anchor, a score update or a guarded transfer that still held the agent as loaded before the kill switch re-anchored the revoked passport on-chain (`ensurePolicyOnChain` trusted the snapshot). The guarded transfer then signed an attestation.
+   - Now the relayer anchors only the passport the database holds when it has the signer lease, and never a revoked one.
+   - A guarded transfer re-checks the agent and the passport version in the database right before signing. If either changed, it is refused with R10 `AUTHORIZATION_CHANGED` and nothing is signed.
+2. **Re-approving revived old attestations.** The anchored passport hash covered the rules but not the version. Approving the same rules again after a revoke anchored the same hash, so attestations issued before the revoke became valid again until their deadline. The hash now commits to the version (`policyAnchorHash`), and those attestations revert `PolicyMismatch`.
+3. **Owner-controlled passport updates failed.** For an agent its owner had already registered, a passport update made the relayer try `setPolicy`, which reverted `NotAgentOwner` and was recorded as `failed`. It now returns `awaiting-owner` for the owner to sign.
+
+Passport writes also go to the database first now, as revokes already did, so the chain follows the database.
+
+**What still depends on the server.**
+1. **The passport's content.** Allowed and blocked actions, app scope and the off-chain limits are enforced by Fuku's engine. The guard sees one hash.
+2. **A revoke staying final across re-approvals.** The guard compares only the passport hash; a contract test pins this.
+   - Fuku binds the hash to the version and never re-anchors a revoked passport.
+   - For a custodial identity, the relayer could do so as the controller, and only Fuku's code stops it.
+   - For an owner-controlled identity, only the owner's wallet can anchor.
+3. **The kill switch's timing.** The database write is the switch.
+   - A transfer whose re-check ran before that write may still be mined. At most one is in flight, because signing is serialised.
+   - The on-chain revoke follows in the relayer's queue. For owner-controlled agents it waits for the owner's signature; `closeMandate` from the owner's wallet is the on-chain stop the owner controls directly.
+4. **Pause and allowance are temporary.** Attestations signed before a pause or an allowance withdrawal execute after a resume or re-approval, until their deadline.
+   - The deadline (5 minutes) is chosen by the server and enforced by the guard.
+   - A compromised signer could sign longer-lived ones. They still stay inside the mandate, and a revoke, a new passport version or a closed mandate voids them.
+5. **One execution per action.** The guard executes each action hash at most once. That the server never re-signs a settled action (a denied or failed row) is its own discipline:
+   - every request creates a new row;
+   - reconcile only reads receipts and `actionExecuted`; it never sends a transfer.
+6. **Eligibility versus score.** The token checks both A-Passes on every transfer, and the engine checks them before signing (R7, R8). The trust score is never an input to allow or deny.
+
+## 8. Reproduce
 
 Local runs on 2026-09-30:
 
 | Command | Expected |
 | --- | --- |
-| `cd contracts && npm test` | 59 passing |
-| `npm test` (root: web + sdk) | 58 web tests, 8 SDK tests, all passing |
+| `cd contracts && npm test` | 67 passing (8 of them adversarial) |
+| `npm test` (root: web + sdk) | 67 web tests, 8 SDK tests, all passing |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
-| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database) | `45/45 checks passed` |
+| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `63/63 checks passed` on a fresh node |
+| `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 17 steps `ok`, exit 0 |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 
-## 8. Production configuration
+## 9. Production configuration
 
 The production environment needs:
 
@@ -166,11 +217,14 @@ The production environment needs:
 - A shared database for several instances. SQLite is single-node.
 - Upgrade the rate limits to a shared store before scaling out.
 
-## 9. Testnet runbook (not executed; each step needs the owner's go-ahead)
+## 10. Testnet runbook (not executed; each step needs the owner's go-ahead)
 
 1. `contracts/.env`: set `COMPLIANCE_SIGNER_ADDRESS` to a fresh key's address and `FUKU_COMPLIANCE_SIGNER_KEY` to that key.
 2. `cd contracts && npm run deploy:cleanverse:monad`. This is four transactions: two simulators, the guard, and one enforcer grant. The four registries are untouched.
 3. `npm run wire:env`. It writes `FUKU_SPEND_GUARD`, `CLEANVERSE_SIM_*` and the signer key into `web/.env`.
 4. Add a fresh `DEMO_OWNER_PRIVATE_KEY` to `web/.env`, then run `cd web && npm run cleanverse:setup`. That is about 8 transactions: passes, mint, gas top-up, approve, mandate and payee.
 5. Restart the app. Reset the demo so Ava's wallet binding uses the new key.
-6. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… node scripts/live-smoke.mjs`. The reorg check is skipped off Hardhat.
+6. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… node scripts/live-smoke.mjs`.
+   - The reorg check is skipped off Hardhat.
+   - The owner-custody section needs `SMOKE_OWNER_PRIVATE_KEY`: a separate key with its own MON (about 0.1), since the owner's wallet pays for its five registry writes.
+   - The Cleanverse section spends most of Ava's daily cap, so run it once per UTC day.

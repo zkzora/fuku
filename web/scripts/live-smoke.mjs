@@ -32,7 +32,8 @@
  *     without double credit, and returns a reorged-out confirmation to PENDING (evm_snapshot /
  *     evm_revert on the local node); needs DATABASE_URL pointing at the web instance's database;
  *   - revoking in the app emits PolicyRevoked, after which a pre-signed attestation reverts with
- *     PolicyNotActive. The demo is reset again at the end.
+ *     PolicyNotActive, and neither a later decision anchor nor a reconcile pass re-activates the
+ *     passport on-chain. The demo is reset again at the end.
  *   FUKU_COMPLIANCE_SIGNER_KEY  signs the direct attestations (Hardhat account #1 locally)
  *
  * Exit code 0 when every check passes, 1 otherwise.
@@ -550,6 +551,13 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
   check("the pre-signed attestation now reverts with PolicyNotActive", afterRevoke === "PolicyNotActive", afterRevoke);
   const blocked = await pay$({ action: "transfer", amountUsdc: 1, to: nus, asset: "aUSDC" });
   check("after the revoke the app blocks the agent (R0/R1) and nothing moves", blocked.status === 403 && ["R0", "R1"].includes(blocked.json?.ruleId), `${blocked.json?.ruleId}`);
+  // That block was anchored (a policy sync ran); a reconcile pass follows. Neither may revive the passport.
+  if (dbUrl) {
+    const out = runReconcile();
+    const [, , , activeAfter] = await publicClient.readContract({ address: addresses.permissions, abi: permAbi, functionName: "policies", args: [agentKey] });
+    const again = await simulate(pre);
+    check("a later anchor and a reconcile pass leave the revoked passport inactive; the attestation stays dead", activeAfter === false && again === "PolicyNotActive", `active ${activeAfter}, ${again} · ${out}`);
+  }
 
   // 8. reorg: a confirmed transfer that disappears from the chain goes back to PENDING and loses its credit
   await signIn(true);
@@ -627,6 +635,20 @@ async function ownerCustodySmoke(publicClient, addresses) {
   const identityId = created.json?.identity?.id;
   check("create an identity via the API (not anchored at creation)", created.status === 201 && identityId && created.json.receipt === null, identityId ?? JSON.stringify(created.json).slice(0, 120));
   if (!identityId) return;
+  if (process.env.DATABASE_URL) {
+    // A rerun: release the wallet from identities earlier smoke runs created (a wallet binds to one identity).
+    const { PrismaClient } = await import("@prisma/client");
+    const db = new PrismaClient();
+    try {
+      const released = await db.identity.updateMany({
+        where: { walletAddress: owner.address.toLowerCase(), displayName: { startsWith: "Owner custody " }, NOT: { id: identityId } },
+        data: { walletAddress: null, walletVerifiedBy: null, walletVerifiedAt: null, walletProof: null },
+      });
+      if (released.count) console.log(`   released the owner wallet from ${released.count} earlier smoke identit${released.count === 1 ? "y" : "ies"}`);
+    } finally {
+      await db.$disconnect();
+    }
+  }
   const ch = await v1("POST", `/identities/${encodeURIComponent(identityId)}/wallet`, { wallet: owner.address });
   const signature = await owner.signMessage({ message: ch.json.message });
   const bound = await v1("PUT", `/identities/${encodeURIComponent(identityId)}/wallet`, { challengeId: ch.json.challengeId, signature });
@@ -675,6 +697,22 @@ async function ownerCustodySmoke(publicClient, addresses) {
   // 5. the relayer still records decisions for it (enforcer), and revoke needs the owner
   const act = await v1("POST", `/agents/${encodeURIComponent(agentId)}/execute`, { action: "read_balances" });
   check("a decision for the owner's agent is anchored by the relayer as enforcer", act.json?.receipt?.status === "confirmed", fmtReceipt(act.json?.receipt));
+
+  // 5b. a passport update after the owner registered the agent: the relayer sends nothing, the owner signs v2
+  const pol2 = await v1("PUT", `/agents/${encodeURIComponent(agentId)}/permissions`, { allowed: [{ action: "read_balances" }], blocked: ["withdraw", "transfer"], scopeApps: [] });
+  check("a passport update returns awaiting-owner (the relayer does not try setPolicy)", pol2.status === 200 && pol2.json?.receipt?.status === "awaiting-owner", `${pol2.json?.receipt?.status} ${pol2.json?.receipt?.note ?? ""}`.trim());
+  const pendingV2 = await v1("GET", `/identities/${encodeURIComponent(identityId)}/owner-actions`);
+  const setV2 = pendingV2.json?.actions?.find((a) => a.op === "setPolicy");
+  if (setV2) {
+    const hash = await wallet.sendTransaction({ to: setV2.tx.to, data: setV2.tx.data });
+    await publicClient.waitForTransactionReceipt({ hash });
+    const conf = await v1("POST", `/identities/${encodeURIComponent(identityId)}/owner-actions`, { op: "setPolicy", txHash: hash, agentId });
+    const [, version, , active] = await publicClient.readContract({ address: addresses.permissions, abi: permAbi, functionName: "policies", args: [agentKey] });
+    check("the owner's setPolicy v2 is mined, confirmed, and active on-chain", conf.json?.ok === true && Number(version) === 2 && active === true, `tx ${short(hash)} v${version}`);
+    ownerTxs.push({ op: "setPolicy(v2)", hash });
+  } else {
+    check("the owner's setPolicy v2 is mined, confirmed, and active on-chain", false, "no setPolicy action listed");
+  }
   const rev = await v1("DELETE", `/agents/${encodeURIComponent(agentId)}/permissions`);
   const revReceipt = rev.json?.chainSync?.receipts?.find((r) => r.op === "revokePolicy");
   check("revoking in Fuku asks the owner to sign revokePolicy (awaiting-owner)", revReceipt?.status === "awaiting-owner", JSON.stringify(rev.json?.chainSync).slice(0, 120));

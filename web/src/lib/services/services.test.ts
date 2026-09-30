@@ -44,6 +44,10 @@ type Mods = {
   agentsRoute: typeof import("../../app/api/v1/agents/route");
   permissionsRoute: typeof import("../../app/api/v1/agents/[id]/permissions/route");
   executeRoute: typeof import("../../app/api/v1/agents/[id]/execute/route");
+  chain: typeof import("../chain");
+  policy: typeof import("../engine/policy");
+  compliance: typeof import("../cleanverse/compliance");
+  demo: typeof import("../cleanverse/demo");
 };
 let m: Mods;
 
@@ -61,6 +65,10 @@ before(async () => {
     agentsRoute: await import("../../app/api/v1/agents/route"),
     permissionsRoute: await import("../../app/api/v1/agents/[id]/permissions/route"),
     executeRoute: await import("../../app/api/v1/agents/[id]/execute/route"),
+    chain: await import("../chain"),
+    policy: await import("../engine/policy"),
+    compliance: await import("../cleanverse/compliance"),
+    demo: await import("../cleanverse/demo"),
   };
   await m.seed.seedDemo(m.db);
 });
@@ -292,5 +300,88 @@ describe("WebAuthn challenges", () => {
     assert.equal(m.webauthn.originAllowed("http://localhost:3001", prod), false);
     assert.equal(m.webauthn.originAllowed("https://evil.example", prod), false);
     assert.equal(m.webauthn.originAllowed("http://localhost:3002", { NODE_ENV: "development" }), true);
+  });
+});
+
+describe("revocation is final (server side)", () => {
+  const readOnly = { allowed: [{ action: "read_balances" }], blocked: ["withdraw"], scopeApps: [] };
+
+  it("approving the same rules again anchors a new, version-bound passport hash", async () => {
+    const { agent } = await m.agents.registerAgent((await newIdentity("Hash owner")).identity, { name: "Hash agent", capabilities: ["read_balances"] });
+    const v1 = await m.agents.setAgentPolicy(agent.id, readOnly);
+    await m.agents.revokeAgentPolicy(agent.id);
+    const v2 = await m.agents.setAgentPolicy(agent.id, readOnly);
+    const doc = { ...readOnly, assets: [] };
+    assert.deepEqual([v1.policy.version, v2.policy.version], [1, 2]);
+    assert.equal(v1.policy.policyHash, m.policy.policyAnchorHash(doc, 1));
+    assert.equal(v2.policy.policyHash, m.policy.policyAnchorHash(doc, 2));
+    assert.notEqual(v2.policy.policyHash, v1.policy.policyHash, "attestations issued under v1 cannot match v2 on-chain");
+  });
+
+  it("a transfer whose authorization changed after the decision is refused before signing", async () => {
+    const { identity } = await newIdentity("Kill switch owner");
+    const { agent } = await m.agents.registerAgent(identity, { name: "Kill switch agent", capabilities: ["read_balances"] });
+    await m.agents.setAgentPolicy(agent.id, readOnly);
+    // The snapshot is loaded fresh each time; the verdict must come from the database, not from it.
+    const transfer = async (policyVersion: number) => {
+      const row = await m.db.agent.findUniqueOrThrow({ where: { id: agent.id }, include: { identity: true } });
+      return m.chain.executeGuardedTransfer({
+        agent: m.chain.toAgentRef(row, row.identity),
+        actionId: `kill-switch-${policyVersion}-${Math.random()}`,
+        policyVersion,
+        from: "0x0000000000000000000000000000000000000001",
+        to: "0x0000000000000000000000000000000000000002",
+        token: "0x0000000000000000000000000000000000000003",
+        amount: BigInt(1),
+        proofHash: `0x${"11".repeat(32)}`,
+        complianceRef: `0x${"22".repeat(32)}`,
+      });
+    };
+    assert.equal((await transfer(1)).status, "executed"); // mock chain: nothing moves
+    await m.agents.setAgentPolicy(agent.id, readOnly); // v2 replaces v1
+    assert.deepEqual(await transfer(1), { status: "rejected", reason: "AUTHORIZATION_CHANGED(passport v2 replaced v1)" });
+    await m.agents.revokeAgentPolicy(agent.id); // kill switch: passport revoked, agent paused
+    assert.deepEqual(await transfer(2), { status: "rejected", reason: "AUTHORIZATION_CHANGED(agent paused)" });
+    await m.db.agent.update({ where: { id: agent.id }, data: { status: "active" } });
+    assert.deepEqual(await transfer(2), { status: "rejected", reason: "AUTHORIZATION_CHANGED(passport revoked)" });
+  });
+
+  it("an idempotent replay after the kill switch returns the stored result and executes nothing; a new key is refused", async () => {
+    const { identity } = await newIdentity("Replay owner");
+    const { agent } = await m.agents.registerAgent(identity, { name: "Replay agent", capabilities: ["swap"] });
+    await m.agents.setAgentPolicy(agent.id, { allowed: [{ action: "swap", limitUsdcPerDay: 100 }], blocked: [], scopeApps: [] });
+    const input = { callerId: identity.id, agentId: agent.id, action: "swap", amountUsdc: 5, idempotencyKey: "kill-switch-replay-1" };
+    const first = await m.actions.executeAction(input);
+    assert.deepEqual([first.decision, first.status], ["ALLOWED", "AUTHORIZED"]);
+
+    await m.agents.revokeAgentPolicy(agent.id);
+    const replay = await m.actions.executeAction(input);
+    assert.deepEqual([replay.id, replay.replayed, replay.status], [first.id, true, "AUTHORIZED"]);
+    assert.equal(await m.db.agentAction.count({ where: { agentId: agent.id } }), 1, "the replay created and executed nothing");
+    const fresh = await m.actions.executeAction({ ...input, idempotencyKey: "kill-switch-replay-2" });
+    assert.deepEqual([fresh.decision, fresh.ruleId, fresh.status], ["BLOCKED", "R0", "DENIED"]);
+  });
+
+  it("a frozen owner A-Pass blocks an A-Token transfer (R7) even for an agent scored 100", async () => {
+    const ava = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
+    const { agent } = await m.agents.registerAgent(ava, { name: "Top-scored payments", capabilities: ["transfer"] });
+    await m.agents.setAgentPolicy(agent.id, { allowed: [{ action: "transfer", limitUsdcPerDay: 1000 }], blocked: [], scopeApps: [], assets: ["aUSDC"] });
+    await m.db.reputationEvent.createMany({ data: Array.from({ length: 14 }, (_, i) => ({ agentId: agent.id, kind: "success", delta: 0, note: `confirmed transfer ${i}` })) });
+    assert.equal((await m.agents.refreshScore(agent.id)).score, 100);
+    const nusantara = m.demo.DEMO_RECIPIENTS.find((r) => r.label === "nusantara")!.address;
+    const transfer = () => m.actions.executeAction({ callerId: ava.id, agentId: agent.id, action: "transfer", amountUsdc: 10, to: nusantara, asset: "aUSDC" });
+    assert.equal((await transfer()).decision, "ALLOWED");
+
+    const pass = { wallet: ava.walletAddress!.toLowerCase(), source: "simulated" };
+    await m.db.cleanversePass.updateMany({ where: pass, data: { status: 2 } });
+    m.compliance.clearOwnerPassCache();
+    try {
+      const r = await transfer();
+      assert.deepEqual([r.decision, r.ruleId, r.subCode, r.status, r.transfer], ["BLOCKED", "R7", "CVI_FROZEN", "DENIED", null]);
+      assert.ok(r.scoreBefore >= 90, `score ${r.scoreBefore}: the score is not an input to the decision`);
+    } finally {
+      await m.db.cleanversePass.updateMany({ where: pass, data: { status: 1 } });
+      m.compliance.clearOwnerPassCache();
+    }
   });
 });

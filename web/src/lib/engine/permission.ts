@@ -8,6 +8,7 @@ export type EngineSubCode =
   | ComplianceSubCode
   | "GUARD_REJECTED"
   | "GUARD_NOT_CONFIGURED"
+  | "AUTHORIZATION_CHANGED"
   | "APP_REQUIRED"
   | "OWNER_UNVERIFIED"
   | "AMOUNT_REQUIRED"
