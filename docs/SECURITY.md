@@ -140,7 +140,12 @@ Rules that follow from the lifecycle:
 3. **The guard's owner** can rotate the compliance signer. The simulator contracts' owner issues simulator A-Passes and mints `aUSDC-SIM`; they are not Cleanverse.
 4. **The engine and database.** The passport's allowed actions, app scope and off-chain limits, and the reputation ledger, live in Fuku's database and are enforced by Fuku's server. On-chain commitments prove the integrity of a recorded decision, not that an AUTHORIZED action was executed or executed correctly.
 5. **Cleanverse** runs in simulator mode until the API invite lands (`docs/CLEANVERSE.md`). The real A-Token's transfer rules for third-party contracts are unverified.
-6. **Memory vault.** Every identity derives its key from a fixed demo passphrase, so the encryption is structural, not secret. Agents get no key access, and there are no scoped grants.
+6. **Memory vault.** Items are encrypted in the browser with a key derived from the owner's passphrase (PBKDF2-SHA256, 100,000 iterations, salted with the identity id, into AES-256-GCM).
+   - Every identity except the seeded demo chooses its own passphrase (at least 10 characters). The server stores ciphertext and one encrypted check value that tells a wrong passphrase from a right one; it never receives the passphrase or the key. The key stays in the tab's memory and is not persisted.
+   - There is no recovery. "Forgot it? Start over" deletes every item.
+   - Items written by earlier builds, under the shared demo passphrase, are re-encrypted in the browser when the owner sets a passphrase, and the server only accepts that change when it covers every item.
+   - The seeded demo identity (Ava) alone keeps the public demo passphrase, labelled on the page as not secret.
+   - Item titles are stored in clear. Agents get no key access, and there are no scoped grants.
 7. **Not claimed:** unique-human proof, KYC, ERC-8004 conformance (the registries are inspired by it), decentralised verification, and production readiness.
 
 ## 7. Adversarial checks, and what still depends on the server

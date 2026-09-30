@@ -33,6 +33,10 @@ model Identity {
   // wallet signs registerIdentity / registerAgent / setPolicy / revokePolicy / setStatus itself).
   // Null until decided: at the first anchoring, from the bound wallet (see lib/custody.ts).
   chainCustody  String?
+  // Memory Vault: a known string encrypted in the browser with the owner's vault key (JSON
+  // { v, ciphertext, iv }), so a wrong passphrase is told apart from a right one. The server never
+  // sees the passphrase or the key. Null until the owner sets one; the seeded demo uses none.
+  vaultCheck    String?
   createdAt     DateTime @default(now())
 
   passkeys       Passkey[]

@@ -395,3 +395,44 @@ describe("ERC-8004", () => {
     assert.deepEqual([view.reason, view.actions.length, view.complete, view.agentWallet], ["mock-chain", 0, false, null]);
   });
 });
+
+describe("memory vault passphrases", () => {
+  it("the demo keeps its public passphrase; anyone else must set their own before writing", async () => {
+    const vault = await import("./vault");
+    const ava = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
+    assert.deepEqual(vault.vaultStateOf(ava), { mode: "demo", hasPassphrase: false, check: null });
+    await assert.rejects(() => vault.setVaultPassphrase(ava, { check: { ciphertext: "x", iv: "y" }, items: [] }), /demo passphrase/);
+    const { identity } = await newIdentity("Vault owner");
+    assert.deepEqual(vault.vaultStateOf(identity), { mode: "passphrase", hasPassphrase: false, check: null });
+    assert.throws(() => vault.assertVaultWritable(identity), /Set your vault passphrase first/);
+  });
+
+  it("moves items from the old shared demo key to the owner's passphrase in one write, and resets on request", async () => {
+    const vault = await import("./vault");
+    const crypto = await import("../vault-crypto");
+    const { identity } = await newIdentity("Legacy vault owner");
+    // An item written by an earlier build, under the shared demo passphrase.
+    const demoKey = await crypto.deriveVaultKey(identity.id, crypto.DEMO_VAULT_PASSPHRASE);
+    const legacy = await crypto.encryptText(demoKey, "Never move more than 5% in one trade.");
+    const item = await m.db.memoryItem.create({ data: { identityId: identity.id, category: "rules", title: "Trade size", ...legacy } });
+
+    const mine = await crypto.deriveVaultKey(identity.id, "correct horse battery staple");
+    const moved = await crypto.encryptText(mine, await crypto.decryptText(demoKey, item.ciphertext, item.iv));
+    const check = await crypto.encryptText(mine, crypto.VAULT_CHECK_PLAINTEXT);
+    await assert.rejects(() => vault.setVaultPassphrase(identity, { check, items: [] }), /every vault item/, "leaving an item under the old key is refused");
+    const state = await vault.setVaultPassphrase(identity, { check, items: [{ id: item.id, ciphertext: moved.ciphertext, iv: moved.iv }] });
+    assert.equal(state.hasPassphrase, true);
+
+    const fresh = await m.db.identity.findUniqueOrThrow({ where: { id: identity.id } });
+    const stored = await m.db.memoryItem.findUniqueOrThrow({ where: { id: item.id } });
+    assert.equal(await crypto.decryptText(mine, stored.ciphertext, stored.iv), "Never move more than 5% in one trade.");
+    await assert.rejects(() => crypto.decryptText(demoKey, stored.ciphertext, stored.iv), "the public demo key no longer opens it");
+    assert.equal(await crypto.vaultKeyMatches(mine, vault.vaultStateOf(fresh).check!), true);
+    assert.equal(await crypto.vaultKeyMatches(await crypto.deriveVaultKey(identity.id, "wrong passphrase!"), vault.vaultStateOf(fresh).check!), false);
+    vault.assertVaultWritable(fresh);
+
+    assert.deepEqual(await vault.resetVault(fresh), { deleted: 1 });
+    const after = await m.db.identity.findUniqueOrThrow({ where: { id: identity.id } });
+    assert.equal(vault.vaultStateOf(after).hasPassphrase, false);
+  });
+});
