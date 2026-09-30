@@ -109,12 +109,21 @@ These contracts are **not** Cleanverse. They exist so the full flow can run on a
 
 - **EIP-712 domain:** `{name: "FukuSpendGuard", version: "1", chainId, verifyingContract}`.
 - **Typed struct (field order is part of the typehash):**
-  `GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 deadline)`.
+  `GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 issuedAt,uint64 deadline)`.
 - **The owner's mandate:** `openMandate(agentId, token, dailyCap, maxPerTx, validUntil, restrictPayees)` and `setPayee(agentId, payee, allowed)`, both sent from the owner's own wallet.
   - `mandates(agentId, wallet)` returns `(token, dailyCap, maxPerTx, validUntil, restrictPayees, version, active)`.
   - The version increases on every open and close, so reopening a mandate voids attestations signed against the old one.
+- **Supersession:**
+  - `bumpValidAfter(agentId)` (the agent's controller or an enforcer) voids every attestation for the agent issued at or before that block.
+  - `bumpWalletValidAfter(agentId, wallet)` (the wallet itself or an enforcer) does the same for one funding wallet.
+  - Fuku bumps on pause, revoke and allowance changes.
 - **Checks, in order:**
-  1. Deadline; unused nonce; unused action hash (`ActionAlreadyExecuted`); a low-s signature from the compliance signer.
+  1. The attestation window:
+     - the deadline has not passed;
+     - `issuedAt` is at most 5 s ahead of block time;
+     - `deadline − issuedAt` is at most `maxAttestationTtl` (60 s by default; owner-settable from 10 s to 1 h);
+     - `issuedAt` is later than both `validAfter` values (`AttestationSuperseded`).
+     Then an unused nonce, an unused action hash (`ActionAlreadyExecuted`), and a low-s signature from the compliance signer.
   2. The agent exists and is not Paused or Revoked.
   3. The policy is active and its hash equals the attested `policyHash`.
   4. An active mandate for `(agentId, from)` on this token at the attested version (`StaleMandate`) that has not expired (`MandateExpired`).
@@ -166,9 +175,9 @@ DATABASE_URL=<the web instance's database> SMOKE_OWNER_PRIVATE_KEY=<#3> \
   FUKU_BASE_URL=http://localhost:3002 node scripts/live-smoke.mjs
 ~~~
 
-Expected result on a fresh node: `63/63 checks passed`. That is 19 demo-flow and chain checks, 27 Cleanverse and guard checks and 17 owner-custody checks. Without `SMOKE_OWNER_PRIVATE_KEY` the owner-custody section is skipped. The Cleanverse section spends most of Ava's 1,000 aUSDC-SIM daily cap, so a second run on the same node in the same UTC day fails with `DailyCapExceeded`.
+Expected result on a fresh node: `65/65 checks passed`. That is 19 demo-flow and chain checks, 29 Cleanverse and guard checks and 17 owner-custody checks. Without `SMOKE_OWNER_PRIVATE_KEY` the owner-custody section is skipped. The Cleanverse section spends most of Ava's 1,000 aUSDC-SIM daily cap, so a second run on the same node in the same UTC day fails with `DailyCapExceeded`.
 
-The 27 Cleanverse and guard checks cover the following:
+The 29 Cleanverse and guard checks cover the following:
 - 250 aUSDC-SIM to Nusantara is CONFIRMED. The transfer, `GuardedTransferExecuted` (bound to the action id) and `ActionDecision` land in one transaction, and `GET /api/v1/actions/:id` returns the tx and its log index.
 - The Travel Rule record (simulator) is stored and its canonical-JSON hash equals the action's `travelRuleRef`.
 - Frozen and Unverified are blocked with R8 `CVI_FROZEN` and `CVI_NOT_FOUND`, with no Transfer event.
@@ -176,7 +185,8 @@ The 27 Cleanverse and guard checks cover the following:
 - Direct attestations revert with `PerTxLimitExceeded`, `PayeeNotApproved` and `DailyCapExceeded`.
 - Two concurrent requests cannot spend the same remainder, and the balances move exactly once per confirmed transfer (900 in total).
 - Reconciliation, run as a separate process, recovers a transfer whose hash was never stored, without double credit. A confirmation removed by `evm_revert` goes back to PENDING and loses its credit.
-- Revoking in the app emits `PolicyRevoked`, after which a pre-signed attestation reverts with `PolicyNotActive` and the app blocks the agent. A later decision anchor and a reconcile pass leave the passport inactive.
+- Pausing then resuming in the app bumps the guard's `validAfter`, so a pre-pause attestation stays dead (`AttestationSuperseded`). An allowance withdrawn and restored from Ava's wallet makes reconcile bump the wallet's `validAfter`, with the same effect.
+- Revoking in the app bumps `validAfter` and emits `PolicyRevoked`. A pre-signed attestation reverts with `AttestationSuperseded`, a fresh one with `PolicyNotActive`, and the app blocks the agent. A later decision anchor and a reconcile pass leave the passport inactive.
 
 Without any chain env (mock mode), the demo runs with the fixture backend and mock receipts.
 

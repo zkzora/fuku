@@ -34,7 +34,7 @@ So whoever sends `registerIdentity` first is the controller forever. **Redeployi
   - attests the passkey flag (as registry owner).
   It can no longer register, re-anchor, revoke or pause for them.
 
-Evidence (local Hardhat node, `web/scripts/live-smoke.mjs`, 63/63 on a fresh node):
+Evidence (local Hardhat node, `web/scripts/live-smoke.mjs`, 65/65 on a fresh node):
 - `controllerOf(identity)` equals the owner wallet.
 - `isOwnerController(agent, owner) = true` and `isOwnerController(agent, relayer) = false`.
 - The relayer's `revokePolicy` simulates to `NotAgentOwner`, and its `setStatus` to `NotIdentityController`.

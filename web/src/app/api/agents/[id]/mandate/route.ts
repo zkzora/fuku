@@ -3,6 +3,7 @@ import { json, withSession } from "@/lib/api";
 import { chainConfig, chainMode, readMandate, spendGuardAddress } from "@/lib/chain";
 import { idToBytes32 } from "@/lib/ids";
 import { cleanverseRuntime } from "@/lib/services/cleanverse";
+import { reconcileSoon } from "@/lib/services/reconcile";
 
 type P = { id: string };
 
@@ -14,6 +15,8 @@ type P = { id: string };
 export const GET = withSession<P>(async (_req, identity, { id }) => {
   const agent = await db.agent.findFirst({ where: { id, identityId: identity.id } });
   if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+  // The owner may just have changed its allowance: let the watcher bump the wallet's validAfter.
+  void reconcileSoon({ identityId: identity.id });
   const wallet = identity.walletVerifiedBy ? identity.walletAddress : null;
   const guard = spendGuardAddress();
   const rt = cleanverseRuntime();

@@ -1,20 +1,24 @@
 import type { Prisma } from "@prisma/client";
-import type { Hex } from "viem";
+import { getAddress, isAddress, parseAbiItem, type Address, type Hex } from "viem";
 import { db } from "../db";
 import {
   anchorStateOf,
-  ATTESTATION_TTL_S,
+  attestationTtlSeconds,
+  bumpWalletValidAfterOnChain,
   chainMode,
+  chainReader,
   findGuardExecution,
   guardActionExecuted,
   latestBlock,
+  logChunkSize,
   recordDecisionOnChain,
+  spendGuardAddress,
   toAgentRef,
   transactionOutcome,
   updateScoreOnChain,
 } from "../chain";
 import { hashString } from "../ids";
-import { labelFor } from "../engine/policy";
+import { isATokenPassport, labelFor, parsePolicy } from "../engine/policy";
 import { utcDayKey } from "../engine/permission";
 import { refreshScore, scoreAgent } from "./agents";
 import { releaseBudget } from "./budget";
@@ -32,11 +36,14 @@ import { releaseBudget } from "./budget";
  *   CONFIRMED (recent)   -> PENDING again if the receipt disappeared (reorg); its success event is
  *                           removed until it confirms again
  *   anchorStatus failed  -> the decision anchor is sent again; pending anchors are checked first
+ *   allowance changed    -> an Approval from an owner wallet to FukuSpendGuard bumps that wallet's
+ *                           validAfter, so an allowance withdrawn and restored cannot revive earlier
+ *                           attestations (the owner's own bumpWalletValidAfter is the immediate path)
  */
 const REORG_DEPTH = BigInt(Number(process.env.FUKU_REORG_DEPTH ?? 64));
 const LOG_LOOKBACK = BigInt(Number(process.env.FUKU_LOG_LOOKBACK ?? 20_000));
 /** A transfer that has not executed this long after its attestation was signed never will. */
-const EXPIRY_MARGIN_MS = (ATTESTATION_TTL_S + 60) * 1000;
+const EXPIRY_MARGIN_MS = (attestationTtlSeconds() + 60) * 1000;
 
 export interface ReconcileReport {
   checked: number;
@@ -44,13 +51,15 @@ export interface ReconcileReport {
   failed: number;
   reorged: number;
   anchored: number;
+  /** Wallet validAfter bumps sent because an allowance to the guard changed. */
+  bumped: number;
   skipped?: string;
 }
 
 type Row = Prisma.AgentActionGetPayload<{ include: { agent: { include: { policy: true; identity: true } } } }>;
 
 export async function reconcile(opts: { agentId?: string; identityId?: string; actionId?: string; limit?: number } = {}): Promise<ReconcileReport> {
-  const report: ReconcileReport = { checked: 0, confirmed: 0, failed: 0, reorged: 0, anchored: 0 };
+  const report: ReconcileReport = { checked: 0, confirmed: 0, failed: 0, reorged: 0, anchored: 0, bumped: 0 };
   if (chainMode() !== "live") return { ...report, skipped: "mock chain" };
   const head = await latestBlock();
   if (head === null) return { ...report, skipped: "no chain reader" };
@@ -131,7 +140,60 @@ export async function reconcile(opts: { agentId?: string; identityId?: string; a
     });
     if (receipt.status === "confirmed") report.anchored++;
   }
+
+  // 4. allowance changes to the guard
+  report.bumped = await watchAllowances(opts.identityId, head);
   return report;
+}
+
+const APPROVAL = parseAbiItem("event Approval(address indexed owner, address indexed spender, uint256 value)");
+/** A gap longer than this (blocks) is not scanned: the wallet is bumped to be safe. */
+const ALLOWANCE_SCAN_MAX = BigInt(Number(process.env.FUKU_ALLOWANCE_SCAN_MAX ?? 2_000));
+
+/**
+ * For every owner wallet that funds an A-Token agent: scan the A-Token's Approval events from that
+ * wallet to FukuSpendGuard since the last scan, and when there is one (or the gap is too long to scan)
+ * bump the wallet's validAfter for each of its A-Token agents. Watching starts at the first run.
+ */
+async function watchAllowances(identityId: string | undefined, head: bigint): Promise<number> {
+  const guard = spendGuardAddress();
+  const token = process.env.CLEANVERSE_ATOKEN_ADDRESS?.trim() || process.env.CLEANVERSE_SIM_ATOKEN?.trim();
+  const client = chainReader();
+  if (!guard || !token || !isAddress(token) || !client) return 0;
+  const owners = await db.identity.findMany({
+    where: { ...(identityId ? { id: identityId } : {}), walletVerifiedBy: { not: null }, walletAddress: { not: null } },
+    include: { agents: { include: { policy: true } } },
+  });
+  const span = logChunkSize();
+  let bumped = 0;
+  for (const owner of owners) {
+    const agents = owner.agents.filter((a) => isATokenPassport(parsePolicy(a.policy)));
+    if (agents.length === 0 || !isAddress(owner.walletAddress!)) continue;
+    const wallet = getAddress(owner.walletAddress!) as Address;
+    if (owner.allowanceScanBlock === null) {
+      await db.identity.update({ where: { id: owner.id }, data: { allowanceScanBlock: Number(head) } });
+      continue;
+    }
+    const from = BigInt(owner.allowanceScanBlock) + BigInt(1);
+    if (from > head) continue;
+    let changed = head - from + BigInt(1) > ALLOWANCE_SCAN_MAX;
+    for (let lo = from; !changed && lo <= head; lo += span) {
+      const hi = lo + span - BigInt(1) > head ? head : lo + span - BigInt(1);
+      const logs = await client.getLogs({ address: token as Address, event: APPROVAL, args: { owner: wallet, spender: guard }, fromBlock: lo, toBlock: hi });
+      if (logs.length > 0) changed = true;
+    }
+    if (changed) {
+      for (const agent of agents) {
+        try {
+          if (await bumpWalletValidAfterOnChain(agent.id, wallet)) bumped++;
+        } catch (err) {
+          console.warn(`[fuku-reconcile] bumpWalletValidAfter(${agent.id}) failed: ${(err as Error).message}`);
+        }
+      }
+    }
+    await db.identity.update({ where: { id: owner.id }, data: { allowanceScanBlock: Number(head) } });
+  }
+  return bumped;
 }
 
 async function settleTransfer(row: Row, head: bigint): Promise<"confirmed" | "failed" | "unchanged"> {

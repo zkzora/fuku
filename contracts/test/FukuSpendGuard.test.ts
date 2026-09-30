@@ -27,7 +27,7 @@ import {
 } from "./fixtures.ts";
 
 const TYPEHASH_STRING =
-  "GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 deadline)";
+  "GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 issuedAt,uint64 deadline)";
 const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 const DAY = 86_400n;
 
@@ -216,7 +216,7 @@ describe("FukuSpendGuard", async function () {
     await guard.write.execute([t, await sign(t)]);
   });
 
-  it("rejects the signature when any one of the 12 fields is tampered with", async function () {
+  it("rejects the signature when any one of the 13 fields is tampered with", async function () {
     const { guard, signed, carol, stranger } = await deployCleanverseStack(connection);
     const { t, sig } = await signed();
 
@@ -232,9 +232,11 @@ describe("FukuSpendGuard", async function () {
       complianceRef: { ...t, complianceRef: id("cleanverse:ref:other") },
       mandateVersion: { ...t, mandateVersion: t.mandateVersion + 1n },
       nonce: { ...t, nonce: t.nonce + 1000n },
-      deadline: { ...t, deadline: t.deadline + 1n },
+      // (moved inside the valid window, so only the signature can catch them)
+      issuedAt: { ...t, issuedAt: t.issuedAt + 1n },
+      deadline: { ...t, deadline: t.deadline - 1n },
     };
-    assert.equal(Object.keys(tampered).length, 12);
+    assert.equal(Object.keys(tampered).length, 13);
     assert.deepEqual(Object.keys(tampered), GUARDED_TRANSFER_TYPES.GuardedTransfer.map((f) => f.name));
 
     for (const [field, forged] of Object.entries(tampered)) {
@@ -502,9 +504,11 @@ describe("FukuSpendGuard", async function () {
       [AGENT_ID, getAddress(alice.account.address), getAddress(atoken.address), DAILY_CAP, 0n, validUntil, false, 2n],
     );
 
-    // attestation deadlines outlive the mandate, so only the expiry can stop them
-    const lastSecond = await signed({ amount: ONE_TOKEN, deadline: validUntil + DAY });
-    const tooLate = await signed({ amount: ONE_TOKEN, deadline: validUntil + DAY });
+    // issued 30 s before the expiry, the attestations outlive the mandate, so only the expiry can stop them
+    await time.increaseTo(validUntil - 30n);
+    const lastSecond = await signed({ amount: ONE_TOKEN });
+    const tooLate = await signed({ amount: ONE_TOKEN });
+    assert.ok(tooLate.t.deadline > validUntil + 1n);
 
     await time.setNextBlockTimestamp(validUntil); // block.timestamp == validUntil is still valid
     await guard.write.execute([lastSecond.t, lastSecond.sig]);

@@ -784,6 +784,28 @@ export function setAgentStatusOnChain(agent: AgentRef, status: "active" | "pause
   });
 }
 
+/**
+ * Kill switch, part of pause and revoke: void every outstanding FukuSpendGuard attestation for the
+ * agent (guard.bumpValidAfter), as an enforcer. Needs no owner signature, so it takes effect even for
+ * owner-controlled agents whose registry writes wait for the owner. Null when there is no guard.
+ */
+export function bumpValidAfterOnChain(agent: AgentRef) {
+  const guard = spendGuardAddress();
+  if (!guard || chainMode() !== "live") return Promise.resolve(null);
+  return sendStrict("bumpValidAfter", { agentId: agent.id }, async (ctx) =>
+    write(ctx, "bumpValidAfter", { address: guard, abi: FukuSpendGuardAbi, functionName: "bumpValidAfter", args: [idToBytes32(agent.id)] }),
+  );
+}
+
+/** After the owner's allowance to the guard changed: void the attestations drawing on that wallet. */
+export function bumpWalletValidAfterOnChain(agentId: string, wallet: Address) {
+  const guard = spendGuardAddress();
+  if (!guard || chainMode() !== "live") return Promise.resolve(null);
+  return sendStrict("bumpWalletValidAfter", { agentId, wallet }, async (ctx) =>
+    write(ctx, "bumpWalletValidAfter", { address: guard, abi: FukuSpendGuardAbi, functionName: "bumpWalletValidAfter", args: [idToBytes32(agentId), wallet] }),
+  );
+}
+
 /** Anchor a freshly created identity; also marks it human-verified when `humanVerified` is set. */
 export function anchorIdentity(identityId: string, passkeyPubKeyHash: Hex, proofHash: Hex, humanVerified = false) {
   return send("registerIdentity", { identityId, proofHash }, async (ctx, onSubmitted) => {
@@ -920,12 +942,20 @@ const GUARDED_TRANSFER_TYPES = {
     { name: "complianceRef", type: "bytes32" },
     { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
+    { name: "issuedAt", type: "uint64" },
     { name: "deadline", type: "uint64" },
   ],
 } as const;
 
-/** How long a GuardedTransfer attestation stays valid. Reconciliation relies on it (see reconcile.ts). */
-export const ATTESTATION_TTL_S = 300;
+/**
+ * How long a GuardedTransfer attestation lives, in seconds: FUKU_ATTESTATION_TTL_S (default 60),
+ * within [10, 3600] and never longer than the guard's own maxAttestationTtl, which it enforces.
+ * Reconciliation relies on it (see reconcile.ts).
+ */
+export function attestationTtlSeconds(env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env.FUKU_ATTESTATION_TTL_S ?? 60);
+  return Number.isFinite(n) ? Math.min(3600, Math.max(10, Math.floor(n))) : 60;
+}
 
 function isRevert(err: unknown): boolean {
   return err instanceof BaseError && err.walk((e) => e instanceof ContractFunctionRevertedError) instanceof ContractFunctionRevertedError;
@@ -990,12 +1020,20 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
     try {
       await ensureAgentOnChain(ctx, input.agent, { syncPolicy: true });
       const agentId = idToBytes32(input.agent.id);
-      const [[onChainHash, , , policyActive], mandate] = await Promise.all([
+      const [[onChainHash, , , policyActive], mandate, maxTtl, agentFloor, walletFloor, latest] = await Promise.all([
         ctx.publicClient.readContract({ address: ctx.addresses.permissions, abi: PermissionRegistryAbi, functionName: "policies", args: [agentId] }),
         ctx.publicClient.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "mandates", args: [agentId, input.from] }),
+        ctx.publicClient.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "maxAttestationTtl" }),
+        ctx.publicClient.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "agentValidAfter", args: [agentId] }),
+        ctx.publicClient.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "walletValidAfter", args: [agentId, input.from] }),
+        ctx.publicClient.getBlock(),
       ]);
       // Attest only to the passport the database authorized, and only once it is the active one on-chain.
       if (!policyActive || !sameHex(onChainHash, auth.passport.hash)) return { status: "rejected", reason: "AUTHORIZATION_CHANGED(on-chain passport differs)" };
+      // Issued at chain time, strictly after the last bump (the guard allows up to 5 s ahead of block time).
+      const floor = agentFloor > walletFloor ? agentFloor : walletFloor;
+      const issuedAt = latest.timestamp > floor ? latest.timestamp : floor + BigInt(1);
+      const ttl = BigInt(Math.min(attestationTtlSeconds(), Number(maxTtl)));
       transfer = {
         agentId,
         from: input.from,
@@ -1008,7 +1046,8 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
         complianceRef: input.complianceRef,
         mandateVersion: mandate[5],
         nonce: BigInt(toHex(randomBytes(32))),
-        deadline: BigInt(Math.floor(Date.now() / 1000) + ATTESTATION_TTL_S),
+        issuedAt,
+        deadline: issuedAt + ttl,
       };
       signature = await signer.signTypedData({
         domain: { name: "FukuSpendGuard", version: "1", chainId: ctx.chain.id, verifyingContract: guard },
@@ -1103,17 +1142,35 @@ export async function findGuardExecution(agentId: string, actionId: string, from
   const client = chainReader();
   const guard = spendGuardAddress();
   if (!client || !guard) return null;
-  const logs = await client.getContractEvents({
-    address: guard,
-    abi: FukuSpendGuardAbi,
-    eventName: "GuardedTransferExecuted",
-    args: { agentId: idToBytes32(agentId) },
-    fromBlock,
-    toBlock: "latest",
-  });
   const actionHash = hashString(actionId).toLowerCase();
-  const hit = logs.find((l) => l.args.actionHash?.toLowerCase() === actionHash);
-  return hit ? { txHash: hit.transactionHash, block: Number(hit.blockNumber), blockHash: hit.blockHash, logIndex: hit.logIndex } : null;
+  // Newest first, one RPC-sized range at a time, stopping at the first hit (a crashed transfer is recent).
+  const head = await client.getBlockNumber();
+  const span = logChunkSize();
+  for (let to = head; to >= fromBlock; to -= span) {
+    const from = to - span + BigInt(1) > fromBlock ? to - span + BigInt(1) : fromBlock;
+    const logs = await client.getContractEvents({
+      address: guard,
+      abi: FukuSpendGuardAbi,
+      eventName: "GuardedTransferExecuted",
+      args: { agentId: idToBytes32(agentId) },
+      fromBlock: from,
+      toBlock: to,
+    });
+    const hit = logs.find((l) => l.args.actionHash?.toLowerCase() === actionHash);
+    if (hit) return { txHash: hit.transactionHash, block: Number(hit.blockNumber), blockHash: hit.blockHash, logIndex: hit.logIndex };
+    if (from === fromBlock) break;
+  }
+  return null;
+}
+
+/**
+ * Blocks per eth_getLogs call: FUKU_LOG_CHUNK, else 100 (Monad's public RPC refuses wider ranges),
+ * or 50,000 on a local Hardhat node.
+ */
+export function logChunkSize(): bigint {
+  const raw = Number(process.env.FUKU_LOG_CHUNK);
+  if (Number.isFinite(raw) && raw > 0) return BigInt(Math.floor(raw));
+  return BigInt(chainConfig().id === 31337 ? 50_000 : 100);
 }
 
 export interface AgentOnChain {

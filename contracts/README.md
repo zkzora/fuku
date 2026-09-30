@@ -339,15 +339,23 @@ allowance, and the guard owner can rotate the key with `setComplianceSigner`.
   consumed), calls `PermissionRegistry.recordDecision(agentId, actionHash, true, proofHash, "R6")`
   and emits
   `GuardedTransferExecuted(agentId, from, to, token, amount, actionHash, proofHash, complianceRef, mandateVersion, nonce)`.
+- Supersession: `bumpValidAfter(agentId)` (the agent's owner controller or a PermissionRegistry
+  enforcer) voids every attestation for the agent issued at or before that block;
+  `bumpWalletValidAfter(agentId, wallet)` (the wallet itself or an enforcer) does the same for one
+  funding wallet. Both emit `ValidAfterBumped`. `setMaxAttestationTtl(ttl)` (owner, 10 s to 1 h,
+  default 60 s) caps `deadline - issuedAt`.
 - Views: `spentToday(agentId, wallet)`, `hashTransfer(t)` (full EIP-712 digest),
   `domainSeparator()`, `nonceUsed(nonce)`, `actionExecuted(actionHash)`,
-  `isPayee(agentId, wallet, payee)`, `GUARDED_TRANSFER_TYPEHASH`.
+  `isPayee(agentId, wallet, payee)`, `agentValidAfter(agentId)`,
+  `walletValidAfter(agentId, wallet)`, `maxAttestationTtl()`, `GUARDED_TRANSFER_TYPEHASH`.
 
 EIP-712, as signed by the compliance signer (viem `signTypedData` with exactly these values;
 `test/FukuSpendGuard.test.ts` checks `hashTransfer` against viem `hashTypedData`).
 `mandateVersion` is the `version` that `mandates(agentId, from)` returns when the attestation is
-issued. This struct replaced the first version (no `mandateVersion`) before any public
-deployment; a signer still using the old types gets `BadAttestation`.
+issued. `issuedAt` is the block time it was issued at: it must be later than both `validAfter`
+values, at most 5 s ahead of block time, and at most `maxAttestationTtl` before `deadline`. The
+struct gained `mandateVersion` and then `issuedAt` before any public deployment; a signer still
+using older types gets `BadAttestation`.
 
 ```ts
 const domain = { name: "FukuSpendGuard", version: "1", chainId, verifyingContract: guardAddress };
@@ -364,10 +372,11 @@ const types = {
     { name: "complianceRef", type: "bytes32" },
     { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
+    { name: "issuedAt", type: "uint64" },
     { name: "deadline", type: "uint64" },
   ],
 } as const;
-// typehash: GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 deadline)
+// typehash: GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 issuedAt,uint64 deadline)
 ```
 
 ### Deploying them

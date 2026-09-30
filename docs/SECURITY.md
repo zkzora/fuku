@@ -13,7 +13,7 @@ Checked against the code on 2026-09-30 (branch `feat/cleanverse-cvi-cva`). Where
 | A transfer moves only what the owner authorised: token, daily cap, per-transfer limit, expiry, approved payees, active agent, current passport | `FukuSpendGuard.execute` on-chain | The mandate (`mandates()`), `MandateOpened` and `PayeeSet` events |
 | Each action executes at most once; retries do not pay twice | `actionExecuted` in the guard, plus `Idempotency-Key` in the API | `ActionAlreadyExecuted` revert; replayed responses |
 | Parallel requests cannot spend the same remainder | Off-chain: one conditional `UPDATE` on `BudgetWindow`. On-chain: the guard's per-day cap | R5 decisions; `DailyCapExceeded` |
-| Revoking stops every earlier attestation for good; pausing stops them until the agent is resumed | `revokePolicy` and `setStatus` on the registries, checked by the guard. Fuku anchors a passport hash that commits to its version, and never re-anchors a passport its database has revoked (section 7) | `PolicyNotActive`, `PolicyMismatch` and `AgentNotActive` reverts |
+| Revoking or pausing voids every earlier attestation for good | Fuku bumps the guard's `validAfter` on pause and revoke (as an enforcer, no owner signature needed), then `revokePolicy` / `setStatus` follow on the registries. Fuku anchors a passport hash that commits to its version, and never re-anchors a passport its database has revoked (section 7) | `AttestationSuperseded`, `PolicyNotActive`, `PolicyMismatch` and `AgentNotActive` reverts; `ValidAfterBumped` events |
 | A live write is never reported as a successful mock | `send`, `sendStrict`, `executeGuardedTransfer` in `web/src/lib/chain/index.ts` | `receipt.status` and `receiptMode` on every stored action |
 
 What is **not** enforced on-chain:
@@ -79,10 +79,16 @@ Per transfer:
 1. The API authorises the caller and evaluates the passport, owner and request (R0 to R4, R11, R12, R9, R7, R8, R5).
 2. It reserves the day's budget atomically and creates the action row. The row id is the action id: `actionHash = keccak256(id)`.
 3. The compliance signer signs an EIP-712 `GuardedTransfer` over:
-   `agentId, from, to, token, amount, policyHash, actionHash, proofHash, complianceRef, mandateVersion, nonce, deadline`
-   The deadline is now + 5 minutes.
+   `agentId, from, to, token, amount, policyHash, actionHash, proofHash, complianceRef, mandateVersion, nonce, issuedAt, deadline`
+   - `issuedAt` is the latest block's time, and strictly later than the agent's and the funding wallet's `validAfter`.
+   - The attestation lives `FUKU_ATTESTATION_TTL_S` (60 s by default), never longer than the guard's `maxAttestationTtl`.
 4. The guard checks, in order:
-   - deadline, unused nonce, unused action hash, and a low-s signature from the compliance signer (domain: name, version, chain id, guard address);
+   - the attestation window:
+     - the deadline has not passed;
+     - `issuedAt` is at most 5 s ahead of block time;
+     - `deadline − issuedAt` is at most `maxAttestationTtl` (60 s by default; the guard owner may set 10 s to 1 h);
+     - `issuedAt` is later than both `validAfter` values;
+   - an unused nonce, an unused action hash, and a low-s signature from the compliance signer (domain: name, version, chain id, guard address);
    - the agent exists and is not paused or revoked;
    - the policy is active and its hash equals the attested one;
    - the mandate is active, on this token, at this version, and not expired;
@@ -136,7 +142,11 @@ Rules that follow from the lifecycle:
    - As the controller of a custodial identity, the relayer could re-activate a revoked passport on-chain. Fuku's code never does (section 7), but that is the server's discipline, not the contract's. Owner-controlled identities remove it.
 2. **The compliance signer** (`FUKU_COMPLIANCE_SIGNER_KEY`) can attest any transfer that fits a mandate the owner opened, for an active agent whose on-chain passport hash matches. It cannot exceed the owner's token, cap, per-transfer limit, expiry or payee list.
    - Each attestation names the passport hash (bound to the passport version) and the mandate version, so a revoke, a new passport version or a closed mandate voids it.
-   - A pause or a withdrawn allowance does not void it: an attestation signed before them executes after a resume or re-approval, until its 5-minute deadline.
+   - It lives at most 60 s, and the guard enforces the cap.
+   - A `validAfter` bump voids every attestation issued before it:
+     - Fuku sends one on pause and revoke, and when reconcile sees an allowance change;
+     - the agent's controller can send one;
+     - the funding wallet can send one for its own funds.
 3. **The guard's owner** can rotate the compliance signer. The simulator contracts' owner issues simulator A-Passes and mints `aUSDC-SIM`; they are not Cleanverse.
 4. **The engine and database.** The passport's allowed actions, app scope and off-chain limits, and the reputation ledger, live in Fuku's database and are enforced by Fuku's server. On-chain commitments prove the integrity of a recorded decision, not that an AUTHORIZED action was executed or executed correctly.
    - The score cannot be recomputed from the chain alone. Several inputs are off-chain: an A-Pass read through the Cleanverse API, the reason behind an R10 denial, security events, and ledger events that were never anchored (the seeded demo history).
@@ -155,11 +165,17 @@ Rules that follow from the lifecycle:
 The attacker in these checks is Fuku's own server. It holds the compliance signer key, relays every transaction, is the registries' enforcer and scorer, and runs the engine.
 
 **Checks.**
-- `contracts/test/FukuSpendGuard.adversarial.test.ts`, 8 tests of direct guard calls:
+- `contracts/test/FukuSpendGuard.adversarial.test.ts`, 13 tests of direct guard calls:
   - A leaked signer key moves nothing outside the owner's mandate: not from another wallet, for another agent or in another token, and not with a forged mandate version or passport hash. Inside the mandate it moves at most the daily cap.
   - Only the funding wallet opens, closes or re-points its mandate and payee list. The guard owner can only rotate the signer, and the new signer is bounded the same way.
   - As enforcer, scorer or registry owner, the server cannot set, revoke or pause a passport.
-  - `revokePolicy` and `closeMandate` are final for earlier attestations, including a retry of one the token rejected. A pause and a withdrawn allowance are temporary.
+  - `revokePolicy` and `closeMandate` are final for earlier attestations, including a retry of one the token rejected.
+  - Pause then unpause, and allowance withdrawn then restored, no longer revive an earlier attestation once `validAfter` is bumped (`AttestationSuperseded`). Without a bump, only the attestation's 60 s life bounds them; a test pins this.
+  - Bumps:
+    - agent-wide, only the agent's controller or an enforcer may bump;
+    - per wallet, only the wallet itself or an enforcer may bump, so opening a mandate for someone else's agent freezes nothing of theirs.
+  - The 60 s lifetime is enforced on-chain, and only the owner may change it.
+  - An attestation dated more than 5 s ahead is refused. One issued in the same second as a bump is void.
   - A frozen, revoked or expired A-Pass blocks an agent whose on-chain score is 100.
 - `web/src/lib/services/services.test.ts`, "revocation is final (server side)", 4 tests:
   - the version-bound passport hash;
@@ -167,7 +183,9 @@ The attacker in these checks is Fuku's own server. It holds the compliance signe
   - an idempotent replay after the kill switch;
   - R7 for an agent scored 100.
 - `web/scripts/adversarial-live.ts` (`npm run adversarial:live`), 12 checks on a live chain. It goes through Fuku's own code paths while holding an agent snapshot taken before the revoke.
-- The live smoke checks two more things:
+- The live smoke checks four more things:
+  - pausing then resuming in the app leaves a pre-pause attestation dead;
+  - an allowance withdrawn and restored from the owner's wallet makes reconcile bump the wallet's `validAfter`, with the same effect;
   - a later decision anchor and a reconcile pass leave a revoked passport inactive;
   - a passport update for an owner-controlled agent waits for the owner's signature.
 
@@ -188,10 +206,13 @@ Passport writes also go to the database first now, as revokes already did, so th
    - For an owner-controlled identity, only the owner's wallet can anchor.
 3. **The kill switch's timing.** The database write is the switch.
    - A transfer whose re-check ran before that write may still be mined. At most one is in flight, because signing is serialised.
-   - The on-chain revoke follows in the relayer's queue. For owner-controlled agents it waits for the owner's signature; `closeMandate` from the owner's wallet is the on-chain stop the owner controls directly.
-4. **Pause and allowance are temporary.** Attestations signed before a pause or an allowance withdrawal execute after a resume or re-approval, until their deadline.
-   - The deadline (5 minutes) is chosen by the server and enforced by the guard.
-   - A compromised signer could sign longer-lived ones. They still stay inside the mandate, and a revoke, a new passport version or a closed mandate voids them.
+   - Fuku's `validAfter` bump follows at once in the relayer's queue. It needs no owner signature, so it applies to owner-controlled agents too.
+   - The registry revoke or pause follows the bump. For owner-controlled agents that step waits for the owner's signature.
+   - `closeMandate` and `bumpWalletValidAfter` from the owner's wallet are the on-chain stops the owner controls directly.
+4. **Allowance changes are seen by reconcile, not at once.** Fuku learns of an allowance change from the token's `Approval` events when reconcile runs: on activity reads (throttled to 15 s), on the mandate page, and by cron.
+   - Between a restore and that pass, an attestation issued before the withdrawal could still execute. The 60 s life bounds this.
+   - The owner's own `bumpWalletValidAfter` is immediate.
+   - `issuedAt` is the signer's claim. The guard refuses a backdated one (at or before a bump) and one dated more than 5 s ahead, but a compromised signer can still sign fresh attestations inside the mandate. Rotating the signer or closing the mandate stops that.
 5. **One execution per action.** The guard executes each action hash at most once. That the server never re-signs a settled action (a denied or failed row) is its own discipline:
    - every request creates a new row;
    - reconcile only reads receipts and `actionExecuted`; it never sends a transfer.
@@ -203,11 +224,11 @@ Local runs on 2026-09-30:
 
 | Command | Expected |
 | --- | --- |
-| `cd contracts && npm test` | 67 passing (8 of them adversarial) |
+| `cd contracts && npm test` | 72 passing (13 of them adversarial) |
 | `npm test` (root: web + sdk) | 79 web tests, 8 SDK tests, all passing |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
-| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `63/63 checks passed` on a fresh node |
+| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `65/65 checks passed` on a fresh node |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
 | `cd web && npm run verify-score` on the local node after a demo reset, one guarded transfer and one blocked action | Agents whose history is on-chain reproduce their anchored score (Payments Agent 68 = 68). The seeded Trading Assistant reports 61 from the chain against 92 anchored: its seeded history is ledger-only |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 17 steps `ok`, exit 0 |

@@ -35,6 +35,7 @@ const GUARDED_TRANSFER_TYPES = {
     { name: "complianceRef", type: "bytes32" },
     { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
+    { name: "issuedAt", type: "uint64" },
     { name: "deadline", type: "uint64" },
   ],
 } as const;
@@ -106,7 +107,8 @@ async function main() {
     complianceRef: hashString("probe:compliance"),
     mandateVersion: BigInt(0),
     nonce: BigInt(toHex(randomBytes(32))),
-    deadline: latest.timestamp + BigInt(900),
+    issuedAt: latest.timestamp,
+    deadline: latest.timestamp + BigInt(60), // the guard's default maxAttestationTtl: the probe runs well inside it
   };
   const sigA = await signer.signTypedData({
     domain: { name: "FukuSpendGuard", version: "1", chainId: c.id, verifyingContract: guard },

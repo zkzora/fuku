@@ -1,7 +1,7 @@
 import type { Address, Hex } from "viem";
 import { getAbiItem } from "viem";
 import { db } from "../db";
-import { chainConfig, chainMode, chainReader, registryAddresses, spendGuardAddress } from "../chain";
+import { chainConfig, chainMode, chainReader, logChunkSize, registryAddresses, spendGuardAddress } from "../chain";
 import { CleanverseAPassSimAbi, FukuSpendGuardAbi, HumanIdentityRegistryAbi, PermissionRegistryAbi, ReputationRegistryAbi } from "../chain/abi";
 import { computeScore, isViolation, SCORING_VERSION } from "../engine/reputation";
 import { idToBytes32 } from "../ids";
@@ -58,7 +58,7 @@ async function rpcEvidence(agentKey: Hex, permissions: Address, guard: Address |
   // A local node is scanned from genesis; elsewhere from the registries' first block (ENVIO_START_BLOCK).
   const fromBlock = chainConfig().id === 31337 ? BigInt(0) : BigInt(startBlock());
   if (fromBlock > toBlock) throw new Error(`ENVIO_START_BLOCK ${fromBlock} is beyond the chain head ${toBlock}`);
-  const chunk = BigInt(Math.max(1, Number(process.env.FUKU_LOG_CHUNK ?? 10_000)));
+  const chunk = logChunkSize();
   if ((toBlock - fromBlock) / chunk > BigInt(MAX_RPC_CHUNKS)) {
     throw new Error(`blocks ${fromBlock}-${toBlock} are too many to scan over RPC; set ENVIO_API_TOKEN to use HyperSync (or ENVIO_START_BLOCK)`);
   }

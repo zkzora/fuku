@@ -37,6 +37,9 @@ model Identity {
   // { v, ciphertext, iv }), so a wrong passphrase is told apart from a right one. The server never
   // sees the passphrase or the key. Null until the owner sets one; the seeded demo uses none.
   vaultCheck    String?
+  // Last block scanned for Approval events from the bound wallet to FukuSpendGuard (reconcile bumps
+  // the wallet's validAfter when the allowance changed). Null until watching starts.
+  allowanceScanBlock Int?
   createdAt     DateTime @default(now())
 
   passkeys       Passkey[]

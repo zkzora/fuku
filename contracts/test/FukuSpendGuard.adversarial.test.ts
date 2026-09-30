@@ -24,8 +24,10 @@ import {
  *  - it moves nothing outside what the owner's own wallet authorised on-chain (mandate and allowance)
  *    for a live agent whose active on-chain passport matches the attestation;
  *  - its registry roles never reach the owner's switches (passport, agent status, mandate, payees);
- *  - revokePolicy and closeMandate are final for attestations issued before them, while a pause and a
- *    withdrawn allowance are temporary stops;
+ *  - revokePolicy and closeMandate are final for attestations issued before them; a pause and a
+ *    withdrawn allowance become final once validAfter is bumped (Fuku does it on pause, revoke and
+ *    allowance changes; the owner can do it too), and without a bump only the attestation's 60 s
+ *    life bounds them;
  *  - token eligibility (the A-Pass) is independent of the trust score.
  * The one property that rests on the server is pinned explicitly: the guard compares only the policy
  * hash, so Fuku's anchored hash commits to the passport version (web: policyAnchorHash).
@@ -216,34 +218,150 @@ describe("FukuSpendGuard: adversarial (the server as attacker)", async function 
     assert.deepEqual(await balancesOf(stack), before);
   });
 
-  it("a pause and a withdrawn allowance are temporary stops: earlier attestations work again after resume or re-approval, until their deadline", async function () {
+  it("pause then unpause: once Fuku bumps validAfter on the pause, the pre-pause attestation stays dead after the resume", async function () {
     const stack = await deployCleanverseStack(connection);
-    const { guard, atoken, agentRegistry, signed, alice, publicClient } = stack;
+    const { guard, agentRegistry, permissionRegistry, owner, enforcer, signed, alice } = stack;
+    await permissionRegistry.write.setEnforcer([enforcer.account.address, true], { account: owner.account });
+    const amount = 10n * ONE_TOKEN;
+    const before = await balancesOf(stack);
+    const a = await signed({ amount });
+
+    // Fuku's kill switch: bump the agent's validAfter (as an enforcer), then pause; later resume
+    await guard.write.bumpValidAfter([AGENT_ID], { account: enforcer.account });
+    const floor = await guard.read.agentValidAfter([AGENT_ID]);
+    await agentRegistry.write.setStatus([AGENT_ID, 2], { account: alice.account });
+    await agentRegistry.write.setStatus([AGENT_ID, 1], { account: alice.account });
+    await viem.assertions.revertWithCustomErrorWithArgs(guard.write.execute([a.t, a.sig]), guard, "AttestationSuperseded", [a.t.issuedAt, floor]);
+    assert.deepEqual(await balancesOf(stack), before);
+    assert.equal(await guard.read.nonceUsed([a.t.nonce]), false);
+
+    // re-signed with the same nonce and action after the bump, it is a new attestation and works
+    const fresh = await signed({ amount, nonce: a.t.nonce, actionHash: a.t.actionHash });
+    assert.ok(fresh.t.issuedAt > floor);
+    await guard.write.execute([fresh.t, fresh.sig]);
+    assert.equal((await balancesOf(stack))[0], before[0] - amount);
+  });
+
+  it("allowance withdrawn then restored: a wallet bump by its owner (or by Fuku) voids the earlier attestations on that wallet", async function () {
+    const stack = await deployCleanverseStack(connection);
+    const { guard, atoken, permissionRegistry, owner, enforcer, signed, alice } = stack;
+    await permissionRegistry.write.setEnforcer([enforcer.account.address, true], { account: owner.account });
+    const amount = 10n * ONE_TOKEN;
+    const before = await balancesOf(stack);
+
+    for (const bumper of [alice, enforcer]) {
+      const a = await signed({ amount });
+      await atoken.write.approve([guard.address, 0n], { account: alice.account });
+      await viem.assertions.revertWithCustomErrorWithArgs(guard.write.execute([a.t, a.sig]), atoken, "InsufficientAllowance", [
+        getAddress(guard.address),
+        0n,
+        amount,
+      ]);
+      await viem.assertions.emit(guard.write.bumpWalletValidAfter([AGENT_ID, alice.account.address], { account: bumper.account }), guard, "ValidAfterBumped");
+      const floor = await guard.read.walletValidAfter([AGENT_ID, alice.account.address]);
+      await atoken.write.approve([guard.address, maxUint256], { account: alice.account }); // restored
+      await viem.assertions.revertWithCustomErrorWithArgs(guard.write.execute([a.t, a.sig]), guard, "AttestationSuperseded", [a.t.issuedAt, floor]);
+    }
+    assert.deepEqual(await balancesOf(stack), before);
+
+    const fresh = await signed({ amount });
+    await guard.write.execute([fresh.t, fresh.sig]);
+  });
+
+  it("server-dependent: without a bump, a pause or an allowance withdrawal only suspends earlier attestations, for at most their 60 s life", async function () {
+    // Why Fuku bumps validAfter on pause, revoke and allowance changes.
+    const stack = await deployCleanverseStack(connection);
+    const { guard, atoken, agentRegistry, signed, alice } = stack;
     const amount = 10n * ONE_TOKEN;
 
     const a = await signed({ amount });
-    await agentRegistry.write.setStatus([AGENT_ID, 2], { account: alice.account }); // Paused
+    await agentRegistry.write.setStatus([AGENT_ID, 2], { account: alice.account });
     await viem.assertions.revertWithCustomErrorWithArgs(guard.write.execute([a.t, a.sig]), guard, "AgentNotActive", [AGENT_ID, 2]);
-    await agentRegistry.write.setStatus([AGENT_ID, 1], { account: alice.account }); // resumed
-    await guard.write.execute([a.t, a.sig]);
+    await agentRegistry.write.setStatus([AGENT_ID, 1], { account: alice.account });
+    await guard.write.execute([a.t, a.sig]); // no bump: it works again
 
     const b = await signed({ amount });
     await atoken.write.approve([guard.address, 0n], { account: alice.account });
-    await viem.assertions.revertWithCustomErrorWithArgs(guard.write.execute([b.t, b.sig]), atoken, "InsufficientAllowance", [
-      getAddress(guard.address),
-      0n,
-      amount,
-    ]);
     await atoken.write.approve([guard.address, maxUint256], { account: alice.account });
-    await guard.write.execute([b.t, b.sig]);
+    await guard.write.execute([b.t, b.sig]); // no bump: it works again
 
-    // the deadline still bounds them
-    const now = (await publicClient.getBlock()).timestamp;
-    const c = await signed({ amount, deadline: now + 60n });
+    const c = await signed({ amount });
     await agentRegistry.write.setStatus([AGENT_ID, 2], { account: alice.account });
-    await time.increase(120);
+    await time.increase(61);
     await agentRegistry.write.setStatus([AGENT_ID, 1], { account: alice.account });
     await viem.assertions.revertWithCustomError(guard.write.execute([c.t, c.sig]), guard, "AttestationExpired");
+  });
+
+  it("who may bump: agent-wide the agent's controller or an enforcer; per wallet the wallet itself or an enforcer; nobody else", async function () {
+    const stack = await deployCleanverseStack(connection);
+    const { guard, permissionRegistry, owner, enforcer, signed, alice, bob, stranger } = stack;
+    await permissionRegistry.write.setEnforcer([enforcer.account.address, true], { account: owner.account });
+
+    for (const who of [stranger, bob, owner]) {
+      await viem.assertions.revertWithCustomErrorWithArgs(guard.write.bumpValidAfter([AGENT_ID], { account: who.account }), guard, "NotAuthorizedToBump", [
+        AGENT_ID,
+        getAddress(who.account.address),
+      ]);
+      await viem.assertions.revertWithCustomErrorWithArgs(
+        guard.write.bumpWalletValidAfter([AGENT_ID, alice.account.address], { account: who.account }),
+        guard,
+        "NotAuthorizedToBump",
+        [AGENT_ID, getAddress(who.account.address)],
+      );
+    }
+    for (const who of [alice, enforcer]) {
+      await guard.write.bumpValidAfter([AGENT_ID], { account: who.account });
+      await guard.write.bumpWalletValidAfter([AGENT_ID, alice.account.address], { account: who.account });
+    }
+
+    // a stranger may bump only its own wallet, which leaves alice's attestations alone
+    const a = await signed({ issuedAt: BigInt(await time.latest()) + 1n });
+    await guard.write.bumpWalletValidAfter([AGENT_ID, stranger.account.address], { account: stranger.account });
+    await guard.write.execute([a.t, a.sig]);
+  });
+
+  it("the attestation lifetime is capped on-chain (60 s by default); only the owner changes it, within 10 s to 1 h", async function () {
+    const { guard, owner, stranger, signed, buildTransfer, sign } = await deployCleanverseStack(connection);
+    assert.equal(await guard.read.maxAttestationTtl(), 60n);
+
+    const tooLong = await buildTransfer();
+    const long = { ...tooLong, deadline: tooLong.issuedAt + 61n };
+    await viem.assertions.revertWithCustomErrorWithArgs(guard.write.execute([long, await sign(long)]), guard, "AttestationTooLong", [
+      long.issuedAt,
+      long.deadline,
+      60n,
+    ]);
+
+    await viem.assertions.revertWithCustomErrorWithArgs(guard.write.setMaxAttestationTtl([300n], { account: stranger.account }), guard, "NotOwner", [
+      getAddress(stranger.account.address),
+    ]);
+    for (const bad of [9n, 3601n]) {
+      await viem.assertions.revertWithCustomErrorWithArgs(guard.write.setMaxAttestationTtl([bad], { account: owner.account }), guard, "InvalidTtl", [bad]);
+    }
+    await viem.assertions.emitWithArgs(guard.write.setMaxAttestationTtl([300n], { account: owner.account }), guard, "MaxAttestationTtlSet", [300n]);
+    const t = await buildTransfer();
+    const fiveMinutes = { ...t, deadline: t.issuedAt + 300n };
+    await guard.write.execute([fiveMinutes, await sign(fiveMinutes)]);
+    const ok = await signed();
+    await guard.write.execute([ok.t, ok.sig]);
+  });
+
+  it("an attestation dated more than 5 s ahead of the chain is refused; one issued in the second of a bump is void, the next second is valid", async function () {
+    const { guard, permissionRegistry, owner, enforcer, signed } = await deployCleanverseStack(connection);
+    await permissionRegistry.write.setEnforcer([enforcer.account.address, true], { account: owner.account });
+
+    const latest = BigInt(await time.latest());
+    const ahead = await signed({ issuedAt: latest + 7n });
+    await viem.assertions.revertWithCustomError(guard.write.execute([ahead.t, ahead.sig]), guard, "AttestationNotYetIssued");
+    const within = await signed({ issuedAt: latest + 5n });
+    await guard.write.execute([within.t, within.sig]);
+
+    await guard.write.bumpValidAfter([AGENT_ID], { account: enforcer.account });
+    const floor = await guard.read.agentValidAfter([AGENT_ID]);
+    const same = await signed({ issuedAt: floor });
+    await viem.assertions.revertWithCustomErrorWithArgs(guard.write.execute([same.t, same.sig]), guard, "AttestationSuperseded", [floor, floor]);
+    const next = await signed({ issuedAt: floor + 1n });
+    await guard.write.execute([next.t, next.sig]);
   });
 
   it("eligibility is independent of the trust score: a frozen, revoked or expired A-Pass blocks an agent scored 100", async function () {

@@ -20,6 +20,8 @@ interface ISpendGuardAgentRegistry {
         );
 
     function exists(bytes32 agentId) external view returns (bool);
+
+    function isOwnerController(bytes32 agentId, address who) external view returns (bool);
 }
 
 /// @dev Narrow view of PermissionRegistry used by FukuSpendGuard (which must be an enforcer).
@@ -31,6 +33,8 @@ interface ISpendGuardPermissionRegistry {
 
     function recordDecision(bytes32 agentId, bytes32 actionHash, bool allowed, bytes32 proofHash, string calldata ruleId)
         external;
+
+    function enforcers(address account) external view returns (bool);
 }
 
 /// @title FukuSpendGuard
@@ -56,6 +60,16 @@ interface ISpendGuardPermissionRegistry {
 ///         increases on every `openMandate` and `closeMandate`, so replacing, closing or
 ///         re-opening a mandate voids every attestation issued under earlier terms. The
 ///         EIP-712 domain binds it to this chain and this contract.
+///
+///         Short-lived and supersedable. Each attestation states when it was issued
+///         (`issuedAt`) and lives at most `maxAttestationTtl` seconds (60 by default, set by
+///         the contract owner). `bumpValidAfter` voids every attestation for an agent issued
+///         at or before that moment: Fuku (an enforcer) calls it when the agent is paused or
+///         revoked and when an allowance changes, and the agent's owner controller may call
+///         it too. `bumpWalletValidAfter` does the same for the attestations drawing on one
+///         funding wallet; that wallet (the mandate owner) or an enforcer may call it. A pause
+///         or a withdrawn allowance is therefore final for earlier attestations once bumped,
+///         not only until the agent is resumed or the allowance restored.
 ///
 ///         The token itself (for example a Cleanverse aToken) still applies its own compliance
 ///         checks; its revert data is bubbled up unchanged, and a reverted transfer consumes
@@ -90,11 +104,12 @@ contract FukuSpendGuard is Ownable {
         bytes32 complianceRef;
         uint64 mandateVersion;
         uint256 nonce;
-        uint64 deadline;
+        uint64 issuedAt; // unix seconds; must be later than the agent's and the wallet's validAfter
+        uint64 deadline; // unix seconds; at most issuedAt + maxAttestationTtl
     }
 
     bytes32 public constant GUARDED_TRANSFER_TYPEHASH = keccak256(
-        "GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 deadline)"
+        "GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint64 mandateVersion,uint256 nonce,uint64 issuedAt,uint64 deadline)"
     );
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -108,6 +123,13 @@ contract FukuSpendGuard is Ownable {
     uint256 private constant SECP256K1N_HALF = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
     uint8 private constant AGENT_STATUS_PAUSED = 2;
+
+    /// @notice Bounds for `maxAttestationTtl`, in seconds.
+    uint64 public constant MIN_ATTESTATION_TTL = 10;
+    uint64 public constant MAX_ATTESTATION_TTL = 1 hours;
+    /// @notice How far `issuedAt` may run ahead of block time (block-time granularity, and an
+    ///         attestation issued in the second right after a bump).
+    uint64 public constant ISSUED_AT_TOLERANCE = 5;
 
     ISpendGuardAgentRegistry public immutable agentRegistry;
     ISpendGuardPermissionRegistry public immutable permissionRegistry;
@@ -126,6 +148,13 @@ contract FukuSpendGuard is Ownable {
     mapping(uint256 => bool) public nonceUsed;
     /// @notice actionHash => a transfer was already executed for this Fuku action.
     mapping(bytes32 => bool) public actionExecuted;
+    /// @notice Longest life of an attestation (deadline - issuedAt), in seconds.
+    uint64 public maxAttestationTtl = 60;
+    /// @notice agentId => attestations for the agent issued at or before this time are void.
+    mapping(bytes32 => uint64) public agentValidAfter;
+    /// @notice agentId => funding wallet => attestations drawing on that wallet issued at or
+    ///         before this time are void.
+    mapping(bytes32 => mapping(address => uint64)) public walletValidAfter;
 
     /// @dev agentId => funding wallet => last mandate version handed out. Kept apart from
     ///      `mandates` so a closed and re-opened mandate never reuses a version.
@@ -138,6 +167,9 @@ contract FukuSpendGuard is Ownable {
     uint256 private _lock = 1;
 
     event ComplianceSignerSet(address indexed previousSigner, address indexed newSigner);
+    event MaxAttestationTtlSet(uint64 ttl);
+    /// @dev `wallet` is the zero address for the agent-wide value.
+    event ValidAfterBumped(bytes32 indexed agentId, address indexed wallet, uint64 validAfter, address indexed by);
     event MandateOpened(
         bytes32 indexed agentId,
         address indexed wallet,
@@ -164,6 +196,11 @@ contract FukuSpendGuard is Ownable {
     );
 
     error AttestationExpired(uint64 deadline, uint256 timestamp);
+    error AttestationNotYetIssued(uint64 issuedAt, uint256 timestamp);
+    error AttestationTooLong(uint64 issuedAt, uint64 deadline, uint64 maxTtl);
+    error AttestationSuperseded(uint64 issuedAt, uint64 validAfter);
+    error NotAuthorizedToBump(bytes32 agentId, address caller);
+    error InvalidTtl(uint64 ttl);
     error NonceUsed(uint256 nonce);
     error ActionAlreadyExecuted(bytes32 actionHash);
     error BadAttestation();
@@ -213,6 +250,38 @@ contract FukuSpendGuard is Ownable {
         address previous = complianceSigner;
         complianceSigner = newSigner;
         emit ComplianceSignerSet(previous, newSigner);
+    }
+
+    /// @notice Contract-owner only: how long an attestation may live, within
+    ///         [MIN_ATTESTATION_TTL, MAX_ATTESTATION_TTL].
+    function setMaxAttestationTtl(uint64 ttl) external onlyOwner {
+        if (ttl < MIN_ATTESTATION_TTL || ttl > MAX_ATTESTATION_TTL) revert InvalidTtl(ttl);
+        maxAttestationTtl = ttl;
+        emit MaxAttestationTtlSet(ttl);
+    }
+
+    // --- supersession --------------------------------------------------------------------
+
+    /// @notice Void every attestation for `agentId` issued at or before now, whatever wallet it
+    ///         draws on. Callable by a PermissionRegistry enforcer (Fuku does it on pause,
+    ///         revoke and allowance changes) or the agent's owner controller.
+    function bumpValidAfter(bytes32 agentId) external {
+        if (!permissionRegistry.enforcers(msg.sender) && !agentRegistry.isOwnerController(agentId, msg.sender)) {
+            revert NotAuthorizedToBump(agentId, msg.sender);
+        }
+        uint64 at = uint64(block.timestamp);
+        agentValidAfter[agentId] = at;
+        emit ValidAfterBumped(agentId, address(0), at, msg.sender);
+    }
+
+    /// @notice Void every attestation for `agentId` drawing on `wallet` issued at or before now.
+    ///         Callable by `wallet` itself (the mandate owner) or an enforcer. Scoped to one
+    ///         wallet, so whoever opens a mandate for an agent cannot freeze its other wallets.
+    function bumpWalletValidAfter(bytes32 agentId, address wallet) external {
+        if (msg.sender != wallet && !permissionRegistry.enforcers(msg.sender)) revert NotAuthorizedToBump(agentId, msg.sender);
+        uint64 at = uint64(block.timestamp);
+        walletValidAfter[agentId][wallet] = at;
+        emit ValidAfterBumped(agentId, wallet, at, msg.sender);
     }
 
     // --- mandates and payees (msg.sender is the funding wallet) ----------------------------
@@ -332,10 +401,19 @@ contract FukuSpendGuard is Ownable {
 
     // --- internals -----------------------------------------------------------------------
 
-    /// @dev 1. Attestation: not expired, nonce unused, action not executed yet, and signed by
-    ///      the compliance signer for this chain and this contract.
+    /// @dev 1. Attestation: not expired, issued now or in the past (within the tolerance), no
+    ///      longer-lived than maxAttestationTtl, issued after the agent's and the wallet's
+    ///      validAfter, nonce unused, action not executed yet, and signed by the compliance
+    ///      signer for this chain and this contract.
     function _checkAttestation(GuardedTransfer calldata t, bytes calldata sig) private view {
         if (block.timestamp > t.deadline) revert AttestationExpired(t.deadline, block.timestamp);
+        if (t.issuedAt > block.timestamp + ISSUED_AT_TOLERANCE) revert AttestationNotYetIssued(t.issuedAt, block.timestamp);
+        uint64 ttl = maxAttestationTtl;
+        if (uint256(t.deadline) > uint256(t.issuedAt) + ttl) revert AttestationTooLong(t.issuedAt, t.deadline, ttl);
+        uint64 floor = agentValidAfter[t.agentId];
+        uint64 walletFloor = walletValidAfter[t.agentId][t.from];
+        if (walletFloor > floor) floor = walletFloor;
+        if (t.issuedAt <= floor) revert AttestationSuperseded(t.issuedAt, floor);
         if (nonceUsed[t.nonce]) revert NonceUsed(t.nonce);
         if (actionExecuted[t.actionHash]) revert ActionAlreadyExecuted(t.actionHash);
         if (_recover(hashTransfer(t), sig) != complianceSigner) revert BadAttestation();

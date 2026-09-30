@@ -3,10 +3,21 @@ import { db } from "../db";
 import { apassEligibleFor } from "./cleanverse";
 import { custodyFor } from "../custody";
 import { newAgentId } from "../ids";
-import { parsePolicy, policyAnchorHash, writablePolicySchema, type PolicyDoc } from "../engine/policy";
+import { isATokenPassport, parsePolicy, policyAnchorHash, writablePolicySchema, type PolicyDoc } from "../engine/policy";
 import { utcDayStart } from "../engine/permission";
 import { computeScore, type ScoreResult } from "../engine/reputation";
-import { anchorStateOf, ChainWriteError, registerAgentOnChain, revokePolicyOnChain, setAgentStatusOnChain, setPolicyOnChain, toAgentRef, type ChainReceipt } from "../chain";
+import {
+  anchorStateOf,
+  bumpValidAfterOnChain,
+  ChainWriteError,
+  registerAgentOnChain,
+  revokePolicyOnChain,
+  setAgentStatusOnChain,
+  setPolicyOnChain,
+  toAgentRef,
+  type AgentRef,
+  type ChainReceipt,
+} from "../chain";
 
 export type AgentRow = Agent & { policy: Policy | null };
 
@@ -191,39 +202,55 @@ export interface ChainSync {
   error?: string;
 }
 
+/** Runs every task even when one fails (a kill switch should do as much as it can on-chain). */
 async function syncOnChain(tasks: { op: string; run: () => Promise<ChainReceipt | null> }[]): Promise<ChainSync> {
   const receipts: ChainSync["receipts"] = [];
+  const errors: string[] = [];
   for (const t of tasks) {
     try {
       const r = await t.run();
       if (r) receipts.push({ op: t.op, txHash: r.txHash, mode: r.mode, status: r.status });
     } catch (err) {
-      return { ok: false, receipts, error: err instanceof ChainWriteError ? err.message : (err as Error).message };
+      errors.push(err instanceof ChainWriteError ? err.message : `${t.op}: ${(err as Error).message}`);
     }
   }
-  return { ok: true, receipts };
+  return errors.length ? { ok: false, receipts, error: errors.join("; ") } : { ok: true, receipts };
+}
+
+/**
+ * Voids every outstanding FukuSpendGuard attestation for the agent (guard.bumpValidAfter, sent by
+ * Fuku as an enforcer, no owner signature needed). Only agents that can hold attestations: an
+ * A-Token passport now, or a guarded transfer before.
+ */
+async function guardBumpTask(agent: { id: string; policy: Parameters<typeof parsePolicy>[0] }, ref: AgentRef) {
+  const guarded = isATokenPassport(parsePolicy(agent.policy)) || (await db.agentAction.count({ where: { agentId: agent.id, complianceRef: { not: null } } })) > 0;
+  return guarded ? [{ op: "bumpValidAfter", run: () => bumpValidAfterOnChain(ref) }] : [];
 }
 
 /**
  * Kill switch: revoke the passport (the agent is also paused in Fuku). The database changes first
- * (fail safe: Fuku stops allowing the agent immediately), then PermissionRegistry.revokePolicy, so
- * FukuSpendGuard rejects every outstanding attestation with PolicyNotActive. The on-chain agent
- * status is left to the explicit pause / resume switch (AgentRegistry.setStatus), so the two
- * switches stay distinguishable on-chain.
+ * (fail safe: Fuku stops allowing the agent immediately). Then, on-chain: FukuSpendGuard's
+ * validAfter is bumped (every outstanding attestation is void at once, even while an owner-controlled
+ * agent's registry write waits for the owner), and PermissionRegistry.revokePolicy follows. The
+ * on-chain agent status is left to the explicit pause / resume switch (AgentRegistry.setStatus), so
+ * the two switches stay distinguishable on-chain.
  */
 export async function revokeAgentPolicy(agentId: string) {
   await db.policy.updateMany({ where: { agentId }, data: { active: false } });
   await db.agent.update({ where: { id: agentId }, data: { status: "paused" } });
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
   const ref = toAgentRef(agent, agent.identity);
-  const chainSync = await syncOnChain([{ op: "revokePolicy", run: () => revokePolicyOnChain(ref) }]);
+  const chainSync = await syncOnChain([...(await guardBumpTask(agent, ref)), { op: "revokePolicy", run: () => revokePolicyOnChain(ref) }]);
   return { score: await refreshScore(agentId), chainSync };
 }
 
+/** Pause also bumps the guard's validAfter, so a later resume cannot revive earlier attestations. */
 export async function setAgentStatus(agentId: string, status: "active" | "paused") {
   await db.agent.update({ where: { id: agentId }, data: { status } });
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
-  const chainSync = await syncOnChain([{ op: `setStatus(${status})`, run: () => setAgentStatusOnChain(toAgentRef(agent, agent.identity), status) }]);
+  const ref = toAgentRef(agent, agent.identity);
+  const bump = status === "paused" ? await guardBumpTask(agent, ref) : [];
+  const chainSync = await syncOnChain([...bump, { op: `setStatus(${status})`, run: () => setAgentStatusOnChain(ref, status) }]);
   return { score: await refreshScore(agentId), chainSync };
 }
 

@@ -31,9 +31,12 @@
  *   - reconcile (run as a separate process) recovers a transfer whose hash was never stored,
  *     without double credit, and returns a reorged-out confirmation to PENDING (evm_snapshot /
  *     evm_revert on the local node); needs DATABASE_URL pointing at the web instance's database;
- *   - revoking in the app emits PolicyRevoked, after which a pre-signed attestation reverts with
- *     PolicyNotActive, and neither a later decision anchor nor a reconcile pass re-activates the
- *     passport on-chain. The demo is reset again at the end.
+ *   - pausing then resuming in the app bumps the guard's validAfter, so a pre-pause attestation stays
+ *     dead (AttestationSuperseded); an allowance withdrawn and restored from Ava's wallet makes
+ *     reconcile bump the wallet's validAfter, with the same effect (needs DEMO_OWNER_PRIVATE_KEY);
+ *   - revoking in the app bumps validAfter and emits PolicyRevoked: a pre-signed attestation reverts
+ *     with AttestationSuperseded and a fresh one with PolicyNotActive, and neither a later decision
+ *     anchor nor a reconcile pass re-activates the passport on-chain. The demo is reset at the end.
  *   FUKU_COMPLIANCE_SIGNER_KEY  signs the direct attestations (Hardhat account #1 locally)
  *
  * Exit code 0 when every check passes, 1 otherwise.
@@ -322,6 +325,7 @@ const GUARDED_TRANSFER_TYPES = {
     { name: "complianceRef", type: "bytes32" },
     { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
+    { name: "issuedAt", type: "uint64" },
     { name: "deadline", type: "uint64" },
   ],
 };
@@ -448,10 +452,17 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
   if (!check("FUKU_COMPLIANCE_SIGNER_KEY available for direct attestations", Boolean(signerKey), signerKey ? "" : "set it to the guard's compliance signer")) return;
   const signer = privateKeyToAccount(signerKey.startsWith("0x") ? signerKey : `0x${signerKey}`);
   const attest = async (amount, to = nus) => {
-    const [[policyHash], mandate] = await Promise.all([
+    const [[policyHash], mandate, agentFloor, walletFloor, maxTtl, latest] = await Promise.all([
       read(addresses.permissions, permAbi, "policies", [agentKey]),
       read(cv.guard, guardAbi, "mandates", [agentKey, owner]),
+      read(cv.guard, guardAbi, "agentValidAfter", [agentKey]),
+      read(cv.guard, guardAbi, "walletValidAfter", [agentKey, owner]),
+      read(cv.guard, guardAbi, "maxAttestationTtl", []),
+      publicClient.getBlock(),
     ]);
+    // Issued at chain time, strictly after the last validAfter bump; lives maxAttestationTtl.
+    const floor = agentFloor > walletFloor ? agentFloor : walletFloor;
+    const issuedAt = latest.timestamp > floor ? latest.timestamp : floor + 1n;
     const t = {
       agentId: agentKey,
       from: owner,
@@ -464,7 +475,8 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
       complianceRef: keccak256(stringToHex("smoke-compliance")),
       mandateVersion: mandate[5],
       nonce: BigInt(toHex(randomBytes(32))),
-      deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
+      issuedAt,
+      deadline: issuedAt + maxTtl,
     };
     const sig = await signer.signTypedData({
       domain: { name: "FukuSpendGuard", version: "1", chainId, verifyingContract: cv.guard },
@@ -476,7 +488,8 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
   };
   const simulate = async ({ t, sig }) => {
     try {
-      await publicClient.simulateContract({ address: cv.guard, abi: guardAbi, functionName: "execute", args: [t, sig], account: signer.address });
+      // the token's errors too: its reverts (ComplianceRejected, InsufficientAllowance) bubble up through the guard
+      await publicClient.simulateContract({ address: cv.guard, abi: [...guardAbi, ...tokenAbi.filter((e) => e.type === "error")], functionName: "execute", args: [t, sig], account: signer.address });
       return "ok";
     } catch (err) {
       return revertName(err);
@@ -535,6 +548,44 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
     check("reconcile crash-recovery check", false, "DATABASE_URL not set for the smoke (point it at the web instance's database)");
   }
 
+  // 6b. pause then resume in the app: Fuku bumps validAfter on the pause, so the resume revives nothing
+  const prePause = await attest(parseUnits("1", 6));
+  const okBeforePause = await simulate(prePause);
+  const paused = await api("PATCH", `/api/agents/${encodeURIComponent(pay.id)}`, { status: "paused" });
+  const bump = paused.json?.chainSync?.receipts?.find((r) => r.op === "bumpValidAfter");
+  const resumed = await api("PATCH", `/api/agents/${encodeURIComponent(pay.id)}`, { status: "active" });
+  const afterResume = await simulate(prePause);
+  check(
+    "pause then resume in the app: validAfter bumped on the pause, the pre-pause attestation stays dead",
+    okBeforePause === "ok" && bump?.status === "confirmed" && resumed.status === 200 && afterResume === "AttestationSuperseded",
+    `${okBeforePause} → pause (bumpValidAfter ${short(bump?.txHash)}) → resume → ${afterResume}`,
+  );
+
+  // 6c. allowance withdrawn then restored from Ava's own wallet: reconcile sees the Approval events
+  const avaKey = process.env.DEMO_OWNER_PRIVATE_KEY?.trim();
+  if (avaKey && dbUrl) {
+    const ava = createWalletClient({
+      account: privateKeyToAccount(avaKey.startsWith("0x") ? avaKey : `0x${avaKey}`),
+      transport: http(RPC_URL),
+      chain: { id: chainId, name: "smoke", nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [RPC_URL] } } },
+    });
+    runReconcile(); // the allowance watcher has a starting block from here on
+    const preAllowance = await attest(parseUnits("1", 6));
+    const allowanceBefore = await read(cv.atoken, tokenAbi, "allowance", [owner, cv.guard]);
+    await publicClient.waitForTransactionReceipt({ hash: await ava.writeContract({ address: cv.atoken, abi: tokenAbi, functionName: "approve", args: [cv.guard, 0n] }) });
+    const withdrawn = await simulate(preAllowance);
+    await publicClient.waitForTransactionReceipt({ hash: await ava.writeContract({ address: cv.atoken, abi: tokenAbi, functionName: "approve", args: [cv.guard, allowanceBefore] }) });
+    const out = runReconcile();
+    const afterRestore = await simulate(preAllowance);
+    check(
+      "allowance withdrawn then restored: reconcile bumps the wallet's validAfter, the earlier attestation stays dead",
+      withdrawn === "InsufficientAllowance" && afterRestore === "AttestationSuperseded",
+      `${withdrawn} → restored → ${afterRestore} · ${out}`,
+    );
+  } else {
+    console.log("   (allowance replay check skipped: needs DEMO_OWNER_PRIVATE_KEY and DATABASE_URL)");
+  }
+
   // 7. a pre-signed attestation, then revoke in the app
   const pre = await attest(parseUnits("1", 6));
   const before = await simulate(pre);
@@ -548,7 +599,12 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
   }
   check("revoking in the app emits PolicyRevoked on-chain", rev.status === 200 && rev.json?.chainSync?.ok && revoked, JSON.stringify(rev.json?.chainSync ?? rev.json).slice(0, 160));
   const afterRevoke = await simulate(pre);
-  check("the pre-signed attestation now reverts with PolicyNotActive", afterRevoke === "PolicyNotActive", afterRevoke);
+  const freshAfterRevoke = await simulate(await attest(parseUnits("1", 6)));
+  check(
+    "after the revoke a pre-signed attestation reverts AttestationSuperseded (validAfter bumped) and a fresh one PolicyNotActive",
+    afterRevoke === "AttestationSuperseded" && freshAfterRevoke === "PolicyNotActive",
+    `${afterRevoke} / ${freshAfterRevoke}`,
+  );
   const blocked = await pay$({ action: "transfer", amountUsdc: 1, to: nus, asset: "aUSDC" });
   check("after the revoke the app blocks the agent (R0/R1) and nothing moves", blocked.status === 403 && ["R0", "R1"].includes(blocked.json?.ruleId), `${blocked.json?.ruleId}`);
   // That block was anchored (a policy sync ran); a reconcile pass follows. Neither may revive the passport.
@@ -556,7 +612,7 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
     const out = runReconcile();
     const [, , , activeAfter] = await publicClient.readContract({ address: addresses.permissions, abi: permAbi, functionName: "policies", args: [agentKey] });
     const again = await simulate(pre);
-    check("a later anchor and a reconcile pass leave the revoked passport inactive; the attestation stays dead", activeAfter === false && again === "PolicyNotActive", `active ${activeAfter}, ${again} · ${out}`);
+    check("a later anchor and a reconcile pass leave the revoked passport inactive; the attestation stays dead", activeAfter === false && again === "AttestationSuperseded", `active ${activeAfter}, ${again} · ${out}`);
   }
 
   // 8. reorg: a confirmed transfer that disappears from the chain goes back to PENDING and loses its credit

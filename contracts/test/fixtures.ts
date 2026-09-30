@@ -97,6 +97,7 @@ export type GuardedTransfer = {
   complianceRef: Hex;
   mandateVersion: bigint;
   nonce: bigint;
+  issuedAt: bigint;
   deadline: bigint;
 };
 
@@ -114,9 +115,13 @@ export const GUARDED_TRANSFER_TYPES = {
     { name: "complianceRef", type: "bytes32" },
     { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
+    { name: "issuedAt", type: "uint64" },
     { name: "deadline", type: "uint64" },
   ],
 } as const;
+
+/** The guard's default maxAttestationTtl, in seconds. */
+export const ATTESTATION_TTL = 60n;
 
 /** Index of `version` in the tuple returned by FukuSpendGuard.mandates(agentId, wallet). */
 const MANDATE_VERSION_INDEX = 5;
@@ -131,8 +136,8 @@ const MANDATE_VERSION_INDEX = 5;
  *  - alice opened a DAILY_CAP mandate for AGENT_ID on the aToken (no per-tx limit, no
  *    expiry, any payee; mandate version 1) and approved the guard
  * `signed()` builds a GuardedTransfer (alice -> bob, 100 tokens, fresh nonce and action,
- * the current on-chain mandate version of (agentId, from), deadline latest block + 1h, any
- * field overridable) and signs it with the compliance signer. `sign()` optionally takes
+ * the current on-chain mandate version of (agentId, from), issued at the latest block's time,
+ * deadline issuedAt + 60 s (the default maxAttestationTtl), any field overridable) and signs it with the compliance signer. `sign()` optionally takes
  * domain overrides to sign for another chain id or verifying contract.
  */
 export async function deployCleanverseStack(connection: NetworkConnection) {
@@ -186,7 +191,8 @@ export async function deployCleanverseStack(connection: NetworkConnection) {
       complianceRef: id(`cleanverse:ref:${n}`),
       mandateVersion: overrides.mandateVersion ?? (await mandateVersionOf(agentId, from)),
       nonce: n,
-      deadline: latest.timestamp + 3600n,
+      issuedAt: latest.timestamp,
+      deadline: (overrides.issuedAt ?? latest.timestamp) + ATTESTATION_TTL,
       ...overrides,
     };
   }
