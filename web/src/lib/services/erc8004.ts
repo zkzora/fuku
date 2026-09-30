@@ -1,12 +1,14 @@
 import type { Agent, Identity } from "@prisma/client";
-import { createWalletClient, getAddress, http, isAddress, isAddressEqual, type Address, type Hex, type PublicClient } from "viem";
+import { createWalletClient, getAddress, http, isAddress, isAddressEqual, recoverTypedDataAddress, type Address, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { db } from "../db";
 import { chainConfig, chainMode, chainReader, settlementChain } from "../chain";
 import { agentKeysConfigured, newAgentKey, openAgentKey } from "../agent-keys";
 import { demoOwnerKey } from "../cleanverse/demo";
 import { DEMO_IDENTITY_ID } from "../demo-mode";
+import { RequestError } from "../errors";
 import {
+  AGENT_WALLET_SET_TYPES,
   ERC8004_SOURCE,
   Erc8004IdentityRegistryAbi,
   MAX_DEADLINE_DELAY_S,
@@ -57,6 +59,13 @@ export interface Erc8004View {
   custodialDemo: boolean;
   /** The agent's own key: its intended (or current) agentWallet. */
   agentWallet: Address | null;
+  /**
+   * Who holds that key. fuku: generated and sealed by Fuku (the seeded demo agents, and agents created
+   * in the web app); external: the developer's own key, registered through the SDK, never seen by Fuku.
+   */
+  agentKeySource: "fuku" | "external" | null;
+  /** External key only: the AgentWalletSet the key must sign, then prepareExternalAgentWallet. */
+  agentWalletTypedData: AgentWalletTypedData | null;
   agentId: string | null;
   agentURI: string;
   /** public-url: FUKU_PUBLIC_URL, checked to resolve before registering; data: a self-contained data: URI. */
@@ -193,6 +202,8 @@ export async function erc8004View(agent: Agent, identity: Identity): Promise<Erc
     ownerWallet,
     custodialDemo: Boolean(demoOwnerAccount(identity)),
     agentWallet: agent.agentWallet ? getAddress(agent.agentWallet) : null,
+    agentKeySource: agent.agentKey ? "fuku" : agent.agentWallet ? "external" : null,
+    agentWalletTypedData: null,
     agentId: agent.erc8004Id,
     agentURI,
     agentURIKind: agentURI.startsWith("data:") ? "data" : "public-url",
@@ -231,10 +242,30 @@ export async function erc8004View(agent: Agent, identity: Identity): Promise<Erc
   if (!isAddressEqual(owner, ownerWallet)) return { ...view, reason: "owned-elsewhere" };
   const keyBound = Boolean(agent.agentWallet && isAddressEqual(agentWallet, agent.agentWallet as Address));
   if (keyBound) return { ...view, complete: true };
+  if (agent.agentWallet && !agent.agentKey) {
+    // The developer's own key: Fuku cannot sign for it; it hands out what the key must sign.
+    const [domain, latest] = await Promise.all([readErc8004Domain(client, registry), client.getBlock()]);
+    const deadline = latest.timestamp + BigInt(MAX_DEADLINE_DELAY_S - 60);
+    view.agentWalletTypedData = {
+      domain,
+      types: AGENT_WALLET_SET_TYPES,
+      primaryType: "AgentWalletSet",
+      message: { agentId: agent.erc8004Id, newWallet: getAddress(agent.agentWallet), owner: ownerWallet, deadline: deadline.toString() },
+    };
+    return view;
+  }
   if (!agentKeysConfigured()) return { ...view, reason: "agent-keys-not-configured" };
   view.actions.push(await agentWalletAction(client, registry, agent, ownerWallet, c.id));
   view.agentWallet = getAddress((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).agentWallet!);
   return view;
+}
+
+export interface AgentWalletTypedData {
+  domain: { name: string; version: string; chainId: number; verifyingContract: Address };
+  types: typeof AGENT_WALLET_SET_TYPES;
+  primaryType: "AgentWalletSet";
+  /** uint256 values as decimal strings. */
+  message: { agentId: string; newWallet: Address; owner: Address; deadline: string };
 }
 
 export type Erc8004Confirmation = { ok: true; op: Erc8004Op; agentId: string; txHash: Hex } | { ok: false; error: string };
@@ -280,6 +311,42 @@ export async function confirmErc8004(agent: Agent, identity: Identity, input: { 
   if (!isAddressEqual(onChain, agent.agentWallet as Address)) return { ok: false, error: `getAgentWallet(#${id}) is ${onChain}` };
   await db.agent.update({ where: { id: agent.id }, data: { erc8004WalletTx: input.txHash } });
   return { ok: true, op: input.op, agentId: agent.erc8004Id, txHash: input.txHash };
+}
+
+/**
+ * Bring your own agent key: record the address of a key the developer holds as the agent's intended
+ * agentWallet. Fuku drops any key it generated for the agent. Refused once that exact key is bound.
+ */
+export async function setExternalAgentKey(agent: Agent, address: string): Promise<Agent> {
+  if (!isAddress(address)) throw new RequestError("agentKey must be an address", 400, "invalid_request");
+  return db.agent.update({ where: { id: agent.id }, data: { agentWallet: getAddress(address), agentKey: null } });
+}
+
+/**
+ * The developer's agent key signed the AgentWalletSet from the view: check the signature recovers to
+ * that key for this agent, owner and deadline, and prepare setAgentWallet for the owner's wallet.
+ */
+export async function prepareExternalAgentWallet(agent: Agent, identity: Identity, input: { signature: Hex; deadline: string }): Promise<Erc8004Action> {
+  const c = chainConfig();
+  const registry = erc8004IdentityRegistry(c.id);
+  const owner = ownerWalletOf(identity);
+  if (chainMode() !== "live" || !registry || !owner) throw new RequestError("ERC-8004 needs the live chain and a verified owner wallet", 409, "erc8004_unavailable");
+  if (!agent.erc8004Id || !agent.agentWallet || agent.agentKey) throw new RequestError("Register the agent and set its external key first", 409, "erc8004_not_ready");
+  const client = chainReader()!;
+  const [domain, latest] = await Promise.all([readErc8004Domain(client, registry), client.getBlock()]);
+  const deadline = BigInt(input.deadline);
+  if (deadline <= latest.timestamp || deadline > latest.timestamp + BigInt(MAX_DEADLINE_DELAY_S)) {
+    throw new RequestError("The deadline has passed or is more than 5 minutes ahead; take fresh typed data", 409, "erc8004_deadline");
+  }
+  const message = { agentId: BigInt(agent.erc8004Id), newWallet: getAddress(agent.agentWallet), owner, deadline };
+  const signer = await recoverTypedDataAddress({ domain, types: AGENT_WALLET_SET_TYPES, primaryType: "AgentWalletSet", message, signature: input.signature });
+  if (!isAddressEqual(signer, message.newWallet)) throw new RequestError(`The signature is from ${signer}, not the agent key ${message.newWallet}`, 422, "erc8004_bad_signature");
+  return {
+    op: "erc8004SetAgentWallet",
+    description: `Make the developer's agent key (${message.newWallet.slice(0, 8)}…) ${agent.name}'s agentWallet`,
+    tx: { chainId: c.id, from: owner, to: registry, data: setAgentWalletCalldata(message, input.signature), value: "0x0" },
+    deadline: Number(deadline),
+  };
 }
 
 /**

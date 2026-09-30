@@ -337,9 +337,24 @@ export interface Erc8004Status {
   registry: string | null;
   /** `eip155:{chainId}:{registry}`, the spec's global registry id. */
   registryId: string | null;
-  reason: "mock-chain" | "unsupported-chain" | "no-owner-wallet" | "agent-keys-not-configured" | "owned-elsewhere" | null;
+  reason: "mock-chain" | "unsupported-chain" | "no-owner-wallet" | "agent-keys-not-configured" | "owned-elsewhere" | "agent-uri-not-public" | null;
   ownerWallet: string | null;
   agentWallet: string | null;
+  /** fuku: a key Fuku generated and holds (the demo agents); external: yours, set with setErc8004AgentKey. */
+  agentKeySource: "fuku" | "external" | null;
+  /**
+   * With an external key: the EIP-712 AgentWalletSet your agent key must sign (uint256 values as
+   * decimal strings), then pass the signature to prepareErc8004AgentWallet.
+   */
+  agentWalletTypedData: {
+    domain: { name: string; version: string; chainId: number; verifyingContract: string };
+    types: { AgentWalletSet: { name: string; type: string }[] };
+    primaryType: "AgentWalletSet";
+    message: { agentId: string; newWallet: string; owner: string; deadline: string };
+  } | null;
+  /** public-url: checked to resolve before registering; data: a self-contained data: URI. */
+  agentURIKind: "public-url" | "data";
+  agentURIProblem: string | null;
   agentId: string | null;
   agentURI: string;
   registerTx: string | null;
@@ -471,6 +486,25 @@ export class Fuku {
     return this.request<Erc8004Status>("GET", `/agents/${encodeURIComponent(agentId)}/erc8004`);
   }
 
+  /**
+   * Bring your own agent key: the address of a key you generated and keep. Fuku never sees the key; it
+   * drops any key it generated for the agent.
+   */
+  setErc8004AgentKey(agentId: string, agentKey: string) {
+    return this.request<Erc8004Status>("PUT", `/agents/${encodeURIComponent(agentId)}/erc8004`, { agentKey });
+  }
+
+  /**
+   * Your agent key signed `agentWalletTypedData`: Fuku checks the signature and returns the
+   * setAgentWallet transaction for the owner's wallet to send (before `deadline`).
+   */
+  prepareErc8004AgentWallet(agentId: string, input: { signature: string; deadline: string }) {
+    return this.request<{ action: Erc8004Action }>("POST", `/agents/${encodeURIComponent(agentId)}/erc8004`, {
+      agentWalletSignature: input.signature,
+      deadline: input.deadline,
+    });
+  }
+
   /** After the owner's wallet mined one of those transactions: Fuku checks it on-chain and records it. */
   confirmErc8004(agentId: string, input: { op: Erc8004Action["op"]; txHash: string }) {
     return this.request<{ ok: true; op: string; agentId: string; txHash: string }>("POST", `/agents/${encodeURIComponent(agentId)}/erc8004`, input);
@@ -538,7 +572,16 @@ export class Fuku {
 
   /** The owner's on-chain mandate for this agent (null with a `reason` in mock mode or without a guard). */
   getMandate(agentId: string) {
-    return this.request<{ mandate: Mandate | null; wallet: string | null; reason: string | null }>("GET", `/agents/${encodeURIComponent(agentId)}/mandate`);
+    return this.request<{
+      mandate: Mandate | null;
+      wallet: string | null;
+      reason: string | null;
+      /** What the owner's wallet needs to open a mandate itself. */
+      guard: string | null;
+      token: string | null;
+      chainId: number;
+      agentKey: string;
+    }>("GET", `/agents/${encodeURIComponent(agentId)}/mandate`);
   }
 }
 

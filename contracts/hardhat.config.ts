@@ -43,6 +43,15 @@ const config: HardhatUserConfig = {
       chainId: 31337,
       url: process.env.LOCALHOST_RPC_URL ?? "http://127.0.0.1:8545",
     },
+    // A local fork of Monad testnet (`npx hardhat node --fork https://testnet-rpc.monad.xyz --port 8546
+    // --chain-id 10143`): the real ERC-8004 registries at chain id 10143, and the node's funded
+    // unlocked accounts. For rehearsing the testnet runbook without spending MON.
+    monadFork: {
+      type: "http",
+      chainType: "l1",
+      chainId: 10143,
+      url: process.env.MONAD_FORK_RPC_URL ?? "http://127.0.0.1:8546",
+    },
     monadTestnet: {
       type: "http",
       chainType: "l1",

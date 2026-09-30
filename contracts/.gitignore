@@ -4,3 +4,6 @@ cache
 .env
 .env.local
 typechain-types
+
+# Local fork rehearsals of the testnet runbook
+deployments/monadFork.json

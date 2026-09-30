@@ -21,7 +21,9 @@
  *
  * Cleanverse section (runs when FUKU_SPEND_GUARD / CLEANVERSE_SIM_ATOKEN are set or the
  * deployments file lists FukuSpendGuard and CleanverseATokenSim; run `npm run cleanverse:setup`
- * first). It resets the demo, then:
+ * first, and export DEMO_OWNER_PRIVATE_KEY). It resets the demo, creates a fresh A-Token agent for the
+ * run (the seeded demo agents are left alone, so their records keep verifying), has Ava's wallet open
+ * its mandate, then:
  *   - 250 aUSDC-SIM from Ava to Nusantara Supplies is ALLOWED and moves the balances on-chain;
  *   - the frozen and the unverified wallets are blocked with R8 (CVI_FROZEN / CVI_NOT_FOUND) and
  *     their transactions carry no Transfer event;
@@ -361,23 +363,45 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
 
   await signIn(true);
   const list = await api("GET", "/api/agents");
-  const pay = list.json?.agents?.find((a) => a.name === "Payments Agent");
-  if (!check("demo reset seeds the Payments Agent (A-Token passport)", pay?.policy?.assets?.includes("aUSDC"), pay?.id ?? "missing")) return;
+  const seeded = list.json?.agents?.find((a) => a.name === "Payments Agent");
+  check("demo reset seeds the Payments Agent (A-Token passport)", seeded?.policy?.assets?.includes("aUSDC"), seeded?.id ?? "missing");
   const ident = await api("GET", "/api/identity");
   const owner = ident.json?.identity?.walletAddress;
   if (!check("Ava's wallet is set and bound (DEMO_OWNER_PRIVATE_KEY)", owner && isAddress(owner) && ident.json?.identity?.walletVerifiedBy === "signature", `${owner ?? "none"} via ${ident.json?.identity?.walletVerifiedBy}`)) return;
+  const avaKey = process.env.DEMO_OWNER_PRIVATE_KEY?.trim();
+  if (!check("DEMO_OWNER_PRIVATE_KEY is set (Ava's wallet opens this run's mandate)", Boolean(avaKey))) return;
+  const ava = createWalletClient({
+    account: privateKeyToAccount(avaKey.startsWith("0x") ? avaKey : `0x${avaKey}`),
+    transport: http(RPC_URL),
+    chain: { id: chainId, name: "smoke", nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [RPC_URL] } } },
+  });
+  const avaSend = async (functionName, args, address = cv.guard, abi = guardAbi) =>
+    publicClient.waitForTransactionReceipt({ hash: await ava.writeContract({ address, abi, functionName, args }) });
 
+  // A fresh A-Token agent for this run: the seeded demo agents keep an on-chain history their records
+  // explain (so "Recompute from chain" stays verified), and each run gets its own daily cap.
+  const nus = demoAddress("nusantara");
+  const created = await api("POST", "/api/agents", { name: `Smoke payments ${Date.now()}`, capabilities: ["transfer", "read_balances"], description: "Live smoke" });
+  const pay = created.json?.agent;
+  const passport = await api("PUT", `/api/agents/${encodeURIComponent(pay?.id)}/policy`, {
+    allowed: [{ action: "transfer", limitUsdcPerDay: 1000 }, { action: "read_balances" }],
+    blocked: ["withdraw", "change_owner"],
+    scopeApps: [],
+    assets: ["aUSDC"],
+  });
+  if (!check("a fresh A-Token agent for this run, with an A-Token passport", created.status === 201 && passport.status === 200, pay?.id ?? JSON.stringify(created.json).slice(0, 100))) return;
   const agentKey = idToBytes32(pay.id);
+  await avaSend("openMandate", [agentKey, cv.atoken, parseUnits("1000", 6), parseUnits("500", 6), 0n, true]);
+  await avaSend("setPayee", [agentKey, nus, true]);
   const read = (address, abi, functionName, args = []) => publicClient.readContract({ address, abi, functionName, args });
   const [mToken, cap, maxPerTx, , restrictPayees, , mActive] = await read(cv.guard, guardAbi, "mandates", [agentKey, owner]);
   const mandateOk = check(
-    "owner opened a v2 mandate (cap, per-tx limit, approved payees)",
+    "Ava's wallet opened a v2 mandate for it (cap, per-tx limit, approved payees)",
     mActive && mToken.toLowerCase() === cv.atoken.toLowerCase() && maxPerTx > 0n && restrictPayees,
-    mActive ? `cap ${formatUnits(cap, 6)}/day, ${formatUnits(maxPerTx, 6)} per transfer, payees restricted ${restrictPayees}` : "run `npm run cleanverse:setup` first",
+    mActive ? `cap ${formatUnits(cap, 6)}/day, ${formatUnits(maxPerTx, 6)} per transfer, payees restricted ${restrictPayees}` : "no mandate",
   );
   if (!mandateOk) return;
 
-  const nus = demoAddress("nusantara");
   const frozen = demoAddress("frozen");
   const bal = (w) => read(cv.atoken, tokenAbi, "balanceOf", [w]);
   const [ownerStart, nusStart] = await Promise.all([bal(owner), bal(nus)]);
@@ -562,13 +586,7 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
   );
 
   // 6c. allowance withdrawn then restored from Ava's own wallet: reconcile sees the Approval events
-  const avaKey = process.env.DEMO_OWNER_PRIVATE_KEY?.trim();
-  if (avaKey && dbUrl) {
-    const ava = createWalletClient({
-      account: privateKeyToAccount(avaKey.startsWith("0x") ? avaKey : `0x${avaKey}`),
-      transport: http(RPC_URL),
-      chain: { id: chainId, name: "smoke", nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [RPC_URL] } } },
-    });
+  if (dbUrl) {
     runReconcile(); // the allowance watcher has a starting block from here on
     const preAllowance = await attest(parseUnits("1", 6));
     const allowanceBefore = await read(cv.atoken, tokenAbi, "allowance", [owner, cv.guard]);
@@ -583,7 +601,7 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
       `${withdrawn} → restored → ${afterRestore} · ${out}`,
     );
   } else {
-    console.log("   (allowance replay check skipped: needs DEMO_OWNER_PRIVATE_KEY and DATABASE_URL)");
+    console.log("   (allowance replay check skipped: needs DATABASE_URL)");
   }
 
   // 7. a pre-signed attestation, then revoke in the app

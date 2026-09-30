@@ -18,6 +18,7 @@ import {
   updateScoreOnChain,
 } from "../chain";
 import { hashString } from "../ids";
+import { startBlock } from "../integrations/envio";
 import { isATokenPassport, labelFor, parsePolicy } from "../engine/policy";
 import { utcDayKey } from "../engine/permission";
 import { refreshScore, scoreAgent } from "./agents";
@@ -207,7 +208,10 @@ async function settleTransfer(row: Row, head: bigint): Promise<"confirmed" | "fa
   // No receipt (or no stored hash): did the guard execute this action at all?
   const executed = await guardActionExecuted(row.id);
   if (executed) {
-    const hit = await findGuardExecution(row.agentId, row.id, head > LOG_LOOKBACK ? head - LOG_LOOKBACK : BigInt(0));
+    // Never below the registries' first block (ENVIO_START_BLOCK): nothing Fuku wrote is older.
+    const floor = BigInt(startBlock());
+    const lookback = head > LOG_LOOKBACK ? head - LOG_LOOKBACK : BigInt(0);
+    const hit = await findGuardExecution(row.agentId, row.id, lookback > floor ? lookback : floor);
     if (hit) return confirm(row, { txHash: hit.txHash, block: Number(hit.block), blockHash: hit.blockHash, logIndex: hit.logIndex });
     return "unchanged"; // executed, log outside the lookback window: leave for a wider scan
   }

@@ -97,6 +97,15 @@ export function Erc8004Card({ agentId }: { agentId: string }) {
               ) : (
                 <div>The owner&apos;s wallet mints the agent NFT, then binds the agent&apos;s own key as its agentWallet.</div>
               )}
+              {data.agentKeySource && (
+                <div>
+                  {data.agentKeySource === "fuku"
+                    ? "Agent key held by Fuku (sealed on the server; the demo agents use one)."
+                    : data.agentWalletTypedData
+                      ? "The developer's own agent key: waiting for its AgentWalletSet signature (sent through the SDK)."
+                      : "The developer's own agent key; Fuku never holds it."}
+                </div>
+              )}
               {data.registryId && <Mono className="block break-all text-[11px]">{data.registryId}</Mono>}
               {data.reason && (
                 <div>
