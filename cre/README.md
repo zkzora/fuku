@@ -3,16 +3,22 @@
 `fuku-guard` is a Chainlink Runtime Environment (CRE) workflow that orchestrates an AI agent action through Fuku:
 
 ```
-request  HTTP trigger receives { agentId, action, amountUsdc?, app? }
-verify   Fuku API: GET /api/v1/agents/:id (owner, human-verified, trust score) + POST /check (dry run)
-         -> rejected here if the owner is not a verified human or trust < minTrustScore
-execute  Fuku API: POST /api/v1/agents/:id/execute (passport evaluated, proof anchored on Monad)
-         single execution across the DON via cacheSettings
+request  HTTP trigger receives { agentId, action, amountUsdc?, app?, to?, asset?, requestId? }
+verify   Fuku API: GET /api/v1/agents/:id (checks per claim, trust score) + POST /check (preview)
+         -> rejected here if the owner has no passkey verification or trust < minTrustScore
+execute  Fuku API: POST /api/v1/agents/:id/execute with an Idempotency-Key
+         (cre:<requestId>, or a hash of the payload), so a retried trigger replays instead of
+         executing twice; single execution across the DON via cacheSettings
 record   EVM read on monad-testnet through the DON:
-         PermissionRegistry.stats(agent) and ReputationRegistry.getScore(agent)
+         PermissionRegistry.stats(agent), ReputationRegistry.getScore(agent) and, after an
+         A-Token transfer, FukuSpendGuard.spentToday(agent, owner wallet) when spendGuard is set
 ```
 
-Actions submitted this way are tagged `via Chainlink CRE` in the Fuku activity timeline.
+CRE is one more client of the public API. Every Fuku rule (owner verification R11, Cleanverse
+R7 to R9, limits R5, the on-chain guard R10) applies to it exactly as to any direct caller, so
+calling Fuku directly is never a way around the workflow's checks, and the workflow's own early
+rejection only adds to them. Actions submitted this way carry an orchestrator label that the
+activity timeline shows as declared by the caller.
 
 ## Prerequisites
 

@@ -1,13 +1,17 @@
 /**
  * fuku-guard: Chainlink CRE workflow that orchestrates an AI agent action through Fuku.
  *
- *   request  -> HTTP trigger receives { agentId, action, amountUsdc?, app? }
- *   verify   -> Fuku public API: who owns the agent, is the owner human, trust score, dry-run check
- *   execute  -> Fuku public API: evaluate the passport, execute or block, anchor the proof on Monad
- *   record   -> EVM read on Monad testnet: PermissionRegistry.stats + ReputationRegistry.getScore
+ *   request  -> HTTP trigger receives { agentId, action, amountUsdc?, app?, to?, asset?, requestId? }
+ *   verify   -> Fuku public API: what backs the agent, trust score, preview (dry run) of the action
+ *   execute  -> Fuku public API with an Idempotency-Key: evaluate, execute or block, anchor on Monad
+ *   record   -> EVM read on Monad testnet: PermissionRegistry.stats, ReputationRegistry.getScore and,
+ *               for an A-Token transfer, FukuSpendGuard.spentToday
  *
- * The workflow refuses to forward an action when the owner is not a verified human or the agent's
- * trust score is below `minTrustScore`, so a low-trust agent never reaches execution at all.
+ * The workflow is one more client of the public API: every Fuku rule (owner verification R11,
+ * Cleanverse R7-R9, limits R5, the on-chain guard R10) applies to it exactly as to any other caller,
+ * so going through CRE never loosens enforcement. On top of that it can refuse early: when the
+ * owner has no passkey verification or the trust score is below `minTrustScore`, the action never
+ * reaches execution. The Idempotency-Key makes a DON-level retry replay instead of executing twice.
  */
 import {
   EVMClient,
@@ -52,6 +56,8 @@ export const configSchema = z.object({
     chainSelectorName: z.string(),
     permissionRegistry: z.string(),
     reputationRegistry: z.string(),
+    /** FukuSpendGuard, for the spentToday read after an A-Token transfer. Empty string = skip. */
+    spendGuard: z.string(),
   }),
 });
 
@@ -67,6 +73,15 @@ export const actionRequestSchema = z.object({
   action: z.string().min(1),
   amountUsdc: z.number().nonnegative().optional(),
   app: z.string().optional(),
+  /** Recipient wallet for `transfer`. */
+  to: z.string().optional(),
+  /** A-Token symbol for `transfer` on an A-Token passport, e.g. "aUSDC". */
+  asset: z.string().optional(),
+  /**
+   * The caller's id for this request; it becomes the Fuku Idempotency-Key. Without it the key is
+   * derived from the payload, so identical payloads count as one request (a retry).
+   */
+  requestId: z.string().min(8).max(100).optional(),
 });
 
 export type ActionRequest = z.infer<typeof actionRequestSchema>;
@@ -87,11 +102,16 @@ export type Verification = {
 
 export type Execution = {
   decision: string;
+  status: string;
   ruleId: string;
   reason: string;
   proofHash: string;
   txHash: string;
   receiptMode: string;
+  receiptStatus: string;
+  transferTxHash: string;
+  ownerWallet: string;
+  replayed: boolean;
   scoreBefore: number;
   scoreAfter: number;
 };
@@ -101,6 +121,8 @@ export type OnChainRecord = {
   violationCount: string;
   score: string;
   scoreExists: boolean;
+  /** FukuSpendGuard.spentToday(agent, owner wallet) in base units, when read. */
+  guardSpentToday: string;
 };
 
 // --- Helpers --------------------------------------------------------------------------------
@@ -109,12 +131,17 @@ const b64 = (value: unknown) => Buffer.from(new TextEncoder().encode(JSON.string
 
 const agentKey = (agentId: string) => keccak256(stringToHex(agentId));
 
+/** Deterministic across DON nodes: the trigger's requestId, or a hash of the payload. */
+export const idempotencyKeyFor = (req: ActionRequest) =>
+  req.requestId ? `cre:${req.requestId}` : `cre:${keccak256(stringToHex(JSON.stringify([req.agentId, req.action, req.amountUsdc ?? null, req.app ?? null, req.to ?? null, req.asset ?? null])))}`;
+
 const permissionAbi = parseAbi([
   "function stats(bytes32 agentId) view returns (uint64 allowedCount, uint64 violationCount)",
 ]);
 const reputationAbi = parseAbi([
   "function getScore(bytes32 agentId) view returns (uint16 score, uint64 updatedAt, bool exists)",
 ]);
+const guardAbi = parseAbi(["function spentToday(bytes32 agentId, address wallet) view returns (uint256)"]);
 
 // --- Step 2: verify (node mode, uses the API key secret) --------------------------------------
 
@@ -147,6 +174,7 @@ export const verifyAgent = (nodeRuntime: NodeRuntime<Config>, req: ActionRequest
     passport: { active: boolean } | null;
     trust: { score: number; level: string };
   };
+  const preview = { action: req.action, amountUsdc: req.amountUsdc ?? null, app: req.app ?? null, to: req.to ?? null, asset: req.asset ?? null };
 
   // Dry run: nothing is recorded, so every node may call it.
   const checkResp = http
@@ -154,7 +182,7 @@ export const verifyAgent = (nodeRuntime: NodeRuntime<Config>, req: ActionRequest
       url: `${base}/api/v1/agents/${id}/check`,
       method: "POST",
       headers,
-      body: b64({ action: req.action, amountUsdc: req.amountUsdc ?? null, app: req.app ?? null }),
+      body: b64(preview),
     })
     .result();
   if (checkResp.statusCode !== 200) throw new Error(`Fuku checkPermission failed with status ${checkResp.statusCode}`);
@@ -184,37 +212,54 @@ export const executeAction = (nodeRuntime: NodeRuntime<Config>, req: ActionReque
     .sendRequest(nodeRuntime, {
       url: `${base}/api/v1/agents/${encodeURIComponent(req.agentId)}/execute`,
       method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        // Fuku replays the stored result for a repeated key, so a retried trigger never pays twice.
+        "idempotency-key": idempotencyKeyFor(req),
+      },
       body: b64({
         action: req.action,
         amountUsdc: req.amountUsdc ?? null,
         app: req.app ?? null,
+        to: req.to ?? null,
+        asset: req.asset ?? null,
+        // A label for the activity timeline; Fuku shows it as declared by the caller.
         params: { orchestrator: "chainlink-cre", workflow: "fuku-guard" },
       }),
-      // Executing is not idempotent: one node calls Fuku, the others reuse the cached response.
+      // One node calls Fuku, the others reuse the cached response; the idempotency key covers retries.
       cacheSettings: { store: true, maxAge: "120s" },
     })
     .result();
-  // Fuku answers 200 for ALLOWED and 403 for BLOCKED; both carry a full decision record.
-  if (resp.statusCode !== 200 && resp.statusCode !== 403) {
+  // 200 allowed, 202 broadcast but pending, 403 blocked; each carries a full decision record.
+  if (resp.statusCode !== 200 && resp.statusCode !== 202 && resp.statusCode !== 403) {
     throw new Error(`Fuku executeAction failed with status ${resp.statusCode}`);
   }
   const r = json(resp) as {
     decision: string;
+    status?: string;
     ruleId: string;
     reason: string;
     proofHash: string;
-    receipt: { txHash: string; mode: string };
+    receipt: { txHash: string | null; mode: string; status?: string };
+    transfer?: { txHash: string | null } | null;
+    compliance?: { evidence?: { owner?: { wallet?: string | null } } | null } | null;
+    replayed?: boolean;
     scoreBefore: number;
     scoreAfter: number;
   };
   return {
     decision: r.decision,
+    status: r.status ?? "",
     ruleId: r.ruleId,
     reason: r.reason,
     proofHash: r.proofHash,
-    txHash: r.receipt.txHash,
+    txHash: r.receipt.txHash ?? "",
     receiptMode: r.receipt.mode,
+    receiptStatus: r.receipt.status ?? "",
+    transferTxHash: r.transfer?.txHash ?? "",
+    ownerWallet: r.compliance?.evidence?.owner?.wallet ?? "",
+    replayed: Boolean(r.replayed),
     scoreBefore: r.scoreBefore,
     scoreAfter: r.scoreAfter,
   };
@@ -222,7 +267,7 @@ export const executeAction = (nodeRuntime: NodeRuntime<Config>, req: ActionReque
 
 // --- Step 4: record (EVM read on Monad through the DON) ---------------------------------------
 
-export const readOnChainRecord = (runtime: Runtime<Config>, agentId: string): OnChainRecord => {
+export const readOnChainRecord = (runtime: Runtime<Config>, agentId: string, ownerWallet = ""): OnChainRecord => {
   const network = getNetwork({ chainFamily: "evm", chainSelectorName: runtime.config.monad.chainSelectorName });
   if (!network) throw new Error(`Network not found: ${runtime.config.monad.chainSelectorName}`);
   const evm = new EVMClient(network.chainSelector.selector);
@@ -260,11 +305,28 @@ export const readOnChainRecord = (runtime: Runtime<Config>, agentId: string): On
     data: bytesToHex(scoreCall.data),
   });
 
+  let guardSpentToday = "";
+  const guard = runtime.config.monad.spendGuard;
+  if (guard && /^0x[0-9a-fA-F]{40}$/.test(ownerWallet)) {
+    const spentCall = evm
+      .callContract(runtime, {
+        call: encodeCallMsg({
+          from: zeroAddress,
+          to: guard as Address,
+          data: encodeFunctionData({ abi: guardAbi, functionName: "spentToday", args: [key, ownerWallet as Address] }),
+        }),
+        blockNumber: LATEST_BLOCK_NUMBER,
+      })
+      .result();
+    guardSpentToday = decodeFunctionResult({ abi: guardAbi, functionName: "spentToday", data: bytesToHex(spentCall.data) }).toString();
+  }
+
   return {
     allowedCount: allowedCount.toString(),
     violationCount: violationCount.toString(),
     score: score.toString(),
     scoreExists: exists,
+    guardSpentToday,
   };
 };
 
@@ -278,7 +340,9 @@ export const onAgentAction = (runtime: Runtime<Config>, payload: HTTPPayload): s
   const req = parsed.data;
   // Secrets are resolved at the DON level and handed to the node-mode steps.
   const apiKey = runtime.getSecret({ id: FUKU_API_KEY_SECRET }).result().value;
-  runtime.log(`[request] agent=${req.agentId} action=${req.action} amountUsdc=${req.amountUsdc ?? "-"} app=${req.app ?? "-"}`);
+  runtime.log(
+    `[request] agent=${req.agentId} action=${req.action} amountUsdc=${req.amountUsdc ?? "-"} app=${req.app ?? "-"} to=${req.to ?? "-"} asset=${req.asset ?? "-"}`,
+  );
 
   const verification = runtime
     .runInNodeMode(verifyAgent, consensusIdenticalAggregation<Verification>())(req, apiKey)
@@ -292,7 +356,7 @@ export const onAgentAction = (runtime: Runtime<Config>, payload: HTTPPayload): s
     !verification.found
       ? "agent not registered with Fuku"
       : runtime.config.requireHumanOwner && !verification.humanVerified
-        ? "owner is not a verified human"
+        ? "owner has not completed a passkey ceremony"
         : verification.trustScore < runtime.config.minTrustScore
           ? `trust score ${verification.trustScore} is below the minimum ${runtime.config.minTrustScore}`
           : null;
@@ -306,14 +370,15 @@ export const onAgentAction = (runtime: Runtime<Config>, payload: HTTPPayload): s
     .runInNodeMode(executeAction, consensusIdenticalAggregation<Execution>())(req, apiKey)
     .result();
   runtime.log(
-    `[execute] ${execution.decision} rule=${execution.ruleId} trust ${execution.scoreBefore}->${execution.scoreAfter} ` +
-      `receipt=${execution.receiptMode} tx=${execution.txHash}`,
+    `[execute] ${execution.decision} ${execution.status} rule=${execution.ruleId} trust ${execution.scoreBefore}->${execution.scoreAfter} ` +
+      `receipt=${execution.receiptMode}/${execution.receiptStatus} tx=${execution.txHash}${execution.transferTxHash ? ` transfer=${execution.transferTxHash}` : ""}${execution.replayed ? " (replayed)" : ""}`,
   );
 
-  const record = readOnChainRecord(runtime, req.agentId);
+  const record = readOnChainRecord(runtime, req.agentId, execution.ownerWallet);
   runtime.log(
     `[record] Monad PermissionRegistry.stats allowed=${record.allowedCount} violations=${record.violationCount}; ` +
-      `ReputationRegistry.getScore=${record.score} (exists=${record.scoreExists})`,
+      `ReputationRegistry.getScore=${record.score} (exists=${record.scoreExists})` +
+      (record.guardSpentToday ? `; FukuSpendGuard.spentToday=${record.guardSpentToday}` : ""),
   );
 
   return JSON.stringify({ workflow: "fuku-guard", request: req, stage: "record", outcome: execution.decision, verification, execution, record });

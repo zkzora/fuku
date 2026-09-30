@@ -2,7 +2,7 @@ import { describe, expect } from "bun:test";
 import { test } from "@chainlink/cre-sdk/test";
 import staging from "./config.staging.json";
 import production from "./config.production.json";
-import { actionRequestSchema, configSchema, initWorkflow, type Config } from "./main";
+import { actionRequestSchema, configSchema, idempotencyKeyFor, initWorkflow, type Config } from "./main";
 
 describe("config", () => {
   test("staging and production configs satisfy the schema", () => {
@@ -52,5 +52,26 @@ describe("initWorkflow", () => {
     const [h] = initWorkflow(staging as Config);
     const keys = (h.trigger.config as { authorizedKeys?: unknown[] }).authorizedKeys ?? [];
     expect(keys).toHaveLength(0);
+  });
+});
+
+describe("request payload (A-Token payments, idempotency)", () => {
+  test("accepts to, asset and a requestId", () => {
+    const r = actionRequestSchema.safeParse({
+      agentId: "fuku:agent:0xabc",
+      action: "transfer",
+      amountUsdc: 250,
+      to: "0x7ad75ad75a52e8d4ee5290294c498917386f40bb",
+      asset: "aUSDC",
+      requestId: "order-2026-0001",
+    });
+    expect(r.success).toBe(true);
+  });
+
+  test("derives the same Fuku Idempotency-Key on every node", () => {
+    const req = { agentId: "fuku:agent:0xabc", action: "transfer", amountUsdc: 250, to: "0x1", asset: "aUSDC" };
+    expect(idempotencyKeyFor(req)).toBe(idempotencyKeyFor({ ...req }));
+    expect(idempotencyKeyFor(req)).not.toBe(idempotencyKeyFor({ ...req, amountUsdc: 251 }));
+    expect(idempotencyKeyFor({ ...req, requestId: "order-2026-0001" })).toBe("cre:order-2026-0001");
   });
 });
