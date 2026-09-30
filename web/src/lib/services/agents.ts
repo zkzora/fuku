@@ -168,19 +168,18 @@ async function syncOnChain(tasks: { op: string; run: () => Promise<ChainReceipt 
 }
 
 /**
- * Kill switch: revoke the passport and pause the agent. The database changes first (fail safe:
- * Fuku stops evaluating the agent as allowed immediately), then the registries: PermissionRegistry
- * .revokePolicy and AgentRegistry.setStatus(Paused), so FukuSpendGuard rejects it on-chain too.
+ * Kill switch: revoke the passport (the agent is also paused in Fuku). The database changes first
+ * (fail safe: Fuku stops allowing the agent immediately), then PermissionRegistry.revokePolicy, so
+ * FukuSpendGuard rejects every outstanding attestation with PolicyNotActive. The on-chain agent
+ * status is left to the explicit pause / resume switch (AgentRegistry.setStatus), so the two
+ * switches stay distinguishable on-chain.
  */
 export async function revokeAgentPolicy(agentId: string) {
   await db.policy.updateMany({ where: { agentId }, data: { active: false } });
   await db.agent.update({ where: { id: agentId }, data: { status: "paused" } });
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
   const ref = toAgentRef(agent, agent.identity);
-  const chainSync = await syncOnChain([
-    { op: "revokePolicy", run: () => revokePolicyOnChain(ref) },
-    { op: "setStatus(paused)", run: () => setAgentStatusOnChain(ref, "paused") },
-  ]);
+  const chainSync = await syncOnChain([{ op: "revokePolicy", run: () => revokePolicyOnChain(ref) }]);
   return { score: await refreshScore(agentId), chainSync };
 }
 
