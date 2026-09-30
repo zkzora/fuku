@@ -113,6 +113,8 @@ export interface APassView {
     group: string | null;
     subGroup: string | null;
     expiresAt: number | null;
+    /** Computed when the view is built: expiresAt is set and in the past. */
+    expired: boolean;
   } | null;
   checkedAt: string | null;
 }
@@ -131,7 +133,16 @@ export async function storedAPass(wallet: string | null | undefined): Promise<AP
     ...base,
     found: row.found,
     pass: row.found
-      ? { cvRecordId: row.cvRecordId, status: row.status, tier: row.tier, subTier: row.subTier, group: row.group, subGroup: row.subGroup, expiresAt: row.expiresAt }
+      ? {
+          cvRecordId: row.cvRecordId,
+          status: row.status,
+          tier: row.tier,
+          subTier: row.subTier,
+          group: row.group,
+          subGroup: row.subGroup,
+          expiresAt: row.expiresAt,
+          expired: Boolean(row.expiresAt && row.expiresAt * 1000 <= Date.now()),
+        }
       : null,
     checkedAt: row.checkedAt.toISOString(),
   };

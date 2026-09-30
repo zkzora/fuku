@@ -1,14 +1,16 @@
 import { db } from "@/lib/db";
 import { json, withSession } from "@/lib/api";
 import { chainStatus } from "@/lib/chain";
+import { storedAPass } from "@/lib/services/cleanverse";
 
 export const GET = withSession(async (_req, identity) => {
-  const [passkeys, connectedApps, credentials, accessRequests, agentCount] = await Promise.all([
+  const [passkeys, connectedApps, credentials, accessRequests, agentCount, apass] = await Promise.all([
     db.passkey.findMany({ where: { identityId: identity.id }, orderBy: { createdAt: "asc" } }),
     db.connectedApp.findMany({ where: { identityId: identity.id }, orderBy: { connectedAt: "desc" } }),
     db.credential.findMany({ where: { identityId: identity.id } }),
     db.accessRequest.findMany({ where: { identityId: identity.id }, orderBy: { createdAt: "desc" } }),
     db.agent.count({ where: { identityId: identity.id } }),
+    storedAPass(identity.walletAddress),
   ]);
   return json({
     identity,
@@ -23,6 +25,8 @@ export const GET = withSession(async (_req, identity) => {
     })),
     connectedApps: connectedApps.map((a) => ({ ...a, scopes: JSON.parse(a.scopes) as string[] })),
     credentials,
+    // Last persisted A-Pass read for the owner wallet (no provider call on page load).
+    apass,
     accessRequests,
   });
 });

@@ -1,6 +1,8 @@
 import { aiProviderStatus } from "../engine/explain";
 import { chainMode } from "../chain";
 import { envioStatus, startBlock } from "./envio";
+import { DEFAULT_BASE_URL } from "../cleanverse/client";
+import { cleanverseRuntime, lastLiveCall } from "../services/cleanverse";
 
 /**
  * Sponsor integration registry. Each integration reports whether it is running live
@@ -13,8 +15,55 @@ export interface IntegrationStatus {
   category: "Identity" | "Wallet" | "Data" | "AI" | "Automation" | "Credentials" | "Settlement";
   role: string;
   envVars: string[];
-  mode: "live" | "simulated";
+  /** "configured": credentials set but no successful live call yet, so it is not called live. */
+  mode: "live" | "configured" | "simulated" | "off";
   detail: string;
+  /** Short status note shown next to the mode (e.g. "API invite pending"). */
+  badge?: string;
+  /** Provider endpoints the code calls. */
+  endpoints?: string[];
+}
+
+/** Cooperate API endpoints the Cleanverse client calls (see lib/cleanverse/provider.ts). */
+const CLEANVERSE_ENDPOINTS = ["query_apass", "verify_apass", "atoken/rules", "query_deposit_atoken_list", "download_travel_rule"];
+
+function cleanverseStatus(): IntegrationStatus {
+  const cv = cleanverseRuntime();
+  const health = lastLiveCall();
+  const base = {
+    key: "cleanverse",
+    name: "Cleanverse",
+    category: "Credentials" as const,
+    role: "A-Pass (CVI) and A-Token (CVA) checks before an agent moves value",
+    envVars: ["CLEANVERSE_API_ID", "CLEANVERSE_API_KEY", "CLEANVERSE_CHAIN", "CLEANVERSE_SIM_APASS", "CLEANVERSE_SIM_ATOKEN", "FUKU_SPEND_GUARD"],
+    endpoints: CLEANVERSE_ENDPOINTS,
+  };
+  if (cv.mode === "live") {
+    const url = process.env.CLEANVERSE_BASE_URL?.trim() || DEFAULT_BASE_URL;
+    return health?.ok
+      ? { ...base, mode: "live", detail: `Live against ${url} (chain "${cv.chain}"). Last call succeeded at ${health.at}.` }
+      : {
+          ...base,
+          mode: "configured",
+          detail: `Credentials are set for ${url}, but no live call has succeeded yet${health?.error ? ` (last error: ${health.error.slice(0, 140)})` : ""}. The card says live only after Cleanverse answers.`,
+        };
+  }
+  if (cv.mode === "simulated") {
+    return {
+      ...base,
+      mode: "simulated",
+      badge: "API invite pending",
+      detail:
+        cv.backend === "sim-chain"
+          ? `Cleanverse API access is invite-only, so transfers run against Fuku's simulator contracts (CleanverseAPassSim, CleanverseATokenSim aUSDC-SIM) with the same verify_apass codes. Nothing shown is issued by Cleanverse. The live client is wired to the endpoints below.`
+          : "Cleanverse API access is invite-only and the chain is mocked, so the simulator answers from fixtures in the local database (same codes as the simulator contracts). Nothing shown is issued by Cleanverse.",
+    };
+  }
+  return {
+    ...base,
+    mode: "off",
+    detail: "Cleanverse is off (CLEANVERSE_MODE=off, or a live chain without simulator addresses). Value actions on A-Token passports are blocked with R7 PROVIDER_OFF.",
+  };
 }
 
 export async function integrationStatus(): Promise<IntegrationStatus[]> {
@@ -126,17 +175,7 @@ export async function integrationStatus(): Promise<IntegrationStatus[]> {
         ? `Deployed workflow fuku-guard (${process.env.CRE_WORKFLOW_ID!.slice(0, 10)}…) orchestrates agent actions on the Chainlink DON: verify via the Fuku API, execute, then read the Monad registries.`
         : "Workflow cre/fuku-guard (HTTP trigger → verify via the Fuku API → execute → EVM read of the Monad registries) runs end to end with `cre workflow simulate`, the path Chainlink recommends for hackathons. Deploying to the DON requires a commercial agreement with Chainlink; CRE_WORKFLOW_ID would come from `cre workflow deploy` after that.",
     },
-    {
-      key: "cleanverse",
-      name: "Cleanverse",
-      category: "Credentials",
-      role: "Verified identity credentials",
-      envVars: ["CLEANVERSE_API_KEY"],
-      mode: has("CLEANVERSE_API_KEY") ? "live" : "simulated",
-      detail: has("CLEANVERSE_API_KEY")
-        ? "Credentials are issued and checked via Cleanverse."
-        : "A demo credential is attached to verified identities.",
-    },
+    cleanverseStatus(),
   ];
 }
 
