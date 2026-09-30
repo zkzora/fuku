@@ -162,7 +162,8 @@ export async function verifyScoreFromChain(agentId: string): Promise<ScoreVerifi
   if (ledger.securityEvents > 0) notes.push(`${ledger.securityEvents} security event(s) exist only in Fuku's ledger.`);
   if (ledger.successes > evidence.executions) notes.push(`${ledger.successes - evidence.executions} success(es) in the ledger have no GuardedTransferExecuted on-chain (recorded before anchoring, in mock mode, or seeded).`);
   if (ledger.violations > chainViolations) notes.push(`${ledger.violations - chainViolations} violation(s) in the ledger have no on-chain ActionDecision here (not anchored yet, an R10 reason, or seeded).`);
-  if (evidence.executions > ledger.successes) notes.push(`${evidence.executions - ledger.successes} transfer(s) executed on-chain that the ledger does not credit yet (run reconcile).`);
+  if (evidence.executions > ledger.successes) notes.push(`${evidence.executions - ledger.successes} transfer(s) executed on-chain that the ledger does not credit: not reconciled yet (run reconcile), or the ledger was reset.`);
+  if (chainViolations > ledger.violations) notes.push(`${chainViolations - ledger.violations} violation(s) anchored on-chain that the ledger does not hold: the ledger was reset or rows were removed.`);
   if (!anchored) notes.push("No score was anchored in ReputationRegistry for this agent yet.");
 
   return {
