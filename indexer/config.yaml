@@ -1,0 +1,33 @@
+# Envio HyperIndex configuration for Fuku Protocol on Monad testnet.
+# Addresses from contracts/deployments/monadTestnet.json (deployed 2026-09-24).
+# Run `npx envio dev` inside this folder (needs Docker) with ENVIO_API_TOKEN set for HyperSync.
+name: fuku-protocol
+description: Indexes Fuku identities, agents, permission decisions and reputation changes on Monad.
+networks:
+  - id: 10143 # Monad testnet
+    start_block: 65257400 # first Fuku registry block on Monad testnet
+    contracts:
+      - name: HumanIdentityRegistry
+        address: "0x9fe852bddcb71b765af9ca1b8390d9ccfe024a2b"
+        handler: src/EventHandlers.ts
+        events:
+          - event: IdentityRegistered(bytes32 indexed identityId, address indexed controller, bytes32 proofHash)
+          - event: HumanVerified(bytes32 indexed identityId, bool verified)
+      - name: AgentRegistry
+        address: "0x41a176a946ab83cd26cfad4f07e6afdf61475e29"
+        handler: src/EventHandlers.ts
+        events:
+          - event: AgentRegistered(bytes32 indexed agentId, bytes32 indexed ownerIdentityId, string name, bytes32 capabilitiesHash)
+          - event: AgentStatusChanged(bytes32 indexed agentId, uint8 status)
+      - name: PermissionRegistry
+        address: "0xfe5caf3a4521ead0c8dce0f851461cdc072746cc"
+        handler: src/EventHandlers.ts
+        events:
+          - event: PolicySet(bytes32 indexed agentId, bytes32 policyHash, uint32 version, string policyURI)
+          - event: PolicyRevoked(bytes32 indexed agentId)
+          - event: ActionDecision(bytes32 indexed agentId, bytes32 indexed actionHash, bool allowed, bytes32 proofHash, string ruleId, uint64 timestamp)
+      - name: ReputationRegistry
+        address: "0x33a216af5621adab5a10aef7f538db4ff3d4efad"
+        handler: src/EventHandlers.ts
+        events:
+          - event: ScoreUpdated(bytes32 indexed agentId, uint16 newScore, int16 delta, bytes32 reasonHash, string reason, uint64 timestamp)

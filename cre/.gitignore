@@ -1,0 +1,4 @@
+*.env
+.tunnel.log
+.cre_build_tmp.js
+*.wasm

@@ -1,0 +1,24 @@
+{
+  "name": "fuku-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fuku Protocol smart contracts for Monad: human identity, agent identity, permission passport and reputation registries",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "check:deployer": "node scripts/check-deployer.mjs",
+    "deploy:local": "hardhat run scripts/deploy.ts",
+    "deploy:monad": "hardhat run scripts/deploy.ts --network monadTestnet",
+    "wire:env": "node scripts/wire-env.mjs",
+    "export-abi": "node scripts/export-abi.mjs",
+    "clean": "hardhat clean"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "^5.0.7",
+    "@types/node": "^24.0.0",
+    "hardhat": "^3.17.0",
+    "typescript": "~5.8.0",
+    "viem": "^2.47.6"
+  }
+}

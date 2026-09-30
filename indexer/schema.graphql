@@ -1,0 +1,44 @@
+type Identity {
+  id: ID! # bytes32 identityId
+  controller: String!
+  proofHash: String!
+  humanVerified: Boolean!
+  registeredAt: BigInt!
+  agents: [Agent!]! @derivedFrom(field: "owner")
+}
+
+type Agent {
+  id: ID! # bytes32 agentId
+  owner: Identity!
+  name: String!
+  capabilitiesHash: String!
+  status: Int!
+  policyHash: String
+  policyVersion: Int
+  policyActive: Boolean!
+  allowedCount: Int!
+  violationCount: Int!
+  trustScore: Int
+  registeredAt: BigInt!
+  decisions: [Decision!]! @derivedFrom(field: "agent")
+  scoreChanges: [ScoreChange!]! @derivedFrom(field: "agent")
+}
+
+type Decision {
+  id: ID! # txHash-logIndex
+  agent: Agent!
+  actionHash: String!
+  allowed: Boolean!
+  proofHash: String!
+  ruleId: String!
+  timestamp: BigInt!
+}
+
+type ScoreChange {
+  id: ID!
+  agent: Agent!
+  newScore: Int!
+  delta: Int!
+  reason: String!
+  timestamp: BigInt!
+}

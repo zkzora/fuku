@@ -1,0 +1,23 @@
+{
+  "name": "@fuku/sdk",
+  "version": "0.1.0",
+  "description": "Fuku Protocol SDK: human-backed AI agent identity, permission passports and portable reputation on Monad.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  },
+  "license": "MIT"
+}

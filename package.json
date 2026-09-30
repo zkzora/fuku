@@ -1,0 +1,13 @@
+{
+  "name": "fuku-protocol",
+  "private": true,
+  "workspaces": [
+    "web",
+    "sdk"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w web",
+    "build": "npm run build -w web",
+    "test": "npm test --workspaces --if-present"
+  }
+}

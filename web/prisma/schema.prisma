@@ -1,0 +1,173 @@
+// Fuku Protocol data model.
+// Local dev uses SQLite. For Supabase/Postgres set provider = "postgresql" and DATABASE_URL.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Identity {
+  id            String   @id            // fuku:id:0x...
+  displayName   String
+  humanVerified Boolean  @default(false)
+  authMethod    String   @default("passkey") // passkey | wallet
+  walletAddress String?
+  dynamicUserId String?  @unique           // Dynamic user id (sub) for email / wallet sign-in
+  email         String?
+  network       String   @default("monad-testnet")
+  proofHash     String?                 // keccak256 ownership proof
+  proofTxHash   String?
+  proofBlock    Int?
+  createdAt     DateTime @default(now())
+
+  passkeys       Passkey[]
+  agents         Agent[]
+  connectedApps  ConnectedApp[]
+  memoryItems    MemoryItem[]
+  accessRequests AccessRequest[]
+  credentials    Credential[]
+  apiKeys        ApiKey[]
+  actions        AgentAction[]
+}
+
+model Passkey {
+  id         String   @id             // WebAuthn credential ID (base64url)
+  identityId String
+  publicKey  Bytes
+  counter    Int      @default(0)
+  deviceType String   @default("singleDevice")
+  backedUp   Boolean  @default(false)
+  transports String?                  // JSON array
+  label      String   @default("Passkey")
+  createdAt  DateTime @default(now())
+  identity   Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+model Challenge {
+  id         String   @id @default(cuid())
+  challenge  String
+  kind       String                    // register | authenticate
+  identityId String?
+  expiresAt  DateTime
+}
+
+model Agent {
+  id             String   @id            // fuku:agent:0x...
+  identityId     String
+  name           String
+  version        String   @default("1.0")
+  status         String   @default("active") // active | paused | registered
+  capabilities   String   @default("[]")     // JSON string[]
+  description    String?
+  trustScore     Int?
+  registeredTx   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  identity         Identity          @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  policy           Policy?
+  actions          AgentAction[]
+  reputationEvents ReputationEvent[]
+}
+
+model Policy {
+  id        String   @id @default(cuid())
+  agentId   String   @unique
+  allowed   String   @default("[]")   // JSON: [{ action, limitUsdcPerDay? }]
+  blocked   String   @default("[]")   // JSON: string[]
+  scopeApps String   @default("[]")   // JSON: string[]
+  version   Int      @default(1)
+  active    Boolean  @default(true)
+  txHash    String?
+  policyHash String?
+  updatedAt DateTime @updatedAt
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+}
+
+model AgentAction {
+  id          String   @id @default(cuid())
+  agentId     String
+  identityId  String
+  action      String
+  amountUsdc  Float?
+  app         String?
+  params      String?                   // JSON
+  decision    String                    // ALLOWED | BLOCKED
+  reason      String
+  ruleId      String?
+  proofHash   String
+  txHash      String?
+  trustDelta  Int      @default(0)
+  explanation String?
+  createdAt   DateTime @default(now())
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  identity    Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+model ReputationEvent {
+  id        String   @id @default(cuid())
+  agentId   String
+  kind      String                      // registration | human_verified | success | violation | security
+  delta     Int
+  note      String
+  createdAt DateTime @default(now())
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+}
+
+model MemoryItem {
+  id         String   @id @default(cuid())
+  identityId String
+  category   String                     // preferences | knowledge | workflow | rules
+  title      String
+  ciphertext String                     // base64 AES-GCM ciphertext (encrypted client-side)
+  iv         String                     // base64 IV
+  sizeBytes  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  identity   Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+model ConnectedApp {
+  id          String   @id @default(cuid())
+  identityId  String
+  name        String
+  scopes      String   @default("[]")   // JSON string[]
+  status      String   @default("active") // active | pending | revoked
+  connectedAt DateTime @default(now())
+  identity    Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+model AccessRequest {
+  id         String   @id @default(cuid())
+  identityId String
+  app        String
+  resource   String                     // vault category or "identity"
+  status     String   @default("pending") // pending | approved | denied
+  createdAt  DateTime @default(now())
+  identity   Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+model Credential {
+  id         String   @id @default(cuid())
+  identityId String
+  issuer     String
+  kind       String
+  status     String   @default("valid")
+  validUntil DateTime?
+  createdAt  DateTime @default(now())
+  identity   Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  identityId String
+  name       String
+  prefix     String
+  keyHash    String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  identity   Identity  @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}

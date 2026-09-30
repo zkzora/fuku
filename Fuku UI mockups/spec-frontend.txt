@@ -1,0 +1,35 @@
+
+Fuku Protocol - Frontend Full Specification
+Frontend Product SpecificationDesign Direction: Apple + RevolutPrimary Goal: Create a premium developer and user experience for an AI trust infrastructure protocol.
+1. Design Philosophy
+The interface should feel premium, simple, and trustworthy.Reference:- Apple product simplicity- Revolut fintech clarity- Modern AI interfacesThe interface should hide blockchain complexity and explain trust clearly.
+2. Website Structure
+Landing Page:HeroProblemSolutionProtocol ArchitectureFeaturesSponsor TechnologyDeveloper SectionDocumentation CTAWeb App:DashboardIdentityAgentsPermissionsReputationActivityMemory VaultDeveloper Console
+3. Landing Hero
+Headline:The Trust Layer for the AI EconomySubtitle:Give humans and AI agents portable identity, reputation, and permissions.Buttons:- Build with Fuku- Explore Protocol
+4. Visual Style
+Design principles:- Large whitespace- Smooth animations- Glass cards- Premium typography- Minimal interface- Strong hierarchyColors are intentionally flexible and should be decided during implementation.
+5. Main Dashboard
+Dashboard components:Identity Card:Human verification status.Agent Overview:Registered AI agents.Trust Score:Current reputation.Permission Status:Active policies.Recent Activity:Agent actions timeline.
+6. Identity Page
+Display:Fuku IdentityHuman VerifiedAuthentication MethodConnected ApplicationsOwnership Proof
+7. Agent Management Page
+Display:Agent NameAgent IDOwnerCapabilitiesTrust ScoreStatusActions:Register AgentView AgentManage Permissions
+8. Permission Manager
+Interface similar to security settings.Example:Trading AgentAllowed:Swap TokenLimit:5000/dayBlocked:Withdraw AssetsControls:ApproveRevokeEdit
+9. Reputation Dashboard
+Display trust analytics:Trust ScoreSecurity LevelSuccessful ActionsFailed ActionsPermission ViolationsAI Explanation:Why this score exists.
+10. Activity Timeline
+Timeline showing:Agent actionTimestampPermission resultTransaction proofTrust impact
+11. Memory Vault UI
+Display:Encrypted user context.Categories:PreferencesKnowledgeWorkflowRulesAccess:Approved AppsPermission Requests
+12. Developer Console
+For builders:API KeysSDK DocumentationAgent RegistrationTesting EnvironmentIntegration Status
+13. Frontend Architecture
+Recommended:Framework:Next.jsUI:React ComponentsStyling:Tailwind CSSAnimation:Framer MotionPages:/dashboardidentityagentspermissionsreputationmemorydevelopers
+14. Components
+Required components:IdentityCard.tsxAgentCard.tsxTrustScore.tsxPermissionCard.tsxActivityTimeline.tsxMemoryVault.tsxDeveloperPanel.tsxProtocolHero.tsx
+15. MVP Frontend Priority
+Day 1:Landing pageDashboardIdentity UIAgent registration UIDay 2:Permission interfaceReputation dashboardActivity timelineDay 3:Polish animationsSponsor integrationsDemo preparation
+16. Demo UX Flow
+User opens Fuku.Creates identity.Registers AI agent.Sets permissions.Runs agent action.Attempts unauthorized action.Fuku blocks and explains why.
