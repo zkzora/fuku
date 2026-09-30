@@ -1,8 +1,9 @@
 /**
  * Demo data: Ava Chen and her agents. Used by `npm run db:seed` and by the demo sign-in when
- * the demo identity is missing. Idempotent: wipes and recreates the demo identity.
+ * the demo identity is missing. Idempotent: wipes and recreates the demo identity, keeping what the
+ * testnet setup recorded about the seeded agents (see DemoAgentState and DecisionRecord.anchor*).
  */
-import type { PrismaClient } from "@prisma/client";
+import type { Agent, Policy, PrismaClient } from "@prisma/client";
 import { keccak256, stringToHex } from "viem";
 import { deriveVaultKey, encryptText, DEMO_VAULT_PASSPHRASE } from "./vault-crypto";
 import { hashApiKey } from "./services/identity";
@@ -14,23 +15,121 @@ import { signWalletBinding } from "./wallet-binding";
 import { cleanverseChain } from "./cleanverse/mode";
 import { DEMO_API_KEY, DEMO_IDENTITY_ID } from "./demo-mode";
 import { recordHash, recordJson } from "./records";
+import { chainConfig, chainMode, registryAddresses } from "./chain";
 
 export { DEMO_IDENTITY_ID };
 export { DEMO_API_KEY };
 
 /**
- * Seeded agent ids, v2. The v1 ids carry rehearsal decisions on Monad testnet whose records were lost
- * to demo resets, so no record could ever reveal them; the v2 agents start with a clean on-chain
- * history that `npm run reconcile -- --anchor-seeded` fills with exactly the seeded records.
+ * The seeded agents' ids and seeded action ids derive from a cohort label. The v1 ids carry rehearsal
+ * decisions on Monad testnet whose records were lost to demo resets, so no record could ever reveal
+ * them; "v2" is the first cohort whose on-chain history `npm run reconcile -- --anchor-seeded` fills
+ * with exactly the seeded records. A live action on a cohort's agents (the pitch's climax) stays on
+ * the chain after a reset, so `npm run demo:cohort` moves the demo to a fresh cohort instead.
  */
-const demoAgentId = (label: string) => `fuku:agent:${keccak256(stringToHex(`fuku:demo-agent:${label}:v2`)).slice(0, 42)}`;
-const TRADING = demoAgentId("trading");
-const RESEARCH = demoAgentId("research");
-const OPS = demoAgentId("ops");
-const REBALANCER = demoAgentId("rebalancer");
-/** Moves Cleanverse A-Tokens (aUSDC) under an A-Token passport. */
-export const PAYMENTS_AGENT_ID = demoAgentId("payments");
-export const TRADING_AGENT_ID = TRADING;
+export const DEFAULT_DEMO_COHORT = "v2";
+const COHORT_SETTING = "demo.cohort";
+export const DEMO_COHORT_PATTERN = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+export function demoAgentIds(cohort: string) {
+  const id = (label: string) => `fuku:agent:${keccak256(stringToHex(`fuku:demo-agent:${label}:${cohort}`)).slice(0, 42)}`;
+  return {
+    trading: id("trading"),
+    research: id("research"),
+    ops: id("ops"),
+    rebalancer: id("rebalancer"),
+    /** Moves Cleanverse A-Tokens (aUSDC) under an A-Token passport. */
+    payments: id("payments"),
+  };
+}
+
+/** The cohort the demo seeds now (DEFAULT_DEMO_COHORT until `npm run demo:cohort` moves it). */
+export async function demoCohort(db: PrismaClient): Promise<string> {
+  const row = await db.setting.findUnique({ where: { key: COHORT_SETTING } });
+  return row?.value ?? DEFAULT_DEMO_COHORT;
+}
+
+export async function setDemoCohort(db: PrismaClient, cohort: string): Promise<void> {
+  if (!DEMO_COHORT_PATTERN.test(cohort)) throw new Error(`cohort label ${JSON.stringify(cohort)} must match ${DEMO_COHORT_PATTERN}`);
+  await db.setting.upsert({ where: { key: COHORT_SETTING }, create: { key: COHORT_SETTING, value: cohort }, update: { value: cohort } });
+}
+
+/** The active cohort's agent ids. */
+export async function activeDemoAgentIds(db: PrismaClient) {
+  return demoAgentIds(await demoCohort(db));
+}
+
+/**
+ * Agent columns the testnet setup fills and a demo reset must keep: the agent key (sealed; losing it
+ * would orphan the ERC-8004 agentWallet) and the ERC-8004 registration (without it a second
+ * registration would mint a duplicate agent NFT).
+ */
+const CARRIED_AGENT_COLUMNS = [
+  "agentWallet",
+  "agentKey",
+  "erc8004Id",
+  "erc8004Registry",
+  "erc8004ChainId",
+  "erc8004Owner",
+  "erc8004Uri",
+  "erc8004Tx",
+  "erc8004WalletTx",
+] as const;
+type CarriedColumn = (typeof CARRIED_AGENT_COLUMNS)[number] | "registeredTx" | "registeredMode";
+interface DemoCarry {
+  agent: Partial<Record<CarriedColumn, string | number>>;
+  /** Where the seeded passport (this version and hash) was anchored. */
+  policy?: { version: number; policyHash: string; txHash: string; anchorMode: string };
+}
+
+function carryOf(agent: Agent & { policy: Policy | null }): DemoCarry {
+  const out: DemoCarry = { agent: {} };
+  for (const k of CARRIED_AGENT_COLUMNS) if (agent[k] !== null) out.agent[k] = agent[k];
+  // The seed writes placeholder hashes marked "mock"; only a real registration or anchor is carried.
+  if (agent.registeredTx && agent.registeredMode && agent.registeredMode !== "mock") {
+    out.agent.registeredTx = agent.registeredTx;
+    out.agent.registeredMode = agent.registeredMode;
+  }
+  const p = agent.policy;
+  if (p?.active && p.txHash && p.policyHash && p.anchorMode && p.anchorMode !== "mock") {
+    out.policy = { version: p.version, policyHash: p.policyHash, txHash: p.txHash, anchorMode: p.anchorMode };
+  }
+  return out;
+}
+
+/** Saved before the reset deletes the agents; merged, so a reset interrupted after the delete loses nothing. */
+async function saveDemoCarry(db: PrismaClient, agentIds: string[]) {
+  const agents = await db.agent.findMany({ where: { id: { in: agentIds } }, include: { policy: true } });
+  for (const agent of agents) {
+    const prev = await db.demoAgentState.findUnique({ where: { agentId: agent.id } });
+    const before: DemoCarry = prev ? JSON.parse(prev.state) : { agent: {} };
+    const now = carryOf(agent);
+    const merged: DemoCarry = { agent: { ...before.agent, ...now.agent }, policy: now.policy ?? before.policy };
+    if (Object.keys(merged.agent).length === 0 && !merged.policy) continue;
+    const state = JSON.stringify(merged);
+    await db.demoAgentState.upsert({ where: { agentId: agent.id }, create: { agentId: agent.id, state }, update: { state } });
+  }
+}
+
+async function restoreDemoCarry(db: PrismaClient, agentIds: string[]) {
+  const allowed = new Set<string>([...CARRIED_AGENT_COLUMNS, "registeredTx", "registeredMode"]);
+  for (const row of await db.demoAgentState.findMany({ where: { agentId: { in: agentIds } } })) {
+    const carry = JSON.parse(row.state) as DemoCarry;
+    const data = Object.fromEntries(Object.entries(carry.agent ?? {}).filter(([k]) => allowed.has(k)));
+    if (Object.keys(data).length) await db.agent.update({ where: { id: row.agentId }, data });
+    const p = carry.policy;
+    // Only onto the same passport: a seed whose passport changed is not the one that was anchored.
+    if (p) await db.policy.updateMany({ where: { agentId: row.agentId, version: p.version, policyHash: p.policyHash }, data: { txHash: p.txHash, anchorMode: p.anchorMode } });
+  }
+}
+
+/** Where the seeded record was anchored, when that was on the chain and registry this app uses now. */
+function currentAnchor(rec: { proofHash: string; anchorTx: string | null; anchorChainId: number | null; anchorRegistry: string | null; anchorBlock: number | null } | null, proofHash: string) {
+  if (!rec?.anchorTx || rec.proofHash.toLowerCase() !== proofHash.toLowerCase() || chainMode() !== "live") return null;
+  const registry = registryAddresses()?.permissions;
+  if (rec.anchorChainId !== chainConfig().id || !registry || rec.anchorRegistry?.toLowerCase() !== registry.toLowerCase()) return null;
+  return { txHash: rec.anchorTx, chainId: rec.anchorChainId, block: rec.anchorBlock };
+}
 
 const h = (s: string) => keccak256(stringToHex(s));
 const daysAgo = (d: number, hour = 10, minute = 0) => {
@@ -41,7 +140,13 @@ const daysAgo = (d: number, hour = 10, minute = 0) => {
 };
 const todayAt = (hour: number, minute: number) => daysAgo(0, hour, minute);
 
-export async function seedDemo(db: PrismaClient) {
+export async function seedDemo(db: PrismaClient, opts: { quiet?: boolean } = {}) {
+  const cohort = await demoCohort(db);
+  const ids = demoAgentIds(cohort);
+  const { trading: TRADING, research: RESEARCH, ops: OPS, rebalancer: REBALANCER, payments: PAYMENTS } = ids;
+  const cohortIds = Object.values(ids);
+  const log = opts.quiet ? () => undefined : (line: string) => console.log(line);
+  await saveDemoCarry(db, cohortIds);
   await db.identity.deleteMany({ where: { id: DEMO_IDENTITY_ID } });
   // Ava's wallet is the address of DEMO_OWNER_PRIVATE_KEY when set (the Cleanverse demo owner),
   // otherwise of a public demo key. Either way the seed proves control with a signed binding.
@@ -230,14 +335,14 @@ export async function seedDemo(db: PrismaClient) {
   };
   await db.agent.create({
     data: {
-      id: PAYMENTS_AGENT_ID,
+      id: PAYMENTS,
       identityId: identity.id,
       name: "Payments Agent",
       version: "1.0",
       status: "active",
       capabilities: JSON.stringify(["transfer", "read_balances"]),
       description: "Pays verified suppliers in Cleanverse aUSDC from Ava's A-Pass wallet, up to 1,000 a day.",
-      registeredTx: h("tx:register:" + PAYMENTS_AGENT_ID),
+      registeredTx: h("tx:register:" + PAYMENTS),
       registeredMode: "mock",
       createdAt: daysAgo(2),
       policy: {
@@ -248,7 +353,7 @@ export async function seedDemo(db: PrismaClient) {
           assets: JSON.stringify(paymentsPolicy.assets),
           version: 1,
           active: true,
-          txHash: h("tx:policy:" + PAYMENTS_AGENT_ID),
+          txHash: h("tx:policy:" + PAYMENTS),
           anchorMode: "mock",
           policyHash: policyAnchorHash(paymentsPolicy, 1),
         },
@@ -307,7 +412,7 @@ export async function seedDemo(db: PrismaClient) {
   };
   const acts: Act[] = [];
   const seq: Record<string, number> = {};
-  const seedId = (label: string) => `seed-v2-${label}-${String((seq[label] = (seq[label] ?? -1) + 1)).padStart(2, "0")}`;
+  const seedId = (label: string) => `seed-${cohort}-${label}-${String((seq[label] = (seq[label] ?? -1) + 1)).padStart(2, "0")}`;
   // Trading Assistant: 14 allowed swaps/reads over the week, one blocked withdraw this morning.
   for (let i = 0; i < 12; i++) {
     acts.push({
@@ -368,19 +473,25 @@ export async function seedDemo(db: PrismaClient) {
       outcome: a.decision === "ALLOWED" ? "legacy-success" : null,
     });
     const proofHash = recordHash(record);
+    const kept = await db.decisionRecord.findUnique({ where: { actionId: a.id } });
+    const anchor = currentAnchor(kept, proofHash);
+    const staleAnchor = kept && kept.proofHash.toLowerCase() !== proofHash.toLowerCase();
     await db.decisionRecord.upsert({
       where: { actionId: a.id },
       create: { actionId: a.id, agentId: a.agentId, proofHash, record },
-      update: { agentId: a.agentId, proofHash, record },
+      update: { agentId: a.agentId, proofHash, record, ...(staleAnchor ? { anchorChainId: null, anchorRegistry: null, anchorTx: null, anchorBlock: null } : {}) },
     });
     const row = await db.agentAction.create({
       data: {
         id: a.id,
         // Seeded history: none of these actions was executed by Fuku. Not on-chain until
-        // `npm run reconcile -- --anchor-seeded` anchors the records.
+        // `npm run reconcile -- --anchor-seeded` anchors the records; once it has, a reset rebuilds
+        // the row as anchored (the record keeps where).
         status: a.decision === "ALLOWED" ? "AUTHORIZED" : "DENIED",
-        receiptMode: "mock",
-        anchorStatus: "seeded",
+        receiptMode: anchor ? "live" : "mock",
+        anchorStatus: anchor ? "anchored" : "seeded",
+        chainId: anchor?.chainId ?? null,
+        blockNumber: anchor?.block ?? null,
         amountMicros: a.amountUsdc !== undefined ? BigInt(Math.round(a.amountUsdc * 1e6)) : null,
         policyVersion: 1,
         agentId: a.agentId,
@@ -392,7 +503,7 @@ export async function seedDemo(db: PrismaClient) {
         reason: a.reason,
         ruleId: a.ruleId,
         proofHash,
-        txHash: null,
+        txHash: anchor?.txHash ?? null,
         trustDelta: a.decision === "ALLOWED" ? 1 : -4,
         explanation:
           a.decision === "BLOCKED"
@@ -414,7 +525,7 @@ export async function seedDemo(db: PrismaClient) {
       },
     });
   }
-  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER, PAYMENTS_AGENT_ID]) {
+  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER, PAYMENTS]) {
     const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     await db.reputationEvent.createMany({
       data: [
@@ -425,7 +536,7 @@ export async function seedDemo(db: PrismaClient) {
   }
 
   // ---- Scores (same formula as src/lib/engine/reputation.ts) ----
-  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER, PAYMENTS_AGENT_ID]) {
+  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER, PAYMENTS]) {
     const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, reputationEvents: true } });
     const ev = agent.reputationEvents;
     const score = computeScore({
@@ -438,9 +549,11 @@ export async function seedDemo(db: PrismaClient) {
       securityEvents: 0,
     }).score;
     await db.agent.update({ where: { id: agentId }, data: { trustScore: score } });
-    console.log(`${agent.name}: trust score ${score}`);
+    log(`${agent.name}: trust score ${score}`);
   }
 
-  console.log(`Seeded demo identity ${identity.id} (${identity.displayName}). Demo API key: ${DEMO_API_KEY}`);
+  await restoreDemoCarry(db, cohortIds);
+  log(`Seeded demo identity ${identity.id} (${identity.displayName}), cohort ${cohort}. Demo API key: ${DEMO_API_KEY}`);
+  return { cohort, ids };
 }
 

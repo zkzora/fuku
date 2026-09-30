@@ -8,3 +8,4 @@ dist
 artifacts
 cache
 *.tsbuildinfo
+.env.bak*

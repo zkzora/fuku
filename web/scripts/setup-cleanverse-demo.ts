@@ -6,9 +6,9 @@
  *   1. issues simulator A-Passes to Ava (the demo owner), Nusantara Supplies and the frozen wallet;
  *   2. mints 10,000 aUSDC-SIM to Ava;
  *   3. tops up Ava's MON for gas from the deployer when it is low;
- *   4. has Ava approve FukuSpendGuard for 10,000 aUSDC-SIM, open a mandate for the Payments Agent
- *      (1,000 aUSDC-SIM per UTC day, 500 per transfer, 30 days, approved payees only) and approve
- *      Nusantara Supplies as the only payee.
+ *   4. has Ava approve FukuSpendGuard for 10,000 aUSDC-SIM, open a mandate for the Payments Agent of
+ *      the active demo cohort (1,000 aUSDC-SIM per UTC day, 500 per transfer, 30 days, approved payees
+ *      only) and approve Nusantara Supplies as the only payee.
  * Nothing here is issued by Cleanverse: these are Fuku's simulator contracts.
  *
  * Environment (read from web/.env, which `npm run wire:env` in contracts/ fills):
@@ -18,6 +18,7 @@
  *   MONAD_RPC_URL, FUKU_CHAIN_ID, FUKU_CHAIN_NAME   (default Monad testnet)
  *   SETUP_OWNER_MIN_MON      top up below this balance (default 0.05)
  *   SETUP_OWNER_TOPUP_MON    amount sent when topping up (default 0.1)
+ *   DATABASE_URL             the app's database (for the active demo cohort)
  *
  * Usage: npx tsx scripts/setup-cleanverse-demo.ts
  */
@@ -44,7 +45,6 @@ import { privateKeyToAccount } from "viem/accounts";
 import { CleanverseAPassSimAbi, CleanverseATokenSimAbi, FukuSpendGuardAbi } from "../src/lib/chain/abi";
 import { DEMO_RECIPIENTS } from "../src/lib/cleanverse/demo";
 import { idToBytes32 } from "../src/lib/ids";
-import { PAYMENTS_AGENT_ID } from "../src/lib/demo-seed";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const envFile = path.resolve(here, "..", ".env");
@@ -173,7 +173,14 @@ async function main() {
   } else {
     console.log(`  = allowance ${formatUnits(allowance, 6)} aUSDC-SIM`);
   }
-  const agentKey = idToBytes32(PAYMENTS_AGENT_ID);
+  // The active cohort's Payments Agent (imported here, after web/.env set DATABASE_URL).
+  const { db } = await import("../src/lib/db");
+  const { activeDemoAgentIds, demoCohort } = await import("../src/lib/demo-seed");
+  const cohort = await demoCohort(db);
+  const paymentsId = (await activeDemoAgentIds(db)).payments;
+  await db.$disconnect();
+  console.log(`  Payments Agent of demo cohort ${cohort}: ${paymentsId}`);
+  const agentKey = idToBytes32(paymentsId);
   const [token, cap, maxPerTx, validUntil, restrictPayees, version, active] = await pub.readContract({
     address: guardAddr,
     abi: FukuSpendGuardAbi,

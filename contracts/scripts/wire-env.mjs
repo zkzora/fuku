@@ -4,8 +4,9 @@
  *
  * Reads contracts/deployments/<network>.json (written by scripts/deploy.ts) plus
  * DEPLOYER_PRIVATE_KEY / MONAD_RPC_URL from contracts/.env or the environment, and upserts
- * these lines into web/.env, preserving every other line and backing the file up to
- * web/.env.bak first:
+ * these lines into web/.env, preserving every other line and first copying the file to a new
+ * timestamped backup (web/.env.bak-<UTC time>; earlier backups are never overwritten, and no
+ * backup is ever read back):
  *
  *   FUKU_CHAIN_MODE=live
  *   FUKU_CHAIN_ID=<chainId>
@@ -24,6 +25,14 @@
  *   node scripts/wire-env.mjs --network monadTestnet   # same
  *   node scripts/wire-env.mjs --dry-run                # print the result to stdout, write nothing
  *   node scripts/wire-env.mjs --env /path/to/.env      # target another env file
+ *   node scripts/wire-env.mjs --replace-keys           # allow replacing a different key (see below)
+ *
+ * Keys already in the target are protected: when it holds a DEPLOYER_PRIVATE_KEY or
+ * FUKU_COMPLIANCE_SIGNER_KEY that differs from the one this run would write (a stale contracts/.env,
+ * say), nothing is written unless --replace-keys is given; both addresses are printed so the right
+ * one can be chosen. Every other line (DEMO_OWNER_PRIVATE_KEY, SMOKE_OWNER_PRIVATE_KEY,
+ * FUKU_AGENT_KEY_SECRET, FUKU_SESSION_SECRET, ...) is left exactly as it is, and the run checks that
+ * before writing.
  *
  * Private key values are masked in --dry-run output and never logged.
  */
@@ -50,6 +59,8 @@ const OPTIONAL_CONTRACT_KEYS = {
   CleanverseATokenSim: "CLEANVERSE_SIM_ATOKEN",
 };
 const SECRET_KEYS = new Set(["DEPLOYER_PRIVATE_KEY", "FUKU_COMPLIANCE_SIGNER_KEY"]);
+/** Secrets this script never writes; listed in the report so their preservation is visible. */
+const PRESERVED_SECRETS = ["DEMO_OWNER_PRIVATE_KEY", "SMOKE_OWNER_PRIVATE_KEY", "FUKU_AGENT_KEY_SECRET", "FUKU_SESSION_SECRET"];
 
 /** A problem the user can fix; reported without a stack trace. */
 class UserError extends Error {}
@@ -59,7 +70,7 @@ function fail(lines) {
 
 // --- args ---------------------------------------------------------------------
 function parseArgs(argv) {
-  const opts = { network: "monadTestnet", env: path.join(root, "..", "web", ".env"), dryRun: false, help: false };
+  const opts = { network: "monadTestnet", env: path.join(root, "..", "web", ".env"), dryRun: false, replaceKeys: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const eq = a.startsWith("--") ? a.indexOf("=") : -1;
@@ -69,6 +80,7 @@ function parseArgs(argv) {
     if (name === "--network") opts.network = next();
     else if (name === "--env") opts.env = next();
     else if (name === "--dry-run") opts.dryRun = true;
+    else if (name === "--replace-keys") opts.replaceKeys = true;
     else if (name === "--help" || name === "-h") opts.help = true;
     else if (!a.startsWith("-")) opts.network = a;
     else fail([`Unknown option ${a}. Try --help.`]);
@@ -133,7 +145,29 @@ function upsert(content, values) {
   return { content: out.join(eol) + eol, changes };
 }
 
-const mask = (k, v) => (SECRET_KEYS.has(k) ? `${v.slice(0, 6)}...${v.slice(-4)} (masked)` : v);
+/** KEY=value pairs of an env file (first occurrence wins, as in upsert). */
+function envValues(content) {
+  const values = new Map();
+  for (const line of content.split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
+    if (m && !values.has(m[1])) values.set(m[1], m[2].trim().replace(/^(['"])(.*)\1$/, "$2"));
+  }
+  return values;
+}
+
+const addressOf = (k) => {
+  try {
+    return privateKeyToAccount(k.startsWith("0x") ? k : `0x${k}`).address;
+  } catch {
+    return "an unparsable key";
+  }
+};
+
+/** UTC timestamp for backup names: 20260930-161500. */
+const stamp = () => new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+
+// No fragment of a key is ever printed; its address identifies it.
+const mask = (k, v) => (SECRET_KEYS.has(k) ? `<key of ${addressOf(v)}>` : v);
 const pad = (s, n) => s + " ".repeat(Math.max(1, n - s.length));
 
 function main() {
@@ -231,7 +265,25 @@ function main() {
 
   const envExists = existsSync(opts.env);
   const before = envExists ? readFileSync(opts.env, "utf8") : "";
+  const existing = envValues(before);
+
+  // A key already in the target is never replaced silently (a stale contracts/.env must not win).
+  const conflicts = [...SECRET_KEYS].filter((k) => updates[k] && existing.get(k) && existing.get(k).toLowerCase() !== updates[k].toLowerCase());
+  if (conflicts.length && !opts.replaceKeys) {
+    fail([
+      `${opts.env} already holds a different key; nothing was written:`,
+      ...conflicts.map((k) => `  ${k}: the file has ${addressOf(existing.get(k))}, this run would write ${addressOf(updates[k])}`),
+      "  Keep the file's key: fix contracts/.env (or the exported variable) to match it, then re-run.",
+      "  Replace it on purpose: re-run with --replace-keys (a timestamped backup is written first).",
+    ]);
+  }
+
   const { content: after, changes } = upsert(before, updates);
+
+  // Every line this script does not own must come out unchanged.
+  const result = envValues(after);
+  const touched = [...existing.keys()].filter((k) => !(k in updates) && result.get(k) !== existing.get(k));
+  if (touched.length) fail([`Refusing to write: ${touched.join(", ")} would change, and this script does not own them.`]);
 
   // --- report / write ----------------------------------------------------------------
   const log = opts.dryRun ? console.error : console.log; // keep stdout clean for the dry-run body
@@ -242,16 +294,21 @@ function main() {
   if (!key) log("Note:       DEPLOYER_PRIVATE_KEY not set; line omitted. Live mode needs it (see contracts/.env.example).");
   for (const line of notes) log(line);
   log("");
-  for (const [k, v] of Object.entries(updates)) log(`  ${pad(`${k}=${mask(k, v)}`, 78)} ${changes.get(k) ?? "unchanged"}`);
+  for (const [k, v] of Object.entries(updates)) {
+    const same = existing.get(k) !== undefined && existing.get(k).toLowerCase() === v.toLowerCase();
+    log(`  ${pad(`${k}=${mask(k, v)}`, 78)} ${same ? "unchanged" : changes.get(k) ?? "unchanged"}`);
+  }
+  const preserved = PRESERVED_SECRETS.filter((k) => existing.has(k));
+  if (preserved.length) log(`  Not touched: ${preserved.join(", ")}`);
   log("");
 
   if (opts.dryRun) {
     log(`--- dry run: resulting ${path.basename(opts.env)} (nothing written, secrets masked) ---`);
-    let shown = after;
-    for (const k of SECRET_KEYS) {
-      // no `$` anchor: with CRLF line endings the \r would sit between the value and `$`
-      shown = shown.replace(new RegExp(`^(${k}=)(\\S+)`, "gm"), (_, prefix, v) => `${prefix}${mask(k, v)}`);
-    }
+    // Every value whose name suggests a secret is masked, not only the keys this script writes.
+    // No `$` anchor: with CRLF line endings the \r would sit between the value and `$`.
+    const shown = after.replace(/^(\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=)([^\r\n]+)/gm, (line, prefix, k, v) =>
+      SECRET_KEYS.has(k) ? `${prefix}${mask(k, v.trim())}` : /KEY|SECRET|TOKEN|PASSWORD|PRIVATE/i.test(k) ? `${prefix}<set, masked>` : line,
+    );
     process.stdout.write(shown);
     log("--- end dry run ---");
     return;
@@ -260,8 +317,12 @@ function main() {
   if (!envExists) {
     log("Warning: creating a fresh .env with only the Monad settings. Copy the other values");
     log("         (DATABASE_URL, FUKU_SESSION_SECRET, ...) from web/.env.example as well.");
+  } else if (after === before) {
+    log("Nothing changed; no backup written.");
+    return;
   } else {
-    const backup = `${opts.env}.bak`;
+    let backup = `${opts.env}.bak-${stamp()}`;
+    for (let n = 1; existsSync(backup); n++) backup = `${opts.env}.bak-${stamp()}-${n}`;
     copyFileSync(opts.env, backup);
     log(`Backup:     ${backup}`);
   }

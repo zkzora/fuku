@@ -196,10 +196,33 @@ model DecisionRecord {
   agentId   String
   proofHash String
   record    String
+  // Where this proof was anchored, when `reconcile --anchor-seeded` anchored it: a demo reset then
+  // rebuilds the seeded row as anchored on the same chain and PermissionRegistry.
+  anchorChainId  Int?
+  anchorRegistry String?
+  anchorTx       String?
+  anchorBlock    Int?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([agentId])
+}
+
+/// Settings that survive demo resets. "demo.cohort": the label the seeded demo agents' ids and seeded
+/// action ids derive from (lib/demo-seed.ts); `npm run demo:cohort` moves the demo to a fresh cohort.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/// What a demo reset must not lose about a seeded demo agent (JSON): its ERC-8004 registration, its
+/// sealed agent key, and the transactions that registered it and anchored its passport. No relation on
+/// purpose, like DecisionRecord: seedDemo saves it before deleting the demo identity and restores it.
+model DemoAgentState {
+  agentId   String   @id
+  state     String
+  updatedAt DateTime @updatedAt
 }
 
 /// Authoritative off-chain spend per agent, action and UTC day, reserved atomically before an

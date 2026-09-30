@@ -10,7 +10,8 @@
  * Environment: web/.env (exported variables take precedence): FUKU_CHAIN_MODE=live, the registry
  * addresses, DATABASE_URL, optionally FUKU_SPEND_GUARD, CLEANVERSE_SIM_APASS, ENVIO_API_TOKEN.
  *
- * Usage: npx tsx scripts/verify-score.ts [--agent <fuku agent id>]   (default: every agent)
+ * Usage: npx tsx scripts/verify-score.ts [--agent <fuku agent id> | --demo]   (default: every agent;
+ *        --demo: the seeded agents of the active demo cohort)
  * Exit code 0 when every agent checked verifies.
  */
 import { existsSync } from "node:fs";
@@ -24,9 +25,10 @@ if (existsSync(envFile)) process.loadEnvFile(envFile);
 async function main() {
   const { db } = await import("../src/lib/db");
   const { verifyScoreFromChain } = await import("../src/lib/services/verify-score");
+  const { activeDemoAgentIds } = await import("../src/lib/demo-seed");
   const i = process.argv.indexOf("--agent");
-  const only = i >= 0 ? process.argv[i + 1] : null;
-  const agents = await db.agent.findMany({ where: only ? { id: only } : {}, orderBy: { createdAt: "asc" }, select: { id: true, name: true } });
+  const only = i >= 0 ? [process.argv[i + 1]] : process.argv.includes("--demo") ? Object.values(await activeDemoAgentIds(db)) : null;
+  const agents = await db.agent.findMany({ where: only ? { id: { in: only } } : {}, orderBy: { createdAt: "asc" }, select: { id: true, name: true } });
   let failures = 0;
   for (const a of agents) {
     try {

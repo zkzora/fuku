@@ -1,7 +1,20 @@
 import type { Hex } from "viem";
 import { db } from "../db";
 import { DEMO_IDENTITY_ID } from "../demo-mode";
-import { anchorStateOf, chainConfig, chainMode, chainReader, recordDecisionOnChain, registryAddresses, syncAgentOnChain, toAgentRef, updateScoreOnChain } from "../chain";
+import { activeDemoAgentIds } from "../demo-seed";
+import {
+  anchorStateOf,
+  chainConfig,
+  chainMode,
+  chainReader,
+  onChainWrite,
+  recordDecisionOnChain,
+  registryAddresses,
+  syncAgentOnChain,
+  toAgentRef,
+  updateScoreOnChain,
+  type ChainWrite,
+} from "../chain";
 import { ReputationRegistryAbi } from "../chain/abi";
 import { hashString, idToBytes32 } from "../ids";
 import { scoreAgent } from "./agents";
@@ -9,10 +22,11 @@ import { agentChainEvidence } from "./verify-score";
 
 /**
  * Anchor the demo's seeded history (part of the testnet setup, `npm run reconcile -- --anchor-seeded`):
- * register each demo agent and its passport, record each seeded decision on-chain with the proofHash of
- * its record unless that exact proof is already there, and write each agent's ledger score to
- * ReputationRegistry. Idempotent: a demo reset rebuilds the same records under the same ids, so a
- * later run only marks them anchored.
+ * register each seeded agent of the active demo cohort and its passport, record each seeded decision
+ * on-chain with the proofHash of its record unless that exact proof is already there, and write each
+ * agent's ledger score to ReputationRegistry. Where each proof, registration and passport landed is
+ * kept (DecisionRecord.anchor*, and the agent and passport rows, which a demo reset carries over), so
+ * a reset rebuilds the seeded rows as anchored. Idempotent.
  */
 export interface SeedAnchorReport {
   agentId: string;
@@ -24,23 +38,53 @@ export interface SeedAnchorReport {
   failed: number;
   score: number;
   scoreAnchored: boolean;
+  /** Sent by this run: the agent's registration and its passport anchor. */
+  registeredTx: string | null;
+  passportTx: string | null;
 }
 
 export async function anchorSeededHistory(): Promise<SeedAnchorReport[]> {
   if (chainMode() !== "live") throw new Error("The chain is mocked: nothing to anchor.");
   const client = chainReader()!;
   const registries = registryAddresses()!;
+  const chainId = chainConfig().id;
+  const cohortIds = Object.values(await activeDemoAgentIds(db));
   const agents = await db.agent.findMany({
-    where: { identityId: DEMO_IDENTITY_ID },
+    where: { identityId: DEMO_IDENTITY_ID, id: { in: cohortIds } },
     include: { policy: true, identity: true, actions: { where: { anchorStatus: "seeded" }, orderBy: { createdAt: "asc" } } },
     orderBy: { createdAt: "asc" },
   });
   const reports: SeedAnchorReport[] = [];
   for (const agent of agents) {
     const ref = toAgentRef(agent, agent.identity);
-    await syncAgentOnChain(ref);
+    const writes: ChainWrite[] = [];
+    const stop = onChainWrite((w) => writes.push(w));
+    try {
+      await syncAgentOnChain(ref);
+    } finally {
+      stop();
+    }
+    const registered = writes.find((w) => w.label === "registerAgent");
+    const passport = writes.find((w) => w.label === "setPolicy");
+    if (registered) await db.agent.update({ where: { id: agent.id }, data: { registeredTx: registered.hash, registeredMode: "anchored" } });
+    if (passport) await db.policy.update({ where: { agentId: agent.id }, data: { txHash: passport.hash, anchorMode: "anchored" } });
+    const keepAnchor = (actionId: string, proofHash: string, txHash: string | null, block: number | null) =>
+      txHash
+        ? db.decisionRecord.updateMany({ where: { actionId, proofHash }, data: { anchorChainId: chainId, anchorRegistry: registries.permissions, anchorTx: txHash, anchorBlock: block } })
+        : null;
     const onChain = new Map((await agentChainEvidence(agent.id)).decisions.map((d) => [d.actionHash, d]));
-    const report: SeedAnchorReport = { agentId: agent.id, name: agent.name, anchored: 0, alreadyOnChain: 0, conflicts: [], failed: 0, score: 0, scoreAnchored: false };
+    const report: SeedAnchorReport = {
+      agentId: agent.id,
+      name: agent.name,
+      anchored: 0,
+      alreadyOnChain: 0,
+      conflicts: [],
+      failed: 0,
+      score: 0,
+      scoreAnchored: false,
+      registeredTx: registered?.hash ?? null,
+      passportTx: passport?.hash ?? null,
+    };
     for (const row of agent.actions) {
       const hit = onChain.get(hashString(row.id).toLowerCase() as Hex);
       if (hit) {
@@ -48,7 +92,8 @@ export async function anchorSeededHistory(): Promise<SeedAnchorReport[]> {
           report.conflicts.push(row.id);
           continue;
         }
-        await db.agentAction.update({ where: { id: row.id }, data: { anchorStatus: "anchored", receiptMode: "live", txHash: hit.txHash, chainId: chainConfig().id } });
+        await db.agentAction.update({ where: { id: row.id }, data: { anchorStatus: "anchored", receiptMode: "live", txHash: hit.txHash, chainId } });
+        await keepAnchor(row.id, row.proofHash, hit.txHash, null);
         report.alreadyOnChain++;
         continue;
       }
@@ -63,8 +108,10 @@ export async function anchorSeededHistory(): Promise<SeedAnchorReport[]> {
         where: { id: row.id },
         data: { anchorStatus: anchorStateOf(receipt), receiptMode: receipt.mode, txHash: receipt.txHash, chainId: receipt.chainId, blockNumber: receipt.block },
       });
-      if (receipt.status === "confirmed") report.anchored++;
-      else report.failed++;
+      if (receipt.status === "confirmed") {
+        await keepAnchor(row.id, row.proofHash, receipt.txHash, receipt.block);
+        report.anchored++;
+      } else report.failed++;
     }
     const ledger = await scoreAgent(agent.id);
     const [onChainScore, , exists] = await client.readContract({ address: registries.reputation, abi: ReputationRegistryAbi, functionName: "getScore", args: [idToBytes32(agent.id)] });

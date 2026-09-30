@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { json, withErrors } from "@/lib/api";
 import { createSession } from "@/lib/session";
-import { DEMO_IDENTITY_ID, PAYMENTS_AGENT_ID, seedDemo } from "@/lib/demo-seed";
+import { DEMO_IDENTITY_ID, activeDemoAgentIds, seedDemo } from "@/lib/demo-seed";
 import { setAgentStatusOnChain, toAgentRef } from "@/lib/chain";
 import { demoEnabled, safeNextPath } from "@/lib/demo-mode";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
@@ -13,12 +13,13 @@ import { clientIp, rateLimit } from "@/lib/rate-limit";
  * Bring the registry back in line with the fresh seed; a failure only means the drift remains.
  */
 async function resyncPaymentsAgent() {
-  const agent = await db.agent.findUnique({ where: { id: PAYMENTS_AGENT_ID }, include: { policy: true, identity: true } });
+  const { payments } = await activeDemoAgentIds(db);
+  const agent = await db.agent.findUnique({ where: { id: payments }, include: { policy: true, identity: true } });
   if (!agent || agent.status !== "active") return;
   try {
     await setAgentStatusOnChain(toAgentRef(agent, agent.identity), "active");
   } catch (err) {
-    console.warn(`[fuku-demo] could not resume ${PAYMENTS_AGENT_ID} on-chain after reset: ${(err as Error).message}`);
+    console.warn(`[fuku-demo] could not resume ${payments} on-chain after reset: ${(err as Error).message}`);
   }
 }
 

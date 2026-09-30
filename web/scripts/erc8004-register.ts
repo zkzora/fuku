@@ -1,8 +1,9 @@
 #!/usr/bin/env tsx
 /**
- * Register the seeded demo agents on the canonical ERC-8004 Identity Registry from Ava's custodial
- * demo wallet (DEMO_OWNER_PRIVATE_KEY): register(agentURI) mints each agent NFT to her wallet, then
- * setAgentWallet binds the agent's own key (sealed under FUKU_AGENT_KEY_SECRET). Each step is
+ * Register the seeded demo agents (the active demo cohort's five) on the canonical ERC-8004 Identity
+ * Registry from Ava's custodial demo wallet (DEMO_OWNER_PRIVATE_KEY): register(agentURI) mints each
+ * agent NFT to her wallet, then setAgentWallet binds the agent's own key (sealed under
+ * FUKU_AGENT_KEY_SECRET). Each step is
  * confirmed from its receipt and decoded event, then re-read independently.
  *
  * Environment: web/.env, where exported variables take precedence. Needs FUKU_CHAIN_MODE=live on
@@ -26,6 +27,7 @@ async function main() {
   const { chainConfig, chainMode, chainReader } = await import("../src/lib/chain");
   const { db } = await import("../src/lib/db");
   const { DEMO_IDENTITY_ID } = await import("../src/lib/demo-mode");
+  const { activeDemoAgentIds } = await import("../src/lib/demo-seed");
   const { ERC8004_SOURCE, Erc8004IdentityRegistryAbi, erc8004IdentityRegistry } = await import("../src/lib/erc8004");
   const { registerFromDemoWallet } = await import("../src/lib/services/erc8004");
 
@@ -43,7 +45,9 @@ async function main() {
 
   const i = process.argv.indexOf("--agent");
   const only = i >= 0 ? process.argv[i + 1] : null;
-  const agents = await db.agent.findMany({ where: { identityId: DEMO_IDENTITY_ID, ...(only ? { id: only } : {}) }, orderBy: { createdAt: "asc" } });
+  // Only the seeded agents: an agent someone registered in the demo account is not Fuku's to publish.
+  const ids = only ? [only] : Object.values(await activeDemoAgentIds(db));
+  const agents = await db.agent.findMany({ where: { identityId: DEMO_IDENTITY_ID, id: { in: ids } }, orderBy: { createdAt: "asc" } });
   if (agents.length === 0) throw new Error("no demo agents found: reset the demo first");
 
   let failures = 0;

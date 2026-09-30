@@ -229,7 +229,7 @@ describe("execution: idempotency, lifecycle and reputation", () => {
     const owner = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
     const r = await m.actions.executeAction({
       callerId: owner.id,
-      agentId: m.seed.PAYMENTS_AGENT_ID,
+      agentId: m.seed.demoAgentIds("v2").payments,
       action: "transfer",
       amountUsdc: 25,
       to: "0x7ad75ad75a52e8d4ee5290294c498917386f40bb",
@@ -451,26 +451,65 @@ describe("commit-reveal decision records", () => {
   it("a live decision keeps the exact record whose hash is its proof", async () => {
     const { recordHash, parseRecord } = await import("../records");
     const owner = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
-    const r = await m.actions.executeAction({ callerId: owner.id, agentId: m.seed.TRADING_AGENT_ID, action: "withdraw", amountUsdc: 4800, app: "Monad DEX" });
+    const r = await m.actions.executeAction({ callerId: owner.id, agentId: m.seed.demoAgentIds("v2").trading, action: "withdraw", amountUsdc: 4800, app: "Monad DEX" });
     const row = await m.db.agentAction.findUniqueOrThrow({ where: { id: r.id } });
     const kept = await m.db.decisionRecord.findUniqueOrThrow({ where: { actionId: r.id } });
     assert.equal(kept.proofHash, row.proofHash);
     assert.equal(recordHash(kept.record), row.proofHash);
     const record = parseRecord(kept.record)!;
-    assert.deepEqual([record.actionId, record.agentId, record.decision, record.ruleId, record.at !== null], [r.id, m.seed.TRADING_AGENT_ID, "BLOCKED", "R2", true]);
+    assert.deepEqual([record.actionId, record.agentId, record.decision, record.ruleId, record.at !== null], [r.id, m.seed.demoAgentIds("v2").trading, "BLOCKED", "R2", true]);
   });
 
   it("the seeded history is deterministic: a reset rebuilds the same records under the same ids, and kept records survive it", async () => {
     const before = await m.db.decisionRecord.findMany({ where: { actionId: { startsWith: "seed-v2-" } }, orderBy: { actionId: "asc" } });
-    const live = await m.db.decisionRecord.count({ where: { agentId: m.seed.TRADING_AGENT_ID, NOT: { actionId: { startsWith: "seed-v2-" } } } });
+    const live = await m.db.decisionRecord.count({ where: { agentId: m.seed.demoAgentIds("v2").trading, NOT: { actionId: { startsWith: "seed-v2-" } } } });
     await m.seed.seedDemo(m.db);
     const after = await m.db.decisionRecord.findMany({ where: { actionId: { startsWith: "seed-v2-" } }, orderBy: { actionId: "asc" } });
     assert.equal(before.length, 25);
     assert.deepEqual(after.map((r) => [r.actionId, r.proofHash]), before.map((r) => [r.actionId, r.proofHash]));
     assert.ok(live >= 1, "a live record from before the reset");
-    assert.equal(await m.db.decisionRecord.count({ where: { agentId: m.seed.TRADING_AGENT_ID, NOT: { actionId: { startsWith: "seed-v2-" } } } }), live, "kept across the reset");
-    const rows = await m.db.agentAction.findMany({ where: { agentId: m.seed.TRADING_AGENT_ID } });
+    assert.equal(await m.db.decisionRecord.count({ where: { agentId: m.seed.demoAgentIds("v2").trading, NOT: { actionId: { startsWith: "seed-v2-" } } } }), live, "kept across the reset");
+    const rows = await m.db.agentAction.findMany({ where: { agentId: m.seed.demoAgentIds("v2").trading } });
     assert.ok(rows.every((row) => row.anchorStatus === "seeded" && row.txHash === null));
+  });
+
+  it("a reset rebuilds a seeded row as anchored only where its record was anchored on this chain and registry", async () => {
+    const trading = m.seed.demoAgentIds("v2").trading;
+    const [first, second] = await m.db.decisionRecord.findMany({ where: { actionId: { startsWith: "seed-v2-trading-" } }, orderBy: { actionId: "asc" }, take: 2 });
+    const permissions = "0x00000000000000000000000000000000000000f1";
+    await m.db.decisionRecord.update({ where: { actionId: first.actionId }, data: { anchorChainId: 10143, anchorRegistry: permissions, anchorTx: hex("b1"), anchorBlock: 7 } });
+    // anchored on another PermissionRegistry (a fork's own stack, say): not this chain's anchor
+    await m.db.decisionRecord.update({ where: { actionId: second.actionId }, data: { anchorChainId: 10143, anchorRegistry: "0x00000000000000000000000000000000000000f2", anchorTx: hex("b2"), anchorBlock: 8 } });
+    const live: Record<string, string> = {
+      FUKU_CHAIN_MODE: "live",
+      FUKU_CHAIN_ID: "10143",
+      MONAD_RPC_URL: "http://127.0.0.1:9", // unreachable: a reset sends nothing
+      DEPLOYER_PRIVATE_KEY: generatePrivateKey(),
+      FUKU_IDENTITY_REGISTRY: "0x00000000000000000000000000000000000000e1",
+      FUKU_AGENT_REGISTRY: "0x00000000000000000000000000000000000000e2",
+      FUKU_PERMISSION_REGISTRY: permissions,
+      FUKU_REPUTATION_REGISTRY: "0x00000000000000000000000000000000000000e4",
+    };
+    const saved = Object.fromEntries(Object.keys(live).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, live);
+    try {
+      await m.seed.seedDemo(m.db, { quiet: true });
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+    const rows = new Map((await m.db.agentAction.findMany({ where: { agentId: trading } })).map((r) => [r.id, r]));
+    const a = rows.get(first.actionId)!;
+    const b = rows.get(second.actionId)!;
+    assert.deepEqual([a.anchorStatus, a.receiptMode, a.txHash, a.chainId, a.blockNumber], ["anchored", "live", hex("b1"), 10143, 7]);
+    assert.deepEqual([b.anchorStatus, b.receiptMode, b.txHash], ["seeded", "mock", null]);
+    // back in mock mode, nothing claims an anchor
+    await m.seed.seedDemo(m.db, { quiet: true });
+    const again = await m.db.agentAction.findUniqueOrThrow({ where: { id: first.actionId } });
+    assert.deepEqual([again.anchorStatus, again.txHash], ["seeded", null]);
+    await m.db.decisionRecord.updateMany({ where: { actionId: { in: [first.actionId, second.actionId] } }, data: { anchorChainId: null, anchorRegistry: null, anchorTx: null, anchorBlock: null } });
   });
 
   it("assesses revealed records against on-chain proofs, and counts what the records do not explain", async () => {
@@ -508,5 +547,65 @@ describe("commit-reveal decision records", () => {
     assert.deepEqual(result.successes, { transfers: 1, legacy: 1 });
     // a2 (R2) + a5 counted from the chain (R3) + hidden R2 + hidden R10; a4's committed reason clears it
     assert.equal(result.violations, 4);
+  });
+});
+
+describe("demo resets and cohorts", () => {
+  const hex = (s: string) => `0x${s.padStart(64, "0")}`;
+
+  it("a reset keeps a seeded agent's ERC-8004 registration, its sealed key and where it was anchored", async () => {
+    const { trading } = await m.seed.activeDemoAgentIds(m.db);
+    const carried = {
+      agentWallet: "0x00000000000000000000000000000000000000a1",
+      agentKey: "sealed-agent-key-placeholder",
+      erc8004Id: "42",
+      erc8004Registry: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+      erc8004ChainId: 10143,
+      erc8004Owner: "0x00000000000000000000000000000000000000a2",
+      erc8004Uri: "data:application/json;base64,e30=",
+      erc8004Tx: hex("c1"),
+      erc8004WalletTx: hex("c2"),
+      registeredTx: hex("c3"),
+      registeredMode: "anchored",
+    };
+    await m.db.agent.update({ where: { id: trading }, data: carried });
+    await m.db.policy.update({ where: { agentId: trading }, data: { txHash: hex("c4"), anchorMode: "anchored" } });
+    for (let reset = 1; reset <= 2; reset++) {
+      await m.seed.seedDemo(m.db, { quiet: true });
+      const agent = await m.db.agent.findUniqueOrThrow({ where: { id: trading }, include: { policy: true } });
+      assert.deepEqual(Object.fromEntries(Object.keys(carried).map((k) => [k, agent[k as keyof typeof carried]])), carried, `after reset ${reset}`);
+      assert.deepEqual([agent.policy?.txHash, agent.policy?.anchorMode, agent.trustScore], [hex("c4"), "anchored", 96]);
+    }
+    // placeholders the seed writes itself are never carried
+    const research = await m.db.agent.findUniqueOrThrow({ where: { id: (await m.seed.activeDemoAgentIds(m.db)).research } });
+    assert.equal(research.registeredMode, "mock");
+    assert.equal(await m.db.demoAgentState.count({ where: { agentId: research.id } }), 0);
+  });
+
+  it("a new cohort seeds fresh agent and action ids, carries nothing over and keeps the old cohort's records", async () => {
+    assert.equal(await m.seed.demoCohort(m.db), "v2");
+    await m.seed.setDemoCohort(m.db, "t3");
+    try {
+      const { cohort, ids } = await m.seed.seedDemo(m.db, { quiet: true });
+      assert.equal(cohort, "t3");
+      assert.deepEqual(ids, m.seed.demoAgentIds("t3"));
+      assert.notEqual(ids.trading, m.seed.demoAgentIds("v2").trading);
+      const agents = await m.db.agent.findMany({ where: { identityId: m.seed.DEMO_IDENTITY_ID } });
+      assert.deepEqual(agents.map((a) => a.id).sort(), Object.values(ids).sort());
+      assert.equal(await m.db.decisionRecord.count({ where: { actionId: { startsWith: "seed-t3-" } } }), 25);
+      assert.equal(await m.db.decisionRecord.count({ where: { actionId: { startsWith: "seed-v2-" } } }), 25, "the previous cohort's records stay revealable");
+      const trading = await m.db.agent.findUniqueOrThrow({ where: { id: ids.trading } });
+      assert.deepEqual([trading.trustScore, trading.erc8004Id, trading.agentKey], [96, null, null]);
+    } finally {
+      await m.seed.setDemoCohort(m.db, "v2");
+      await m.seed.seedDemo(m.db, { quiet: true });
+    }
+    const back = await m.db.agent.findUniqueOrThrow({ where: { id: m.seed.demoAgentIds("v2").trading } });
+    assert.equal(back.erc8004Id, "42", "the v2 cohort's carried state comes back with it");
+  });
+
+  it("refuses a cohort label that is not a short slug", async () => {
+    for (const bad of ["", "V3", "has space", "x".repeat(25), "../v3"]) await assert.rejects(() => m.seed.setDemoCohort(m.db, bad));
+    assert.equal(await m.seed.demoCohort(m.db), "v2");
   });
 });

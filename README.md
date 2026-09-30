@@ -63,10 +63,10 @@ MONAD_RPC_URL=https://testnet-rpc.monad.xyz     # public endpoint (optional; thi
 ```bash
 npm run check:deployer   # prints address, chain id (10143) and MON balance; exits 1 with a hint if unfunded
 npm run deploy:monad     # deploys the 4 registries, grants roles, writes deployments/monadTestnet.json
-npm run wire:env         # backs up web/.env to web/.env.bak and upserts the live settings
+npm run wire:env         # timestamped backup of web/.env, then upserts the live settings
 ```
 
-`wire:env` writes `FUKU_CHAIN_MODE=live`, `FUKU_CHAIN_ID=10143`, `MONAD_RPC_URL`, `DEPLOYER_PRIVATE_KEY` and the four `FUKU_*_REGISTRY` addresses into `web/.env`, replacing lines in place and leaving everything else alone (`--dry-run` previews with the key masked, `--env <path>` targets another file). **Restart the web app** afterwards (`Ctrl+C`, `cd web && npm run dev -- -p 3001`): Next.js reads `.env` at start.
+`wire:env` writes `FUKU_CHAIN_MODE=live`, `FUKU_CHAIN_ID=10143`, `MONAD_RPC_URL`, `DEPLOYER_PRIVATE_KEY` and the four `FUKU_*_REGISTRY` addresses into `web/.env`, replacing lines in place and leaving everything else alone (`--dry-run` previews with secrets masked, `--env <path>` targets another file). It never replaces a different key already in `web/.env` unless given `--replace-keys`, and it writes a new timestamped backup (`web/.env.bak-<time>`) before each change. **Restart the web app** afterwards (`Ctrl+C`, `cd web && npm run dev -- -p 3001`): Next.js reads `.env` at start.
 
 **Confirm it is live**
 

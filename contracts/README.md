@@ -92,7 +92,7 @@ MONAD_RPC_URL=https://testnet-rpc.monad.xyz     # public endpoint; a QuickNode/A
 ```bash
 npm run check:deployer   # address, chain id (must be 10143) and MON balance; fails early if unfunded
 npm run deploy:monad     # 7 contracts + 3 role grants, writes deployments/monadTestnet.json
-npm run wire:env         # backs up ../web/.env to ../web/.env.bak, upserts the live settings into it
+npm run wire:env         # timestamped backup of ../web/.env, then upserts the live settings into it
 ```
 
 Set `COMPLIANCE_SIGNER_ADDRESS` in `.env` first (see
@@ -121,10 +121,19 @@ What the two helper scripts do:
   set in `.env` or the environment (masked in `--dry-run` like the deployer key; the script
   warns when that key's address is not the deployment's `complianceSigner`, because every
   guarded transfer would then revert with `BadAttestation`). Existing lines are replaced in place, commented placeholders
-  such as `# FUKU_AGENT_REGISTRY=0x...` are uncommented, every other line is kept, and the
-  previous file is copied to `.env.bak` first. Flags: `--network <name>` (or positional),
-  `--env <path>` to target another file, `--dry-run` to print the resulting file to stdout
-  (key masked) without writing anything.
+  such as `# FUKU_AGENT_REGISTRY=0x...` are uncommented, and every other line is kept; the run
+  checks that before writing. The previous file is first copied to a new timestamped backup
+  (`.env.bak-<UTC time>`); no backup is overwritten or ever read back.
+  - Keys already in the target are protected. If it holds a `DEPLOYER_PRIVATE_KEY` or
+    `FUKU_COMPLIANCE_SIGNER_KEY` different from the one the run would write (a stale `.env`, say),
+    nothing is written; both addresses are printed. `--replace-keys` replaces it on purpose.
+  - `DEMO_OWNER_PRIVATE_KEY`, `SMOKE_OWNER_PRIVATE_KEY`, `FUKU_AGENT_KEY_SECRET` and
+    `FUKU_SESSION_SECRET` are never touched, and the report lists them.
+  - No key, or fragment of one, is printed: keys appear as `<key of 0x…address>`.
+
+  Flags: `--network <name>` (or positional), `--env <path>` to target another file,
+  `--replace-keys`, `--dry-run` to print the resulting file to stdout (every secret-looking value
+  masked) without writing anything.
 
 An exported variable wins over `.env` (Node's `process.loadEnvFile` does not override the
 environment), so one-off overrides work:

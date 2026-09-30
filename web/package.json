@@ -17,7 +17,8 @@
     "reconcile": "tsx scripts/reconcile.ts",
     "adversarial:live": "tsx scripts/adversarial-live.ts",
     "erc8004:register": "tsx scripts/erc8004-register.ts",
-    "verify-score": "tsx scripts/verify-score.ts"
+    "verify-score": "tsx scripts/verify-score.ts",
+    "demo:cohort": "tsx scripts/demo-cohort.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

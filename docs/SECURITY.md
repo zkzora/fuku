@@ -163,6 +163,8 @@ Rules that follow from the lifecycle:
    - **The demo's seeded history** has deterministic ids and records, and `npm run reconcile -- --anchor-seeded` anchors it once.
      - A demo reset rebuilds the same records, so they stay verifiable.
      - A reset cannot rewind the chain. After a live action and a reset, the agent's chain history is ahead of its reseeded ledger, and **Recompute from chain** says so.
+     - A reset keeps what the testnet setup recorded about the seeded agents (`DemoAgentState`): the ERC-8004 registration, the sealed agent key (without it the registered `agentWallet` would be orphaned), and the registration and passport transactions. The seeded rows come back as anchored where their record was anchored on the same chain and PermissionRegistry.
+     - `npm run demo:cohort` moves the demo to a fresh cohort: new agent ids and seeded action ids, anchored, mandated and registered on ERC-8004. Earlier cohorts' records and carried state stay in the database.
 5. **Cleanverse** runs in simulator mode until the API invite lands (`docs/CLEANVERSE.md`). The real A-Token's transfer rules for third-party contracts are unverified.
 6. **Memory vault.** Items are encrypted in the browser with a key derived from the owner's passphrase (PBKDF2-SHA256, 100,000 iterations, salted with the identity id, into AES-256-GCM).
    - Every identity except the seeded demo chooses its own passphrase (at least 10 characters). The server stores ciphertext and one encrypted check value that tells a wrong passphrase from a right one; it never receives the passphrase or the key. The key stays in the tab's memory and is not persisted.
@@ -265,6 +267,9 @@ Costs below are gas limit × 102 gwei (Monad charges the limit), measured on a l
 1. `contracts/.env`: set `COMPLIANCE_SIGNER_ADDRESS` to a fresh key's address and `FUKU_COMPLIANCE_SIGNER_KEY` to that key.
 2. `cd contracts && npm run deploy:cleanverse:monad`. It sends two simulators, the guard and one enforcer grant, about 0.39 MON. The four registries are untouched.
 3. `npm run wire:env`. It writes `FUKU_SPEND_GUARD`, `CLEANVERSE_SIM_*` and the signer key into `web/.env`.
+   - It first copies the file to a new timestamped backup.
+   - It refuses to replace a different key already there unless given `--replace-keys`.
+   - It never touches `DEMO_OWNER_PRIVATE_KEY`, `SMOKE_OWNER_PRIVATE_KEY` or `FUKU_AGENT_KEY_SECRET`.
 4. Prepare `web/.env`:
    - add a fresh `DEMO_OWNER_PRIVATE_KEY` and `FUKU_AGENT_KEY_SECRET` (at least 32 random characters);
    - set `FUKU_PUBLIC_URL` only if the app is served publicly over https;
@@ -275,6 +280,7 @@ Costs below are gas limit × 102 gwei (Monad charges the limit), measured on a l
 6. `npm run reconcile -- --anchor-seeded`.
    - It anchors the seeded history: 5 agents, 3 passports, 25 decisions and 5 scores, about 38 transactions and 0.32 MON (Ava's identity is already on testnet). It prints every transaction.
    - Do not run live actions on the demo agents before the pitch: a reset cannot rewind the chain.
+   - To present again after live actions, `npm run demo:cohort -- --allow-testnet` seeds and anchors a fresh cohort. It also opens its mandate, registers it on ERC-8004 and verifies it. Measured on the fork after a recorded climax: 52 transactions, about 0.59 MON (0.33 from the relayer, 0.26 from Ava's wallet).
 7. `npm run erc8004:register -- --allow-testnet`. It registers the 5 demo agents from Ava's wallet on the canonical Identity Registry, with Fuku-held agent keys as `agentWallet`, and prints each transaction and agent id.
    - Cost: about 0.24 MON with `data:` URIs, or about 0.13 MON with `FUKU_PUBLIC_URL`, whose registration endpoint is checked to resolve first.
 8. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… DEMO_OWNER_PRIVATE_KEY=… SMOKE_OWNER_PRIVATE_KEY=… node scripts/live-smoke.mjs`.
@@ -285,6 +291,6 @@ Costs below are gas limit × 102 gwei (Monad charges the limit), measured on a l
 10. Record every transaction hash in `docs/CLEANVERSE.md` and `docs/PITCH.md`.
 11. Restart the app on 3001, then check two things:
     - Trading Assistant shows 96;
-    - **Recompute from chain** shows ✓ for it.
+    - **Recompute from chain** shows ✓ for it (`npm run verify-score -- --demo` checks all five).
 
 The relayer spends about 1.2 MON over this sequence, including the funding it sends to Ava and the smoke owner. `examples/sdk-consumer` against testnet is optional, about 0.16 MON.
