@@ -5,6 +5,7 @@ import {
   anchorStateOf,
   attestationTtlSeconds,
   bumpWalletValidAfterOnChain,
+  chainConfig,
   chainMode,
   chainReader,
   findGuardExecution,
@@ -208,8 +209,10 @@ async function settleTransfer(row: Row, head: bigint): Promise<"confirmed" | "fa
   // No receipt (or no stored hash): did the guard execute this action at all?
   const executed = await guardActionExecuted(row.id);
   if (executed) {
-    // Never below the registries' first block (ENVIO_START_BLOCK): nothing Fuku wrote is older.
-    const floor = BigInt(startBlock());
+    // Never below the registries' first block (ENVIO_START_BLOCK): nothing Fuku wrote is older. A start
+    // block beyond the head belongs to another chain (a local node with testnet settings): ignored.
+    const configured = BigInt(startBlock());
+    const floor = chainConfig().id === 31337 || configured > head ? BigInt(0) : configured;
     const lookback = head > LOG_LOOKBACK ? head - LOG_LOOKBACK : BigInt(0);
     const hit = await findGuardExecution(row.agentId, row.id, lookback > floor ? lookback : floor);
     if (hit) return confirm(row, { txHash: hit.txHash, block: Number(hit.block), blockHash: hit.blockHash, logIndex: hit.logIndex });

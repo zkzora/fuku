@@ -633,8 +633,15 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
     check("a later anchor and a reconcile pass leave the revoked passport inactive; the attestation stays dead", activeAfter === false && again === "AttestationSuperseded", `active ${activeAfter}, ${again} · ${out}`);
   }
 
-  // 8. reorg: a confirmed transfer that disappears from the chain goes back to PENDING and loses its credit
-  await signIn(true);
+  // 8. reorg: a confirmed transfer that disappears from the chain goes back to PENDING and loses its credit.
+  // The run's agent was revoked above: approve its passport again and resume it (a demo reset would delete it).
+  await api("PUT", `/api/agents/${encodeURIComponent(pay.id)}/policy`, {
+    allowed: [{ action: "transfer", limitUsdcPerDay: 1000 }, { action: "read_balances" }],
+    blocked: ["withdraw", "change_owner"],
+    scopeApps: [],
+    assets: ["aUSDC"],
+  });
+  await api("PATCH", `/api/agents/${encodeURIComponent(pay.id)}`, { status: "active" });
   if (dbUrl && chainId !== 31337) {
     console.log("   (reorg check skipped: evm_snapshot / evm_revert only exist on a local Hardhat node)");
   } else if (dbUrl) {
