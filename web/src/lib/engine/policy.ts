@@ -77,6 +77,32 @@ export const policySchema = z.object({
 export type AllowedRule = z.infer<typeof allowedRuleSchema>;
 export type PolicyDoc = z.infer<typeof policySchema>;
 
+const KNOWN = new Set<string>(ACTIONS);
+
+/**
+ * What a passport may say when it is written (the engine still reads older passports leniently):
+ * only actions Fuku knows, a daily limit on every allowed value action, no action both allowed and
+ * blocked, and A-Tokens only alongside an allowed transfer.
+ */
+export const writablePolicySchema = policySchema.superRefine((doc, ctx) => {
+  const allowed = new Set<string>();
+  doc.allowed.forEach((r, i) => {
+    if (!KNOWN.has(r.action)) ctx.addIssue({ code: "custom", path: ["allowed", i, "action"], message: `Unknown action "${r.action}"` });
+    if (allowed.has(r.action)) ctx.addIssue({ code: "custom", path: ["allowed", i, "action"], message: `${r.action} is listed twice` });
+    allowed.add(r.action);
+    if (VALUE_ACTIONS.has(r.action) && r.limitUsdcPerDay === undefined) {
+      ctx.addIssue({ code: "custom", path: ["allowed", i, "limitUsdcPerDay"], message: `${labelFor(r.action)} moves value and needs a daily limit` });
+    }
+  });
+  doc.blocked.forEach((b, i) => {
+    if (!KNOWN.has(b)) ctx.addIssue({ code: "custom", path: ["blocked", i], message: `Unknown action "${b}"` });
+    if (allowed.has(b)) ctx.addIssue({ code: "custom", path: ["blocked", i], message: `${b} cannot be both allowed and blocked` });
+  });
+  if (doc.assets.length > 0 && !allowed.has("transfer")) {
+    ctx.addIssue({ code: "custom", path: ["assets"], message: "A-Tokens only apply to an allowed transfer" });
+  }
+});
+
 export function parsePolicy(
   row: { allowed: string; blocked: string; scopeApps: string; assets?: string | null } | null | undefined,
 ): PolicyDoc | null {

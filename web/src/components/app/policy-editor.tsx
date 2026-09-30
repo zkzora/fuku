@@ -43,6 +43,8 @@ export function PolicyEditor({ agent, onSaved }: { agent: AgentView; onSaved: ()
       assets: rules.transfer === "allowed" ? assets : [],
     };
     if (doc.allowed.length === 0) return toast.error("Allow at least one capability.");
+    const unlimited = doc.allowed.find((r) => VALUE_ACTIONS.has(r.action) && r.limitUsdcPerDay === undefined);
+    if (unlimited) return toast.error(`${labelFor(unlimited.action)} moves value: set a daily USDC limit.`);
     setBusy("save");
     try {
       await api(`/api/agents/${encodeURIComponent(agent.id)}/policy`, { method: "PUT", json: doc });

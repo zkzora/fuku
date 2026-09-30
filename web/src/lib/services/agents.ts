@@ -1,10 +1,11 @@
 import type { Agent, Identity, Policy, ReputationEvent } from "@prisma/client";
 import { db } from "../db";
+import { apassEligibleFor } from "./cleanverse";
 import { newAgentId, hashJson } from "../ids";
-import { parsePolicy, policyHashDoc, policySchema, type PolicyDoc } from "../engine/policy";
+import { parsePolicy, policyHashDoc, writablePolicySchema, type PolicyDoc } from "../engine/policy";
 import { utcDayStart } from "../engine/permission";
 import { computeScore, type ScoreResult } from "../engine/reputation";
-import { ChainWriteError, registerAgentOnChain, revokePolicyOnChain, setAgentStatusOnChain, setPolicyOnChain, toAgentRef, type ChainReceipt } from "../chain";
+import { anchorStateOf, ChainWriteError, registerAgentOnChain, revokePolicyOnChain, setAgentStatusOnChain, setPolicyOnChain, toAgentRef, type ChainReceipt } from "../chain";
 
 export type AgentRow = Agent & { policy: Policy | null };
 
@@ -48,7 +49,11 @@ export function toAgentView(a: AgentRow): AgentView {
   };
 }
 
-export function countEvents(events: Pick<ReputationEvent, "kind">[]) {
+type ScoredEvent = Pick<ReputationEvent, "kind"> & { createdAt?: Date };
+
+const EVIDENCE_KINDS = new Set(["success", "violation", "security"]);
+
+export function countEvents(events: ScoredEvent[]) {
   return {
     successes: events.filter((e) => e.kind === "success").length,
     violations: events.filter((e) => e.kind === "violation").length,
@@ -56,21 +61,36 @@ export function countEvents(events: Pick<ReputationEvent, "kind">[]) {
   };
 }
 
-export function scoreFor(agent: AgentRow, identity: Identity, events: Pick<ReputationEvent, "kind">[]): ScoreResult {
+/** Reputation events with the fields the score needs. */
+export const SCORED_EVENTS = { select: { kind: true, createdAt: true } } as const;
+
+/**
+ * The agent's score. `apassEligible` comes from `apassEligibleFor(owner)` (a persisted read, no
+ * provider call); it is a required argument so no caller silently drops the identity signal.
+ */
+export function scoreFor(agent: AgentRow, identity: Identity, events: ScoredEvent[], signals: { apassEligible: boolean }): ScoreResult {
+  const evidence = events.filter((e) => EVIDENCE_KINDS.has(e.kind) && e.createdAt).map((e) => e.createdAt!.getTime());
   return computeScore({
-    humanVerified: identity.humanVerified,
+    passkeyVerified: identity.humanVerified,
+    apassEligible: signals.apassEligible,
     hasActivePolicy: Boolean(agent.policy?.active),
     ...countEvents(events),
+    firstEvidenceAt: evidence.length ? new Date(Math.min(...evidence)) : null,
   });
+}
+
+/** Score an agent from the database (loads owner, passport, events and the A-Pass signal). */
+export async function scoreAgent(agentId: string): Promise<ScoreResult> {
+  const agent = await db.agent.findUniqueOrThrow({
+    where: { id: agentId },
+    include: { policy: true, identity: true, reputationEvents: SCORED_EVENTS },
+  });
+  return scoreFor(agent, agent.identity, agent.reputationEvents, { apassEligible: await apassEligibleFor(agent.identity) });
 }
 
 /** Recompute and persist an agent's trust score from its ledger. */
 export async function refreshScore(agentId: string): Promise<ScoreResult> {
-  const agent = await db.agent.findUniqueOrThrow({
-    where: { id: agentId },
-    include: { policy: true, identity: true, reputationEvents: { select: { kind: true } } },
-  });
-  const result = scoreFor(agent, agent.identity, agent.reputationEvents);
+  const result = await scoreAgent(agentId);
   await db.agent.update({ where: { id: agentId }, data: { trustScore: result.score } });
   return result;
 }
@@ -106,11 +126,12 @@ export async function registerAgent(
       capabilities: JSON.stringify(input.capabilities),
       description: input.description,
       registeredTx: receipt.txHash,
+      registeredMode: anchorStateOf(receipt),
       reputationEvents: {
         create: [
           { kind: "registration", delta: 40, note: "Agent registered in the Fuku registry" },
           ...(identity.humanVerified
-            ? [{ kind: "human_verified", delta: 20, note: "Owner is a verified human" }]
+            ? [{ kind: "human_verified", delta: 10, note: "Owner completed a passkey ceremony with user verification" }]
             : []),
         ],
       },
@@ -122,7 +143,7 @@ export async function registerAgent(
 }
 
 export async function setAgentPolicy(agentId: string, raw: unknown) {
-  const doc = policySchema.parse(raw);
+  const doc = writablePolicySchema.parse(raw);
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
   const existing = agent.policy;
   const version = (existing?.version ?? 0) + 1;
@@ -136,6 +157,7 @@ export async function setAgentPolicy(agentId: string, raw: unknown) {
     version,
     active: true,
     txHash: receipt.txHash,
+    anchorMode: anchorStateOf(receipt),
     policyHash: hashJson(hashDoc),
   };
   const policy = existing
@@ -150,7 +172,7 @@ export async function setAgentPolicy(agentId: string, raw: unknown) {
 /** Result of pushing a kill-switch change on-chain. `ok: false` is surfaced to the caller. */
 export interface ChainSync {
   ok: boolean;
-  receipts: { op: string; txHash: string; mode: string }[];
+  receipts: { op: string; txHash: string | null; mode: string; status: string }[];
   error?: string;
 }
 
@@ -159,7 +181,7 @@ async function syncOnChain(tasks: { op: string; run: () => Promise<ChainReceipt 
   for (const t of tasks) {
     try {
       const r = await t.run();
-      if (r) receipts.push({ op: t.op, txHash: r.txHash, mode: r.mode });
+      if (r) receipts.push({ op: t.op, txHash: r.txHash, mode: r.mode, status: r.status });
     } catch (err) {
       return { ok: false, receipts, error: err instanceof ChainWriteError ? err.message : (err as Error).message };
     }

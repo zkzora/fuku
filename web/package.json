@@ -13,7 +13,8 @@
     "db:setup": "prisma db push && tsx prisma/seed.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "cleanverse:setup": "tsx scripts/setup-cleanverse-demo.ts",
-    "cleanverse:check": "tsx scripts/cleanverse-check.ts"
+    "cleanverse:check": "tsx scripts/cleanverse-check.ts",
+    "reconcile": "tsx scripts/reconcile.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

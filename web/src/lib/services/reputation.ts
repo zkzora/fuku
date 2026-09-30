@@ -3,6 +3,7 @@ import { db } from "../db";
 import { explainScore } from "../engine/explain";
 import { agentIntelligence } from "../integrations";
 import { countEvents, scoreFor, toAgentView } from "./agents";
+import { apassEligibleFor } from "./cleanverse";
 
 /** Full reputation report for one agent: score, breakdown, ledger counts, intelligence and explanation. */
 export async function agentReport(agentId: string, identity: Identity, withExplanation = true) {
@@ -11,7 +12,7 @@ export async function agentReport(agentId: string, identity: Identity, withExpla
     include: { policy: true, reputationEvents: { orderBy: { createdAt: "desc" } } },
   });
   if (!agent) throw new Error("Agent not found");
-  const result = scoreFor(agent, identity, agent.reputationEvents);
+  const result = scoreFor(agent, identity, agent.reputationEvents, { apassEligible: await apassEligibleFor(identity) });
   const counts = countEvents(agent.reputationEvents);
   const lastViolation = agent.reputationEvents.find((e) => e.kind === "violation");
   const [intelligence, explanation] = await Promise.all([
@@ -34,6 +35,10 @@ export async function agentReport(agentId: string, identity: Identity, withExpla
     score: result.score,
     level: result.level,
     breakdown: result.breakdown,
+    scoringVersion: result.scoringVersion,
+    dimensions: result.dimensions,
+    evidence: result.evidence,
+    uncertainty: result.uncertainty,
     counts,
     intelligence,
     explanation: explanation?.text ?? null,

@@ -8,10 +8,11 @@ import {
   isAddressEqual,
   isHex,
   keccak256,
-  parseUnits,
+  parseEventLogs,
   stringToHex,
   toHex,
   zeroAddress,
+  type Log,
   type Abi,
   type Address,
   type Chain,
@@ -20,9 +21,10 @@ import {
   type PublicClient,
   type WalletClient,
 } from "viem";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
 import { idToBytes32, hashJson, hashString } from "../ids";
+import { db } from "../db";
 import { policyHashDoc } from "../engine/policy";
 import {
   AgentRegistryAbi,
@@ -103,12 +105,27 @@ export const monadTestnet = toChain({ ...MONAD_TESTNET });
 
 export type ChainMode = "live" | "mock";
 
+/**
+ * confirmed: mined successfully (live). pending: broadcast, receipt not seen yet; reconciliation
+ * settles it. failed: nothing was anchored (live). simulated: a mock receipt (mock mode only).
+ * A live failure is never dressed up as a mock receipt.
+ */
+export type ReceiptStatus = "confirmed" | "pending" | "failed" | "simulated";
+
 export interface ChainReceipt {
-  txHash: Hex;
-  block: number;
+  txHash: Hex | null;
+  block: number | null;
   mode: ChainMode;
-  explorerUrl: string;
+  status: ReceiptStatus;
+  chainId: number;
+  explorerUrl: string | null;
   note?: string;
+}
+
+/** How a write should be recorded on its row: live-anchored, mock, pending or failed. */
+export function anchorStateOf(r: ChainReceipt | null): "anchored" | "mock" | "pending" | "failed" {
+  if (!r) return "failed";
+  return r.status === "confirmed" ? "anchored" : r.status === "simulated" ? "mock" : r.status;
 }
 
 /** The identity fields the live path needs to anchor an identity lazily. */
@@ -269,9 +286,29 @@ function mockReceipt(op: string, payload: unknown, note?: string): ChainReceipt 
     txHash,
     block: mockBlock,
     mode: "mock",
-    explorerUrl: `${chainConfig().explorer}/tx/${txHash}`,
+    status: "simulated",
+    chainId: chainConfig().id,
+    // A mock hash has no transaction behind it, so there is no explorer link.
+    explorerUrl: null,
     note: note ?? `Mock settlement (set FUKU_CHAIN_MODE=live to anchor on ${chainConfig().name})`,
   };
+}
+
+// --- Live write health (for the integration board) ------------------------------------------
+
+export interface ChainHealth {
+  ok: boolean;
+  at: string;
+  op: string;
+  error?: string;
+}
+const health = globalThis as unknown as { __fukuChainHealth?: ChainHealth };
+function noteHealth(ok: boolean, op: string, error?: string) {
+  health.__fukuChainHealth = { ok, op, at: new Date().toISOString(), ...(error ? { error: error.slice(0, 200) } : {}) };
+}
+/** Outcome of the most recent live write in this process, or null if there has been none. */
+export function lastChainWrite(): ChainHealth | null {
+  return health.__fukuChainHealth ?? null;
 }
 
 // --- Live path ---------------------------------------------------------------------------
@@ -316,16 +353,51 @@ interface Call {
 interface Mined {
   hash: Hex;
   block: bigint;
+  blockHash: Hex;
+  logs: Log[];
 }
 
-/** Simulate (so reverts decode to custom errors), send, and wait until mined. */
-async function write(ctx: LiveCtx, label: string, call: Call): Promise<Mined> {
+/** Broadcast, but no receipt within RECEIPT_TIMEOUT_MS. The transaction may still be mined. */
+export class ReceiptTimeoutError extends Error {
+  constructor(
+    readonly label: string,
+    readonly hash: Hex,
+  ) {
+    super(`${label} was broadcast (tx ${hash}) but no receipt arrived in time`);
+    this.name = "ReceiptTimeoutError";
+  }
+}
+
+/** Mined, but the transaction reverted (a race after a successful simulation). */
+export class RevertedOnChainError extends Error {
+  constructor(
+    readonly label: string,
+    readonly hash: Hex,
+    readonly block: bigint,
+  ) {
+    super(`${label} reverted on-chain (tx ${hash})`);
+    this.name = "RevertedOnChainError";
+  }
+}
+
+/**
+ * Simulate (so reverts decode to custom errors), send, then wait until mined. `onSubmitted` runs
+ * right after the broadcast, before waiting, so callers can persist the hash first: a crash or a
+ * timeout after that point can be reconciled from the stored hash instead of being retried blind.
+ */
+async function write(ctx: LiveCtx, label: string, call: Call, onSubmitted?: (hash: Hex) => Promise<void> | void): Promise<Mined> {
   const { request } = await ctx.publicClient.simulateContract({ ...call, account: ctx.account, chain: ctx.chain });
   const hash = await ctx.walletClient.writeContract(request);
-  const receipt = await ctx.publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
-  if (receipt.status !== "success") throw new Error(`${label} reverted on-chain (tx ${hash})`);
+  await onSubmitted?.(hash);
+  let receipt;
+  try {
+    receipt = await ctx.publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
+  } catch {
+    throw new ReceiptTimeoutError(label, hash);
+  }
+  if (receipt.status !== "success") throw new RevertedOnChainError(label, hash, receipt.blockNumber);
   console.log(`[fuku-chain] ${label} mined: tx ${hash} block ${receipt.blockNumber}`);
-  return { hash, block: receipt.blockNumber };
+  return { hash, block: receipt.blockNumber, blockHash: receipt.blockHash, logs: receipt.logs };
 }
 
 /** Turn a viem error into a short reason, preferring the decoded custom error. */
@@ -454,14 +526,47 @@ async function ensurePolicyOnChain(ctx: LiveCtx, agent: AgentRef): Promise<void>
 }
 
 /**
- * Live writes all come from the one signer and viem fetches the nonce per transaction, so two
- * overlapping requests would race on it ("nonce too low" / replacement underpriced) and one
- * of them would silently fall back to a mock receipt. Serialize them per process instead:
- * each write then fetches its nonce only after the previous one is mined.
+ * Live writes all come from one signer, and viem fetches the nonce per transaction, so overlapping
+ * writes would race on it. Writes are therefore serialized twice: an in-process queue, and a lease
+ * row in the database (ChainLock) held for the duration of the write, so several server instances
+ * sharing the database never broadcast for the same signer at the same time. A lease outlives a
+ * crashed holder by at most LEASE_MS.
  */
+const LEASE_MS = 150_000;
+const LEASE_WAIT_MS = 180_000;
+const INSTANCE_ID = randomUUID();
 let liveQueue: Promise<unknown> = Promise.resolve();
+
+async function acquireLease(id: string): Promise<string> {
+  const token = `${INSTANCE_ID}:${randomUUID()}`;
+  const giveUp = Date.now() + LEASE_WAIT_MS;
+  for (let attempt = 0; ; attempt++) {
+    const now = new Date();
+    const until = new Date(now.getTime() + LEASE_MS);
+    try {
+      await db.chainLock.create({ data: { id, holder: token, expiresAt: until } });
+      return token;
+    } catch {
+      // The row exists: take it over only if the previous lease expired.
+    }
+    const taken = await db.chainLock.updateMany({ where: { id, expiresAt: { lt: now } }, data: { holder: token, expiresAt: until } });
+    if (taken.count === 1) return token;
+    if (Date.now() > giveUp) throw new Error(`signer lease ${id} is busy`);
+    await new Promise((r) => setTimeout(r, Math.min(2_000, 50 * 2 ** attempt)));
+  }
+}
+
 function serialized<T>(task: () => Promise<T>): Promise<T> {
-  const next = liveQueue.then(task);
+  const next = liveQueue.then(async () => {
+    const key = signerKey();
+    const id = `signer:${chainConfig().id}:${key ? privateKeyToAccount(key).address.toLowerCase() : "none"}`;
+    const token = await acquireLease(id);
+    try {
+      return await task();
+    } finally {
+      await db.chainLock.deleteMany({ where: { id, holder: token } }).catch(() => undefined);
+    }
+  });
   liveQueue = next.then(
     () => undefined,
     () => undefined,
@@ -469,31 +574,69 @@ function serialized<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
-async function send(op: string, payload: unknown, run: (ctx: LiveCtx) => Promise<Mined>): Promise<ChainReceipt> {
+function liveReceipt(c: ChainConfig, mined: Mined, ctx: LiveCtx): ChainReceipt {
+  return {
+    txHash: mined.hash,
+    block: Number(mined.block),
+    mode: "live",
+    status: "confirmed",
+    chainId: c.id,
+    explorerUrl: `${c.explorer}/tx/${mined.hash}`,
+    note: ctx.notes.length ? `Anchored first: ${ctx.notes.join("; ")}` : undefined,
+  };
+}
+
+function pendingReceipt(c: ChainConfig, hash: Hex): ChainReceipt {
+  return {
+    txHash: hash,
+    block: null,
+    mode: "live",
+    status: "pending",
+    chainId: c.id,
+    explorerUrl: `${c.explorer}/tx/${hash}`,
+    note: "Broadcast; no receipt yet. Reconciliation settles it from the stored hash.",
+  };
+}
+
+/**
+ * A decision, score, registration or passport write. In live mode a failure is reported as a
+ * `failed` receipt (nothing anchored) and a timeout after broadcast as `pending`; neither is ever
+ * replaced by a mock receipt.
+ */
+async function send(
+  op: string,
+  payload: unknown,
+  run: (ctx: LiveCtx, onSubmitted: (hash: Hex) => void) => Promise<Mined>,
+): Promise<ChainReceipt> {
   if (chainMode() !== "live") return mockReceipt(op, payload);
   const c = chainConfig();
   let ctx: LiveCtx | null = null;
+  let submitted: Hex | null = null;
   try {
     ctx = liveContext();
-    const { hash, block } = await serialized(() => run(ctx as LiveCtx));
-    return {
-      txHash: hash,
-      block: Number(block),
-      mode: "live",
-      explorerUrl: `${c.explorer}/tx/${hash}`,
-      note: ctx.notes.length ? `Anchored first: ${ctx.notes.join("; ")}` : undefined,
-    };
+    const mined = await serialized(() => run(ctx as LiveCtx, (h) => (submitted = h)));
+    noteHealth(true, op);
+    return liveReceipt(c, mined, ctx);
   } catch (err) {
+    if (err instanceof ReceiptTimeoutError && err.label === op) return pendingReceipt(c, err.hash);
     const reason = describeChainError(err);
-    console.error(`[fuku-chain] ${op} failed on ${c.name} (chain ${c.id}), recording mock receipt. Reason: ${reason}`);
-    return mockReceipt(op, payload, `Live settlement failed (${reason.slice(0, 120)}); mock receipt recorded`);
+    noteHealth(false, op, reason);
+    console.error(`[fuku-chain] ${op} failed on ${c.name} (chain ${c.id}). Reason: ${reason}`);
+    return {
+      txHash: null,
+      block: null,
+      mode: "live",
+      status: "failed",
+      chainId: c.id,
+      explorerUrl: null,
+      note: `Live settlement failed (${reason.slice(0, 160)})${submitted ? `; tx ${submitted} reverted` : ""}. Nothing was anchored; reconciliation retries it.`,
+    };
   }
 }
 
 /**
- * Like `send`, but never falls back to a mock receipt in live mode: failures throw with the decoded
- * reason. Used where silently pretending would be unsafe (kill switch, guarded transfers).
- * `run` may return null when there is nothing to do on-chain.
+ * Like `send`, but a failure throws with the decoded reason (kill switch). `run` may return null
+ * when there is nothing to do on-chain. A timeout after broadcast is returned as `pending`.
  */
 async function sendStrict(op: string, payload: unknown, run: (ctx: LiveCtx) => Promise<Mined | null>): Promise<ChainReceipt | null> {
   if (chainMode() !== "live") return mockReceipt(op, payload);
@@ -503,16 +646,13 @@ async function sendStrict(op: string, payload: unknown, run: (ctx: LiveCtx) => P
   try {
     mined = await serialized(() => run(ctx));
   } catch (err) {
+    if (err instanceof ReceiptTimeoutError && err.label === op) return pendingReceipt(c, err.hash);
+    noteHealth(false, op, describeChainError(err));
     throw new ChainWriteError(op, describeChainError(err), err);
   }
   if (!mined) return null;
-  return {
-    txHash: mined.hash,
-    block: Number(mined.block),
-    mode: "live",
-    explorerUrl: `${c.explorer}/tx/${mined.hash}`,
-    note: ctx.notes.length ? `Anchored first: ${ctx.notes.join("; ")}` : undefined,
-  };
+  noteHealth(true, op);
+  return liveReceipt(c, mined, ctx);
 }
 
 export class ChainWriteError extends Error {
@@ -568,35 +708,40 @@ export function setAgentStatusOnChain(agent: AgentRef, status: "active" | "pause
 
 /** Anchor a freshly created identity; also marks it human-verified when `humanVerified` is set. */
 export function anchorIdentity(identityId: string, passkeyPubKeyHash: Hex, proofHash: Hex, humanVerified = false) {
-  return send("registerIdentity", { identityId, proofHash }, async (ctx) => {
+  return send("registerIdentity", { identityId, proofHash }, async (ctx, onSubmitted) => {
     const key = idToBytes32(identityId);
-    const mined = await write(ctx, "registerIdentity", {
-      address: ctx.addresses.identity,
-      abi: HumanIdentityRegistryAbi,
-      functionName: "registerIdentity",
-      args: [key, passkeyPubKeyHash, proofHash],
-    });
+    const mined = await write(
+      ctx,
+      "registerIdentity",
+      { address: ctx.addresses.identity, abi: HumanIdentityRegistryAbi, functionName: "registerIdentity", args: [key, passkeyPubKeyHash, proofHash] },
+      onSubmitted,
+    );
     if (humanVerified) await markHumanVerified(ctx, { id: identityId, humanVerified, proofHash }, key);
     return mined;
   });
 }
 
 export function registerAgentOnChain(agent: AgentRef) {
-  return send("registerAgent", { id: agent.id, identityId: agent.identity.id }, async (ctx) => {
+  return send("registerAgent", { id: agent.id, identityId: agent.identity.id }, async (ctx, onSubmitted) => {
     await ensureIdentityOnChain(ctx, agent.identity);
-    return write(ctx, "registerAgent", registerAgentCall(ctx, agent));
+    return write(ctx, "registerAgent", registerAgentCall(ctx, agent), onSubmitted);
   });
 }
 
 export function setPolicyOnChain(agent: AgentRef, policy: unknown, version: number) {
-  return send("setPolicy", { agentId: agent.id, version }, async (ctx) => {
+  return send("setPolicy", { agentId: agent.id, version }, async (ctx, onSubmitted) => {
     await ensureAgentOnChain(ctx, agent);
-    return write(ctx, "setPolicy", {
-      address: ctx.addresses.permissions,
-      abi: PermissionRegistryAbi,
-      functionName: "setPolicy",
-      args: [idToBytes32(agent.id), hashJson(policy), version, `fuku://agents/${agent.id}/policy`],
-    });
+    return write(
+      ctx,
+      "setPolicy",
+      {
+        address: ctx.addresses.permissions,
+        abi: PermissionRegistryAbi,
+        functionName: "setPolicy",
+        args: [idToBytes32(agent.id), hashJson(policy), version, `fuku://agents/${agent.id}/policy`],
+      },
+      onSubmitted,
+    );
   });
 }
 
@@ -608,26 +753,36 @@ export function recordDecisionOnChain(input: {
   ruleId: string;
 }) {
   const { agent, ...rest } = input;
-  return send("recordDecision", { agentId: agent.id, ...rest }, async (ctx) => {
+  return send("recordDecision", { agentId: agent.id, ...rest }, async (ctx, onSubmitted) => {
     await ensureAgentOnChain(ctx, agent, { syncPolicy: true });
-    return write(ctx, "recordDecision", {
-      address: ctx.addresses.permissions,
-      abi: PermissionRegistryAbi,
-      functionName: "recordDecision",
-      args: [idToBytes32(agent.id), hashString(input.actionId), input.allowed, input.proofHash, input.ruleId],
-    });
+    return write(
+      ctx,
+      "recordDecision",
+      {
+        address: ctx.addresses.permissions,
+        abi: PermissionRegistryAbi,
+        functionName: "recordDecision",
+        args: [idToBytes32(agent.id), hashString(input.actionId), input.allowed, input.proofHash, input.ruleId],
+      },
+      onSubmitted,
+    );
   });
 }
 
 export function updateScoreOnChain(agent: AgentRef, score: number, delta: number, reason: string) {
-  return send("updateScore", { agentId: agent.id, score, delta }, async (ctx) => {
+  return send("updateScore", { agentId: agent.id, score, delta }, async (ctx, onSubmitted) => {
     await ensureAgentOnChain(ctx, agent, { syncPolicy: true });
-    return write(ctx, "updateScore", {
-      address: ctx.addresses.reputation,
-      abi: ReputationRegistryAbi,
-      functionName: "updateScore",
-      args: [idToBytes32(agent.id), score, delta, hashString(reason), reason],
-    });
+    return write(
+      ctx,
+      "updateScore",
+      {
+        address: ctx.addresses.reputation,
+        abi: ReputationRegistryAbi,
+        functionName: "updateScore",
+        args: [idToBytes32(agent.id), score, delta, hashString(reason), reason],
+      },
+      onSubmitted,
+    );
   });
 }
 
@@ -639,15 +794,30 @@ export interface GuardedTransferInput {
   from: Address;
   to: Address;
   token: Address;
-  amountUsdc: number;
+  /** Authoritative amount in token base units (6 decimals). */
+  amount: bigint;
   proofHash: Hex;
   complianceRef: Hex;
+  /** Persist the transaction hash as soon as it is broadcast (before waiting for the receipt). */
+  onSubmitted?: (hash: Hex) => Promise<void> | void;
+}
+
+export interface GuardedExecution {
+  receipt: ChainReceipt;
+  blockHash: Hex | null;
+  /** Index of the GuardedTransferExecuted log in its block (the evidence locator). */
+  logIndex: number | null;
+  mandateVersion: bigint | null;
 }
 
 export type GuardedTransferOutcome =
-  | { status: "executed"; receipt: ChainReceipt }
-  /** The guard (or the token behind it) would revert: the decision becomes BLOCKED R10. */
-  | { status: "rejected"; reason: string };
+  | ({ status: "executed" } & GuardedExecution)
+  /** The guard (or the token behind it) would revert, or the guard is not configured: BLOCKED R10. Nothing was broadcast. */
+  | { status: "rejected"; reason: string }
+  /** Broadcast, receipt not seen within the timeout; reconciliation settles it from the stored hash. */
+  | { status: "pending"; receipt: ChainReceipt }
+  /** Mined but reverted (a race after the simulation): execution FAILED, nothing moved. */
+  | { status: "reverted"; receipt: ChainReceipt; reason: string };
 
 const GUARDED_TRANSFER_TYPES = {
   GuardedTransfer: [
@@ -660,31 +830,44 @@ const GUARDED_TRANSFER_TYPES = {
     { name: "actionHash", type: "bytes32" },
     { name: "proofHash", type: "bytes32" },
     { name: "complianceRef", type: "bytes32" },
+    { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint64" },
   ],
 } as const;
 
-const ATTESTATION_TTL_S = 300;
+/** How long a GuardedTransfer attestation stays valid. Reconciliation relies on it (see reconcile.ts). */
+export const ATTESTATION_TTL_S = 300;
 
 function isRevert(err: unknown): boolean {
   return err instanceof BaseError && err.walk((e) => e instanceof ContractFunctionRevertedError) instanceof ContractFunctionRevertedError;
 }
 
+/** The GuardedTransferExecuted log for `actionHash` among `logs`, if any. */
+function executionLog(logs: Log[], guard: Address, actionHash: Hex) {
+  const parsed = parseEventLogs({ abi: FukuSpendGuardAbi, eventName: "GuardedTransferExecuted", logs });
+  return parsed.find((l) => l.address.toLowerCase() === guard.toLowerCase() && l.args.actionHash.toLowerCase() === actionHash.toLowerCase()) ?? null;
+}
+
 /**
- * Move `amountUsdc` of an A-Token from the owner's funding wallet through FukuSpendGuard. The
- * compliance signer attests to exactly this transfer (EIP-712), against the policy hash that is on
- * chain right now; the guard then re-checks agent status, passport, mandate and daily cap, the
- * token applies its own compliance, and the guard records the decision (R6) itself.
+ * Move `amount` of an A-Token from the owner's funding wallet through FukuSpendGuard. The
+ * compliance signer attests to exactly this transfer (EIP-712) against the policy hash and the
+ * owner's mandate version that are on chain right now; the guard re-checks agent status, passport,
+ * mandate (token, cap, per-tx limit, expiry, payees), the token applies its own compliance, and
+ * the guard records the decision (R6) itself. The action hash is single-use on-chain.
  *
- * Unlike `send`, this never falls back to a mock receipt in live mode: a would-be revert comes back
- * as `rejected` (R10) and any other failure (RPC, signing, anchoring) throws a ChainWriteError.
+ * Never falls back to a mock receipt in live mode: a would-be revert is `rejected` (R10), a mined
+ * revert `reverted`, a receipt timeout `pending`, and anything else (RPC, signing, anchoring before
+ * broadcast) throws a ChainWriteError.
  */
 export async function executeGuardedTransfer(input: GuardedTransferInput): Promise<GuardedTransferOutcome> {
   if (chainMode() !== "live") {
     return {
       status: "executed",
-      receipt: mockReceipt("guardedTransfer", { agentId: input.agent.id, to: input.to, amountUsdc: input.amountUsdc }, "Mock guarded transfer (chain in mock mode; no tokens moved)"),
+      receipt: mockReceipt("guardedTransfer", { agentId: input.agent.id, to: input.to, amount: input.amount.toString() }, "Mock guarded transfer (chain in mock mode; no tokens moved)"),
+      blockHash: null,
+      logIndex: null,
+      mandateVersion: null,
     };
   }
   const guard = spendGuardAddress();
@@ -692,6 +875,7 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
   if (!guard || !signer) return { status: "rejected", reason: "GUARD_NOT_CONFIGURED" };
   const c = chainConfig();
   const ctx = liveContext();
+  const actionHash = hashString(input.actionId);
 
   return serialized(async (): Promise<GuardedTransferOutcome> => {
     let transfer;
@@ -699,22 +883,21 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
     try {
       await ensureAgentOnChain(ctx, input.agent, { syncPolicy: true });
       const agentId = idToBytes32(input.agent.id);
-      const [policyHash] = await ctx.publicClient.readContract({
-        address: ctx.addresses.permissions,
-        abi: PermissionRegistryAbi,
-        functionName: "policies",
-        args: [agentId],
-      });
+      const [[policyHash], mandate] = await Promise.all([
+        ctx.publicClient.readContract({ address: ctx.addresses.permissions, abi: PermissionRegistryAbi, functionName: "policies", args: [agentId] }),
+        ctx.publicClient.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "mandates", args: [agentId, input.from] }),
+      ]);
       transfer = {
         agentId,
         from: input.from,
         to: input.to,
         token: input.token,
-        amount: parseUnits(input.amountUsdc.toFixed(6), 6),
+        amount: input.amount,
         policyHash,
-        actionHash: hashString(input.actionId),
+        actionHash,
         proofHash: input.proofHash,
         complianceRef: input.complianceRef,
+        mandateVersion: mandate[5],
         nonce: BigInt(toHex(randomBytes(32))),
         deadline: BigInt(Math.floor(Date.now() / 1000) + ATTESTATION_TTL_S),
       };
@@ -744,26 +927,88 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
     }
 
     let hash: Hex;
-    let mined;
     try {
       hash = await ctx.walletClient.writeContract(request);
-      mined = await ctx.publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
     } catch (err) {
+      noteHealth(false, "guardedTransfer", describeChainError(err));
       throw new ChainWriteError("guardedTransfer", describeChainError(err), err);
     }
-    if (mined.status !== "success") return { status: "rejected", reason: `REVERTED_ON_CHAIN(${hash})` };
-    console.log(`[fuku-chain] guardedTransfer mined: tx ${hash} block ${mined.blockNumber}`);
-    return {
-      status: "executed",
-      receipt: {
-        txHash: hash,
-        block: Number(mined.blockNumber),
-        mode: "live",
-        explorerUrl: `${c.explorer}/tx/${hash}`,
-        note: ctx.notes.length ? `Anchored first: ${ctx.notes.join("; ")}` : undefined,
-      },
+    await input.onSubmitted?.(hash);
+    let mined;
+    try {
+      mined = await ctx.publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
+    } catch {
+      return { status: "pending", receipt: pendingReceipt(c, hash) };
+    }
+    const receipt: ChainReceipt = {
+      txHash: hash,
+      block: Number(mined.blockNumber),
+      mode: "live",
+      status: mined.status === "success" ? "confirmed" : "failed",
+      chainId: c.id,
+      explorerUrl: `${c.explorer}/tx/${hash}`,
+      note: ctx.notes.length ? `Anchored first: ${ctx.notes.join("; ")}` : undefined,
     };
+    if (mined.status !== "success") {
+      noteHealth(false, "guardedTransfer", "reverted on-chain");
+      return { status: "reverted", receipt, reason: `REVERTED_ON_CHAIN(${hash})` };
+    }
+    noteHealth(true, "guardedTransfer");
+    console.log(`[fuku-chain] guardedTransfer mined: tx ${hash} block ${mined.blockNumber}`);
+    const log = executionLog(mined.logs, guard, actionHash);
+    return { status: "executed", receipt, blockHash: mined.blockHash, logIndex: log?.logIndex ?? null, mandateVersion: transfer.mandateVersion };
   });
+}
+
+// --- Reconciliation reads ------------------------------------------------------------------------
+
+export type TxOutcome =
+  | { found: false }
+  | { found: true; success: boolean; block: number; blockHash: Hex; logIndex: number | null };
+
+/** What the chain says about a transaction now (null in mock mode). */
+export async function transactionOutcome(hash: Hex, actionHash?: Hex): Promise<TxOutcome | null> {
+  const client = chainReader();
+  if (!client) return null;
+  try {
+    const r = await client.getTransactionReceipt({ hash });
+    const guard = spendGuardAddress();
+    const log = guard && actionHash ? executionLog(r.logs, guard, actionHash) : null;
+    return { found: true, success: r.status === "success", block: Number(r.blockNumber), blockHash: r.blockHash, logIndex: log?.logIndex ?? null };
+  } catch {
+    return { found: false };
+  }
+}
+
+/** Whether the guard has already executed a transfer for this action (single-use action hash). */
+export async function guardActionExecuted(actionId: string): Promise<boolean | null> {
+  const client = chainReader();
+  const guard = spendGuardAddress();
+  if (!client || !guard) return null;
+  return client.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "actionExecuted", args: [hashString(actionId)] });
+}
+
+/** Find the GuardedTransferExecuted log for an action (for a transfer whose hash was never stored). */
+export async function findGuardExecution(agentId: string, actionId: string, fromBlock: bigint) {
+  const client = chainReader();
+  const guard = spendGuardAddress();
+  if (!client || !guard) return null;
+  const logs = await client.getContractEvents({
+    address: guard,
+    abi: FukuSpendGuardAbi,
+    eventName: "GuardedTransferExecuted",
+    args: { agentId: idToBytes32(agentId) },
+    fromBlock,
+    toBlock: "latest",
+  });
+  const actionHash = hashString(actionId).toLowerCase();
+  const hit = logs.find((l) => l.args.actionHash?.toLowerCase() === actionHash);
+  return hit ? { txHash: hit.transactionHash, block: Number(hit.blockNumber), blockHash: hit.blockHash, logIndex: hit.logIndex } : null;
+}
+
+export async function latestBlock(): Promise<bigint | null> {
+  const client = chainReader();
+  return client ? client.getBlockNumber() : null;
 }
 
 export interface MandateView {
@@ -771,6 +1016,10 @@ export interface MandateView {
   wallet: string;
   token: string;
   dailyCapUsdc: number;
+  maxPerTxUsdc: number | null;
+  validUntil: number | null;
+  restrictPayees: boolean;
+  version: number;
   spentTodayUsdc: number;
   active: boolean;
 }
@@ -781,7 +1030,7 @@ export async function readMandate(agentId: string, wallet: string): Promise<Mand
   const client = chainReader();
   if (!guard || !client || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) return null;
   const key = idToBytes32(agentId);
-  const [[token, dailyCap, active], spent] = await Promise.all([
+  const [[token, dailyCap, maxPerTx, validUntil, restrictPayees, version, active], spent] = await Promise.all([
     client.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "mandates", args: [key, wallet as Address] }),
     client.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "spentToday", args: [key, wallet as Address] }),
   ]);
@@ -790,6 +1039,10 @@ export async function readMandate(agentId: string, wallet: string): Promise<Mand
     wallet: wallet.toLowerCase(),
     token: token.toLowerCase(),
     dailyCapUsdc: Number(dailyCap) / 1e6,
+    maxPerTxUsdc: maxPerTx > BigInt(0) ? Number(maxPerTx) / 1e6 : null,
+    validUntil: validUntil > BigInt(0) ? Number(validUntil) : null,
+    restrictPayees,
+    version: Number(version),
     spentTodayUsdc: Number(spent) / 1e6,
     active,
   };

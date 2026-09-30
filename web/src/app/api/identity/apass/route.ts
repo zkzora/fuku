@@ -1,4 +1,5 @@
 import { json, withSession } from "@/lib/api";
+import { rateLimit } from "@/lib/rate-limit";
 import { refreshAPass, storedAPass } from "@/lib/services/cleanverse";
 
 /** The owner's last persisted A-Pass read. */
@@ -6,6 +7,7 @@ export const GET = withSession(async (_req, identity) => json(await storedAPass(
 
 /** Re-read the owner's A-Pass from the provider (Cleanverse or the simulator) and persist it. */
 export const POST = withSession(async (_req, identity) => {
+  rateLimit("read", identity.id);
   if (!identity.walletAddress) return json({ error: "Link a wallet first: the A-Pass is bound to a wallet." }, { status: 400 });
   try {
     return json(await refreshAPass(identity.walletAddress));

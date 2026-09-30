@@ -9,11 +9,14 @@ import { hashApiKey } from "./services/identity";
 import { computeScore } from "./engine/reputation";
 import { labelFor, policyHashDoc, type PolicyDoc } from "./engine/policy";
 import { hashJson } from "./ids";
-import { DEMO_RECIPIENTS, demoOwnerWallet } from "./cleanverse/demo";
+import { privateKeyToAccount } from "viem/accounts";
+import { DEMO_RECIPIENTS, demoOwnerKey, demoOwnerWallet } from "./cleanverse/demo";
+import { signWalletBinding } from "./wallet-binding";
 import { cleanverseChain } from "./cleanverse/mode";
+import { DEMO_API_KEY } from "./demo-mode";
 
 export const DEMO_IDENTITY_ID = "fuku:id:0x3e91c4d0a71f4b2c9e8d5a6f0c1b2d3e4f5ab7a4";
-export const DEMO_API_KEY = "fk_live_demo_ava_chen_2026";
+export { DEMO_API_KEY };
 
 const TRADING = "fuku:agent:0x7a3f19c0b4d2e6f8a1c3e5b7d9f0a2c4e6b89c21";
 const RESEARCH = "fuku:agent:0x2b8e4c6d1f3a5b7c9d0e2f4a6b8c0d1e3f5a41d0";
@@ -33,8 +36,17 @@ const todayAt = (hour: number, minute: number) => daysAgo(0, hour, minute);
 
 export async function seedDemo(db: PrismaClient) {
   await db.identity.deleteMany({ where: { id: DEMO_IDENTITY_ID } });
-  // Ava's wallet is the address of DEMO_OWNER_PRIVATE_KEY when set (the Cleanverse demo owner).
+  // Ava's wallet is the address of DEMO_OWNER_PRIVATE_KEY when set (the Cleanverse demo owner),
+  // otherwise of a public demo key. Either way the seed proves control with a signed binding.
   const ownerWallet = demoOwnerWallet();
+  const issuedAt = new Date();
+  const binding = await signWalletBinding(privateKeyToAccount(demoOwnerKey().key), {
+    identityId: DEMO_IDENTITY_ID,
+    nonce: "demo-seed",
+    chainId: Number(process.env.FUKU_CHAIN_ID ?? 10143),
+    issuedAt: issuedAt.toISOString(),
+    expiresAt: new Date(issuedAt.getTime() + 5 * 60_000).toISOString(),
+  });
 
   const identity = await db.identity.create({
     data: {
@@ -43,9 +55,14 @@ export async function seedDemo(db: PrismaClient) {
       humanVerified: true,
       authMethod: "passkey",
       walletAddress: ownerWallet,
+      walletVerifiedBy: "signature",
+      walletVerifiedAt: issuedAt,
+      walletProof: JSON.stringify(binding),
       proofHash: h("proof:" + DEMO_IDENTITY_ID),
+      // Seeded history uses placeholder hashes, never real transactions: marked mock so every view says so.
       proofTxHash: "0x91af3c2e7d5b4a6f8c0e1d3b5a7f9c2e4d6b8a0f1c3e5d7b9a2f4c6e8d0b2e07",
       proofBlock: 18_204_331,
+      proofMode: "mock",
       createdAt: daysAgo(8),
       connectedApps: {
         create: [
@@ -116,6 +133,7 @@ export async function seedDemo(db: PrismaClient) {
       capabilities: JSON.stringify(["swap", "read_balances", "price_feeds"]),
       description: "Executes swaps on Monad DEX within a daily USDC budget.",
       registeredTx: h("tx:register:" + TRADING),
+      registeredMode: "mock",
       createdAt: daysAgo(7),
       policy: {
         create: {
@@ -125,6 +143,7 @@ export async function seedDemo(db: PrismaClient) {
           version: 2,
           active: true,
           txHash: h("tx:policy:" + TRADING),
+          anchorMode: "mock",
           policyHash: keccak256(stringToHex(JSON.stringify(tradingPolicy))),
         },
       },
@@ -146,6 +165,7 @@ export async function seedDemo(db: PrismaClient) {
       capabilities: JSON.stringify(["read_vault", "web_search", "summarize"]),
       description: "Reads the knowledge vault and drafts research summaries into Notion.",
       registeredTx: h("tx:register:" + RESEARCH),
+      registeredMode: "mock",
       createdAt: daysAgo(6),
       policy: {
         create: {
@@ -155,6 +175,7 @@ export async function seedDemo(db: PrismaClient) {
           version: 1,
           active: true,
           txHash: h("tx:policy:" + RESEARCH),
+          anchorMode: "mock",
           policyHash: keccak256(stringToHex(JSON.stringify(researchPolicy))),
         },
       },
@@ -171,6 +192,7 @@ export async function seedDemo(db: PrismaClient) {
       capabilities: JSON.stringify(["calendar", "email_draft"]),
       description: "Schedules meetings and drafts follow-up emails.",
       registeredTx: h("tx:register:" + OPS),
+      registeredMode: "mock",
       createdAt: daysAgo(1, 17, 5),
     },
   });
@@ -185,6 +207,7 @@ export async function seedDemo(db: PrismaClient) {
       capabilities: JSON.stringify(["swap", "read_balances"]),
       description: "Proposes rebalancing swaps toward the target allocation.",
       registeredTx: h("tx:register:" + REBALANCER),
+      registeredMode: "mock",
       createdAt: todayAt(7, 30),
     },
   });
@@ -205,6 +228,7 @@ export async function seedDemo(db: PrismaClient) {
       capabilities: JSON.stringify(["transfer", "read_balances"]),
       description: "Pays verified suppliers in Cleanverse aUSDC from Ava's A-Pass wallet, up to 1,000 a day.",
       registeredTx: h("tx:register:" + PAYMENTS_AGENT_ID),
+      registeredMode: "mock",
       createdAt: daysAgo(2),
       policy: {
         create: {
@@ -215,6 +239,7 @@ export async function seedDemo(db: PrismaClient) {
           version: 1,
           active: true,
           txHash: h("tx:policy:" + PAYMENTS_AGENT_ID),
+          anchorMode: "mock",
           policyHash: hashJson(policyHashDoc(paymentsPolicy)),
         },
       },
@@ -299,8 +324,14 @@ export async function seedDemo(db: PrismaClient) {
 
   for (const a of acts) {
     const proofHash = keccak256(stringToHex(JSON.stringify({ ...a, at: a.at.toISOString() })));
-    await db.agentAction.create({
+    const row = await db.agentAction.create({
       data: {
+        // Historical decisions: none of these actions was executed by Fuku, and the hashes are placeholders.
+        status: a.decision === "ALLOWED" ? "AUTHORIZED" : "DENIED",
+        receiptMode: "mock",
+        anchorStatus: "mock",
+        amountMicros: a.amountUsdc !== undefined ? BigInt(Math.round(a.amountUsdc * 1e6)) : null,
+        policyVersion: 1,
         agentId: a.agentId,
         identityId: identity.id,
         action: a.action,
@@ -322,6 +353,9 @@ export async function seedDemo(db: PrismaClient) {
     await db.reputationEvent.create({
       data: {
         agentId: a.agentId,
+        actionId: row.id,
+        // Legacy evidence (fuku-score/1 counted allowed decisions as successes); kept so the seeded
+        // history scores as it always has. New allowed decisions without execution earn nothing.
         kind: a.decision === "ALLOWED" ? "success" : "violation",
         delta: a.decision === "ALLOWED" ? 1 : -4,
         note: a.decision === "ALLOWED" ? `Allowed: ${labelFor(a.action)}` : `Blocked: ${labelFor(a.action)} (${a.ruleId})`,
@@ -334,7 +368,7 @@ export async function seedDemo(db: PrismaClient) {
     await db.reputationEvent.createMany({
       data: [
         { agentId, kind: "registration", delta: 40, note: "Agent registered in the Fuku registry", createdAt: agent.createdAt },
-        { agentId, kind: "human_verified", delta: 20, note: "Owner is a verified human", createdAt: agent.createdAt },
+        { agentId, kind: "human_verified", delta: 10, note: "Owner completed a passkey ceremony (demo record)", createdAt: agent.createdAt },
       ],
     });
   }
@@ -344,7 +378,9 @@ export async function seedDemo(db: PrismaClient) {
     const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, reputationEvents: true } });
     const ev = agent.reputationEvents;
     const score = computeScore({
-      humanVerified: true,
+      passkeyVerified: true,
+      // Ava's wallet is bound above and her simulator A-Pass fixture is active (seeded below).
+      apassEligible: true,
       hasActivePolicy: Boolean(agent.policy?.active),
       successes: ev.filter((e) => e.kind === "success").length,
       violations: ev.filter((e) => e.kind === "violation").length,

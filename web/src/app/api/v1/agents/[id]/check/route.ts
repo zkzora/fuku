@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { json, withApiKey } from "@/lib/api";
+import { rateLimit } from "@/lib/rate-limit";
 import { assessAction, complianceView } from "@/lib/services/actions";
+import { canActFor } from "@/lib/services/authz";
 
 type P = { id: string };
 
@@ -14,20 +16,26 @@ const body = z.object({
 });
 
 /**
- * SDK: fuku.checkPermission() — dry-run evaluation. Nothing is recorded, anchored or signed, so an
- * application can ask "would this be allowed?" before handing work to an agent. For a transfer on
- * an A-Token passport the Cleanverse evidence is gathered and returned as well.
+ * SDK: fuku.checkPermission() — dry run. Nothing is recorded, anchored, reserved or signed, so an
+ * application can ask "would this be allowed right now?" before handing work to an agent. A preview
+ * is not an execution. For a transfer on an A-Token passport the Cleanverse legs are returned; the
+ * underlying evidence (owner wallet, record ids, tiers) only to callers who may execute for the
+ * agent (the owner or a delegate).
  */
-export const POST = withApiKey<P>(async (req, _caller, { id }) => {
+export const POST = withApiKey<P>(async (req, caller, { id }) => {
+  rateLimit("read", caller.id);
   const input = body.parse(await req.json());
   const agent = await db.agent.findUnique({ where: { id }, include: { policy: true, identity: true } });
-  if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+  if (!agent) return json({ error: "Agent not found", code: "not_found" }, { status: 404 });
   const { evaluation, compliance } = await assessAction(agent, input);
+  const privileged = (await canActFor(caller.id, agent.identityId, "agents:execute")).ok;
+  const view = complianceView(compliance);
   return json({
     agentId: agent.id,
+    preview: true,
     allowed: evaluation.decision === "ALLOWED",
     ...evaluation,
     subCode: evaluation.subCode ?? null,
-    compliance: complianceView(compliance),
+    compliance: view && !privileged ? { ...view, evidence: null } : view,
   });
 });

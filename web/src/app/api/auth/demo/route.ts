@@ -4,6 +4,8 @@ import { json, withErrors } from "@/lib/api";
 import { createSession } from "@/lib/session";
 import { DEMO_IDENTITY_ID, PAYMENTS_AGENT_ID, seedDemo } from "@/lib/demo-seed";
 import { setAgentStatusOnChain, toAgentRef } from "@/lib/chain";
+import { demoEnabled, safeNextPath } from "@/lib/demo-mode";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
 
 /**
  * A reset re-seeds the Payments Agent as active, but an earlier kill switch may have left it
@@ -30,17 +32,25 @@ async function signInDemo(reset: boolean) {
   return { identity: await db.identity.findUniqueOrThrow({ where: { id: DEMO_IDENTITY_ID } }), reseeded: !existing || reset };
 }
 
-/** Signs in as the seeded demo identity (Ava Chen); re-seeds it when missing or when ?reset=1. */
+const DISABLED = { error: "The demo sign-in is disabled on this deployment.", code: "demo_disabled" };
+
+/**
+ * Signs in as the seeded demo identity (Ava Chen); re-seeds it when missing or when ?reset=1.
+ * Off in production unless FUKU_DEMO_ENABLED=true (see lib/demo-mode.ts).
+ */
 export const POST = withErrors(async (req) => {
+  if (!demoEnabled()) return json(DISABLED, { status: 404 });
+  rateLimit("auth", clientIp(req));
   const reset = new URL(req.url).searchParams.get("reset") === "1";
   return json(await signInDemo(reset));
 });
 
-/** GET /api/auth/demo?next=/dashboard — one-link demo entry: sign in and redirect. */
+/** GET /api/auth/demo?next=/dashboard — one-link demo entry: sign in and redirect (same-site paths only). */
 export const GET = withErrors(async (req) => {
+  if (!demoEnabled()) return json(DISABLED, { status: 404 });
+  rateLimit("auth", clientIp(req));
   const url = new URL(req.url);
   const reset = url.searchParams.get("reset") === "1";
-  const next = url.searchParams.get("next") ?? "/dashboard";
   await signInDemo(reset);
-  return NextResponse.redirect(new URL(next.startsWith("/") ? next : "/dashboard", url.origin));
+  return NextResponse.redirect(new URL(safeNextPath(url.searchParams.get("next")), url.origin));
 });

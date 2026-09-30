@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { json, withSession } from "@/lib/api";
+import { rateLimit } from "@/lib/rate-limit";
 import { listAgents, registerAgent } from "@/lib/services/agents";
 
 const body = z.object({
@@ -14,6 +15,7 @@ export const GET = withSession(async (_req, identity) => {
 });
 
 export const POST = withSession(async (req, identity) => {
+  rateLimit("create", identity.id);
   const input = body.parse(await req.json());
   const result = await registerAgent(identity, input);
   return json(result, { status: 201 });

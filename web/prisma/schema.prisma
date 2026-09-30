@@ -21,6 +21,14 @@ model Identity {
   proofHash     String?                 // keccak256 ownership proof
   proofTxHash   String?
   proofBlock    Int?
+  proofMode     String?                 // anchored | mock | pending | failed: how the ownership proof was anchored
+  // Wallet binding evidence. walletAddress alone is a declaration; these say how control was proven.
+  walletVerifiedBy String?              // dynamic (verified JWT credential) | signature (EIP-191/1271) | null
+  walletVerifiedAt DateTime?
+  walletProof      String?              // JSON: the signed message and signature, or the Dynamic user id
+  // Set when an API caller created this identity for one of its users (an explicit, recorded
+  // management grant); such identities start unverified.
+  managedById   String?
   createdAt     DateTime @default(now())
 
   passkeys       Passkey[]
@@ -31,6 +39,24 @@ model Identity {
   credentials    Credential[]
   apiKeys        ApiKey[]
   actions        AgentAction[]
+  delegationsGiven    Delegation[] @relation("DelegationOwner")
+  delegationsReceived Delegation[] @relation("DelegationDelegate")
+}
+
+/// An owner lets another identity (typically an application's API identity) act for them.
+/// Scopes: agents:register, agents:manage (passport, status, revoke), agents:execute.
+model Delegation {
+  id         String    @id @default(cuid())
+  ownerId    String
+  delegateId String
+  scopes     String                    // JSON string[]
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  owner      Identity  @relation("DelegationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  delegate   Identity  @relation("DelegationDelegate", fields: [delegateId], references: [id], onDelete: Cascade)
+
+  @@index([delegateId, ownerId])
 }
 
 model Passkey {
@@ -49,7 +75,7 @@ model Passkey {
 model Challenge {
   id         String   @id @default(cuid())
   challenge  String
-  kind       String                    // register | authenticate
+  kind       String                    // register | authenticate | wallet
   identityId String?
   expiresAt  DateTime
 }
@@ -64,6 +90,7 @@ model Agent {
   description    String?
   trustScore     Int?
   registeredTx   String?
+  registeredMode String?                     // anchored | mock | pending | failed
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -71,6 +98,7 @@ model Agent {
   policy           Policy?
   actions          AgentAction[]
   reputationEvents ReputationEvent[]
+  budgetWindows    BudgetWindow[]
 }
 
 model Policy {
@@ -83,6 +111,7 @@ model Policy {
   version   Int      @default(1)
   active    Boolean  @default(true)
   txHash    String?
+  anchorMode String?                  // anchored | mock | pending | failed
   policyHash String?
   updatedAt DateTime @updatedAt
   agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -109,17 +138,60 @@ model AgentAction {
   complianceRef  String?              // keccak256 of the canonical evidence JSON
   transferTxHash String?              // FukuSpendGuard.execute transaction
   travelRuleRef  String?              // hash of the Travel Rule record
+  // Execution lifecycle, separate from the policy decision (see docs/LIFECYCLE.md):
+  // RECEIVED -> DENIED | AUTHORIZED; AUTHORIZED -> SUBMITTED -> CONFIRMED | FAILED | PENDING;
+  // AUTHORIZED -> SIMULATED (mock chain) | FAILED (not sent). Null on rows written before it existed.
+  status         String?
+  amountMicros   BigInt?              // authoritative amount in 6-decimal base units
+  policyVersion  Int?
+  idempotencyKey String?
+  requestHash    String?              // hash of the request body bound to the idempotency key
+  resultJson     String?              // stored response, replayed for a repeated idempotency key
+  anchorStatus   String?              // decision anchoring: anchored | mock | failed | pending
+  receiptMode    String?              // live | mock
+  chainId        Int?
+  blockNumber    Int?
+  blockHash      String?
+  logIndex       Int?                 // GuardedTransferExecuted log index within the tx
+  errorClass     String?              // guard_revert | rpc | timeout | signing | anchor
+  errorDetail    String?
+  submittedAt    DateTime?
+  settledAt      DateTime?
+  lastCheckedAt  DateTime?
   createdAt   DateTime @default(now())
   agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
   identity    Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, idempotencyKey])
+  @@index([status])
+}
+
+/// Authoritative off-chain spend per agent, action and UTC day, reserved atomically before an
+/// allowed value action and released when execution fails. Key: agentId:action:YYYY-MM-DD.
+model BudgetWindow {
+  id          String   @id
+  agentId     String
+  action      String
+  day         String
+  spentMicros BigInt   @default(0)
+  updatedAt   DateTime @updatedAt
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+}
+
+/// Cross-process lease for the single on-chain signer (nonce ordering across server instances).
+model ChainLock {
+  id        String   @id
+  holder    String
+  expiresAt DateTime
 }
 
 model ReputationEvent {
   id        String   @id @default(cuid())
   agentId   String
-  kind      String                      // registration | human_verified | success | violation | security
+  kind      String                      // registration | human_verified | success | violation | security | neutral
   delta     Int
   note      String
+  actionId  String?  @unique            // one reputation event per action, at most
   createdAt DateTime @default(now())
   agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 }

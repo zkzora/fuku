@@ -58,6 +58,7 @@ export async function complianceFor(input: {
   assetSymbol: string | null | undefined;
   passportAssets: string[];
   ownerWallet: string | null | undefined;
+  ownerWalletVerified: boolean;
   counterparty: string | null | undefined;
 }): Promise<ComplianceResult> {
   const rt = cleanverseRuntime();
@@ -247,4 +248,14 @@ function tracked(p: LiveCleanverseProvider): CleanverseProvider {
     resolveAsset: wrap(p.resolveAsset.bind(p)),
     travelRule: wrap(p.travelRule.bind(p)),
   };
+}
+
+/**
+ * Identity signal for the trust score: the owner's wallet is verified (Dynamic or a signed binding)
+ * and its last persisted A-Pass read in the current mode is active and unexpired.
+ */
+export async function apassEligibleFor(identity: { walletAddress: string | null; walletVerifiedBy: string | null }): Promise<boolean> {
+  if (!identity.walletAddress || !identity.walletVerifiedBy) return false;
+  const v = await storedAPass(identity.walletAddress);
+  return Boolean(v.found && v.pass && v.pass.status === 1 && !v.pass.expired);
 }

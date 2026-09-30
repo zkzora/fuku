@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { isAddress } from "viem";
 import { CleanverseClient, CleanverseError, cleanverseConfigFromEnv } from "../src/lib/cleanverse/client";
 import { classifyVerify } from "../src/lib/cleanverse/codes";
-import { demoOwnerWallet, PLACEHOLDER_OWNER_WALLET } from "../src/lib/cleanverse/demo";
+import { demoOwnerKey, demoOwnerWallet } from "../src/lib/cleanverse/demo";
 import { cleanverseChain } from "../src/lib/cleanverse/mode";
 import { LiveCleanverseProvider } from "../src/lib/cleanverse/provider";
 
@@ -59,7 +59,8 @@ async function main() {
     process.exit(1);
   }
   console.log(`Cleanverse check against ${config.baseUrl} · chain "${chain}" · api-id ${config.apiId.slice(0, 4)}…`);
-  console.log(`Wallet under test: ${wallet}${wallet === PLACEHOLDER_OWNER_WALLET ? " (placeholder: set DEMO_OWNER_PRIVATE_KEY or pass --wallet)" : ""}`);
+  const fallback = !arg("wallet") && demoOwnerKey().derived;
+  console.log(`Wallet under test: ${wallet}${fallback ? " (public demo fallback: set DEMO_OWNER_PRIVATE_KEY or pass --wallet)" : ""}`);
 
   const client = new CleanverseClient(config);
   const provider = new LiveCleanverseProvider(client, chain, null);

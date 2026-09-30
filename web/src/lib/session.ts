@@ -3,15 +3,27 @@ import { cookies } from "next/headers";
 import { db } from "./db";
 
 const COOKIE = "fuku_session";
-const secret = () =>
-  new TextEncoder().encode(process.env.FUKU_SESSION_SECRET ?? "fuku-dev-secret");
+const DEV_SECRET = "fuku-dev-secret";
+
+/**
+ * HS256 key for session JWTs. Development falls back to a fixed secret; production refuses to
+ * sign or verify sessions unless FUKU_SESSION_SECRET is a random string of at least 32 characters,
+ * because anyone who knows the fallback could forge a session for any identity id.
+ */
+export function sessionSecret(env: Record<string, string | undefined> = process.env): Uint8Array {
+  const raw = env.FUKU_SESSION_SECRET?.trim();
+  if (env.NODE_ENV === "production" && (!raw || raw.length < 32 || raw === DEV_SECRET || raw.startsWith("change-me"))) {
+    throw new Error("FUKU_SESSION_SECRET must be set to a random string of at least 32 characters in production");
+  }
+  return new TextEncoder().encode(raw || DEV_SECRET);
+}
 
 export async function createSession(identityId: string) {
   const token = await new SignJWT({ sub: identityId })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("7d")
-    .sign(secret());
+    .sign(sessionSecret());
   const store = await cookies();
   store.set(COOKIE, token, {
     httpOnly: true,
@@ -31,8 +43,9 @@ export async function getSessionIdentityId(): Promise<string | null> {
   const store = await cookies();
   const token = store.get(COOKIE)?.value;
   if (!token) return null;
+  const key = sessionSecret();
   try {
-    const { payload } = await jwtVerify(token, secret());
+    const { payload } = await jwtVerify(token, key, { algorithms: ["HS256"] });
     return typeof payload.sub === "string" ? payload.sub : null;
   } catch {
     return null;
@@ -46,8 +59,9 @@ export async function getCurrentIdentity() {
 }
 
 export class UnauthorizedError extends Error {
-  constructor() {
-    super("Unauthorized");
+  constructor(message = "Unauthorized") {
+    super(message);
+    this.name = "UnauthorizedError";
   }
 }
 

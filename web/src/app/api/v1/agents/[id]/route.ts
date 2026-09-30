@@ -1,9 +1,9 @@
 import { db } from "@/lib/db";
 import { json, withApiKey } from "@/lib/api";
-import { scoreFor, toAgentView } from "@/lib/services/agents";
+import { SCORED_EVENTS, scoreFor, toAgentView } from "@/lib/services/agents";
 import { chainStatus } from "@/lib/chain";
 import { idToBytes32 } from "@/lib/ids";
-import { storedAPass } from "@/lib/services/cleanverse";
+import { apassEligibleFor, storedAPass } from "@/lib/services/cleanverse";
 
 type P = { id: string };
 
@@ -15,10 +15,10 @@ type P = { id: string };
 export const GET = withApiKey<P>(async (_req, _caller, { id }) => {
   const agent = await db.agent.findUnique({
     where: { id },
-    include: { policy: true, identity: true, reputationEvents: { select: { kind: true } } },
+    include: { policy: true, identity: true, reputationEvents: SCORED_EVENTS },
   });
   if (!agent) return json({ verified: false, error: "Agent not found" }, { status: 404 });
-  const score = scoreFor(agent, agent.identity, agent.reputationEvents);
+  const score = scoreFor(agent, agent.identity, agent.reputationEvents, { apassEligible: await apassEligibleFor(agent.identity) });
   const view = toAgentView({ ...agent, trustScore: score.score });
   const apass = await storedAPass(agent.identity.walletAddress);
   return json({

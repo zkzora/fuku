@@ -23,16 +23,21 @@ export const DEMO_RECIPIENTS: DemoRecipient[] = [
   { label: "unverified", name: "Unverified wallet", address: demoAddress("unverified"), apass: null, expect: "none" },
 ];
 
-/** Placeholder wallet for Ava when no DEMO_OWNER_PRIVATE_KEY is configured (no key exists for it). */
-export const PLACEHOLDER_OWNER_WALLET = "0x3e91c4d0a71f4b2c9e8d5a6f0c1b2d3e4f5ab7a4";
-
-/** Ava's wallet: the address of DEMO_OWNER_PRIVATE_KEY when set, otherwise the placeholder. */
-export function demoOwnerWallet(env: Record<string, string | undefined> = process.env): string {
+/**
+ * Ava's funding-wallet key: DEMO_OWNER_PRIVATE_KEY when set, otherwise a key derived from a public
+ * label. The derived key is public (anyone can recompute it), so it only serves mock-chain demos,
+ * where it lets the seed sign a real wallet-binding proof. Never fund its address.
+ */
+export function demoOwnerKey(env: Record<string, string | undefined> = process.env): { key: Hex; derived: boolean } {
   const raw = env.DEMO_OWNER_PRIVATE_KEY?.trim();
-  if (!raw) return PLACEHOLDER_OWNER_WALLET;
-  const key = (raw.startsWith("0x") ? raw : `0x${raw}`) as Hex;
-  if (!isHex(key) || key.length !== 66) return PLACEHOLDER_OWNER_WALLET;
-  return privateKeyToAddress(key).toLowerCase();
+  const key = raw ? ((raw.startsWith("0x") ? raw : `0x${raw}`) as Hex) : null;
+  if (key && isHex(key) && key.length === 66) return { key, derived: false };
+  return { key: demoKey("owner:ava-chen"), derived: true };
+}
+
+/** Ava's wallet: the address of demoOwnerKey(). */
+export function demoOwnerWallet(env: Record<string, string | undefined> = process.env): string {
+  return privateKeyToAddress(demoOwnerKey(env).key).toLowerCase();
 }
 
 /** The A-Token symbol A-Token passports list; the simulator's own symbol is aUSDC-SIM. */

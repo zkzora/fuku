@@ -102,20 +102,43 @@ export function ActionResultDialog({
                   <Mono className="break-all text-ink">{result.proofHash}</Mono>
                 </div>
                 <div>
-                  <div className="text-[12px] text-ink-3">Monad {result.receipt.mode === "live" ? "transaction" : "receipt (mock)"}</div>
-                  <a href={result.receipt.explorerUrl} target="_blank" rel="noreferrer" className="mono text-[12.5px] text-violet hover:underline">
-                    {shortHex(result.receipt.txHash, 10, 6)}
-                  </a>
-                  <div className="text-[12px] text-ink-3">block {result.receipt.block.toLocaleString("en-US")}</div>
+                  <div className="text-[12px] text-ink-3">Execution</div>
+                  <Pill tone={STATUS_TONE[result.status]} className="normal-case tracking-normal">
+                    {STATUS_LABEL[result.status]}
+                  </Pill>
+                </div>
+                <div>
+                  <div className="text-[12px] text-ink-3">
+                    Monad{" "}
+                    {result.receipt.status === "confirmed"
+                      ? "transaction"
+                      : result.receipt.status === "simulated"
+                        ? "receipt (mock, no transaction)"
+                        : result.receipt.status === "pending"
+                          ? "transaction (pending)"
+                          : "anchor (failed, will retry)"}
+                  </div>
+                  {result.receipt.txHash ? (
+                    <TxLink hash={result.receipt.txHash} url={result.receipt.explorerUrl} />
+                  ) : (
+                    <div className="text-[12.5px] text-block">not anchored</div>
+                  )}
+                  {result.receipt.block !== null && <div className="text-[12px] text-ink-3">block {result.receipt.block.toLocaleString("en-US")}</div>}
                 </div>
                 {result.transfer && (
                   <div>
-                    <div className="text-[12px] text-ink-3">Token moved via FukuSpendGuard</div>
-                    <a href={result.transfer.explorerUrl} target="_blank" rel="noreferrer" className="mono text-[12.5px] text-violet hover:underline">
-                      {shortHex(result.transfer.txHash, 10, 6)}
-                    </a>
                     <div className="text-[12px] text-ink-3">
-                      {result.transfer.mode === "live" ? "same transaction records the decision (R6)" : "mock: no token moved"}
+                      {result.transfer.mode === "mock" ? "Guarded transfer (mock, nothing moved)" : "Token moved via FukuSpendGuard"}
+                    </div>
+                    {result.transfer.txHash && <TxLink hash={result.transfer.txHash} url={result.transfer.explorerUrl} />}
+                    <div className="text-[12px] text-ink-3">
+                      {result.transfer.mode === "live"
+                        ? result.transfer.status === "confirmed"
+                          ? `same transaction records the decision (R6)${result.transfer.logIndex !== null ? ` · log #${result.transfer.logIndex}` : ""}`
+                          : result.transfer.status === "pending"
+                            ? "broadcast; the receipt is pending"
+                            : "mined but reverted; nothing moved"
+                        : "mock: no token moved"}
                     </div>
                   </div>
                 )}
@@ -127,6 +150,35 @@ export function ActionResultDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+const STATUS_LABEL: Record<ActionResult["status"], string> = {
+  DENIED: "Denied: nothing executed",
+  AUTHORIZED: "Authorized (decision recorded; not executed by Fuku)",
+  SUBMITTED: "Submitted on-chain",
+  PENDING: "Pending on-chain",
+  CONFIRMED: "Executed and confirmed on-chain",
+  FAILED: "Failed: nothing moved",
+  SIMULATED: "Simulated (mock chain, nothing moved)",
+};
+const STATUS_TONE: Record<ActionResult["status"], "allow" | "block" | "warn" | "neutral" | "violet"> = {
+  DENIED: "block",
+  AUTHORIZED: "neutral",
+  SUBMITTED: "warn",
+  PENDING: "warn",
+  CONFIRMED: "allow",
+  FAILED: "block",
+  SIMULATED: "warn",
+};
+
+function TxLink({ hash, url }: { hash: string; url: string | null }) {
+  return url ? (
+    <a href={url} target="_blank" rel="noreferrer" className="mono block text-[12.5px] text-violet hover:underline">
+      {shortHex(hash, 10, 6)}
+    </a>
+  ) : (
+    <Mono className="block text-[12.5px] text-ink-2">{shortHex(hash, 10, 6)}</Mono>
   );
 }
 

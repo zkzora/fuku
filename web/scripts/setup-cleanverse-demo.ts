@@ -6,8 +6,9 @@
  *   1. issues simulator A-Passes to Ava (the demo owner), Nusantara Supplies and the frozen wallet;
  *   2. mints 10,000 aUSDC-SIM to Ava;
  *   3. tops up Ava's MON for gas from the deployer when it is low;
- *   4. has Ava approve FukuSpendGuard for 10,000 aUSDC-SIM and open a 1,000 aUSDC-SIM/day
- *      mandate for the Payments Agent.
+ *   4. has Ava approve FukuSpendGuard for 10,000 aUSDC-SIM, open a mandate for the Payments Agent
+ *      (1,000 aUSDC-SIM per UTC day, 500 per transfer, 30 days, approved payees only) and approve
+ *      Nusantara Supplies as the only payee.
  * Nothing here is issued by Cleanverse: these are Fuku's simulator contracts.
  *
  * Environment (read from web/.env, which `npm run wire:env` in contracts/ fills):
@@ -52,6 +53,8 @@ if (existsSync(envFile)) process.loadEnvFile(envFile);
 const MINT = parseUnits("10000", 6);
 const ALLOWANCE = parseUnits("10000", 6);
 const DAILY_CAP = parseUnits("1000", 6);
+const MAX_PER_TX = parseUnits("500", 6);
+const MANDATE_DAYS = 30;
 const ONE_YEAR_S = 365 * 24 * 3600;
 
 function fail(msg: string): never {
@@ -171,12 +174,36 @@ async function main() {
     console.log(`  = allowance ${formatUnits(allowance, 6)} aUSDC-SIM`);
   }
   const agentKey = idToBytes32(PAYMENTS_AGENT_ID);
-  const [token, cap, active] = await pub.readContract({ address: guardAddr, abi: FukuSpendGuardAbi, functionName: "mandates", args: [agentKey, owner.address] });
-  if (!active || token.toLowerCase() !== atokenAddr.toLowerCase() || cap !== DAILY_CAP) {
-    const hash = await asOwner.writeContract({ address: guardAddr, abi: FukuSpendGuardAbi, functionName: "openMandate", args: [agentKey, atokenAddr, DAILY_CAP] });
-    await mined("Ava opens a 1,000 aUSDC-SIM/day mandate for the Payments Agent", hash);
+  const [token, cap, maxPerTx, validUntil, restrictPayees, version, active] = await pub.readContract({
+    address: guardAddr,
+    abi: FukuSpendGuardAbi,
+    functionName: "mandates",
+    args: [agentKey, owner.address],
+  });
+  const nowSec = BigInt(Math.floor(Date.now() / 1000));
+  const fresh = validUntil === BigInt(0) || validUntil > nowSec + BigInt(24 * 3600);
+  if (!active || token.toLowerCase() !== atokenAddr.toLowerCase() || cap !== DAILY_CAP || maxPerTx !== MAX_PER_TX || !restrictPayees || !fresh) {
+    const until = nowSec + BigInt(MANDATE_DAYS * 24 * 3600);
+    const hash = await asOwner.writeContract({
+      address: guardAddr,
+      abi: FukuSpendGuardAbi,
+      functionName: "openMandate",
+      args: [agentKey, atokenAddr, DAILY_CAP, MAX_PER_TX, until, true],
+    });
+    await mined(`Ava opens a mandate for the Payments Agent: 1,000 aUSDC-SIM/day, 500 per transfer, approved payees only, ${MANDATE_DAYS} days`, hash);
   } else {
-    console.log(`  = mandate open: ${formatUnits(cap, 6)} aUSDC-SIM/day`);
+    console.log(`  = mandate v${version} open: ${formatUnits(cap, 6)}/day, ${formatUnits(maxPerTx, 6)} per transfer, payees restricted, until ${new Date(Number(validUntil) * 1000).toISOString()}`);
+  }
+
+  // Approved payees: the owner's own on-chain address book. Only Nusantara Supplies is approved, so
+  // even a compromised Fuku server key could not send Ava's aUSDC-SIM anywhere else.
+  const payee = DEMO_RECIPIENTS.find((r) => r.expect === "ok")!;
+  const approved = await pub.readContract({ address: guardAddr, abi: FukuSpendGuardAbi, functionName: "isPayee", args: [agentKey, owner.address, payee.address] });
+  if (!approved) {
+    const hash = await asOwner.writeContract({ address: guardAddr, abi: FukuSpendGuardAbi, functionName: "setPayee", args: [agentKey, payee.address, true] });
+    await mined(`Ava approves ${payee.name} as a payee`, hash);
+  } else {
+    console.log(`  = ${payee.name} is an approved payee`);
   }
 
   console.log("\nDone. Recipients:");

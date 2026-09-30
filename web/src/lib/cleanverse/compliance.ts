@@ -20,6 +20,12 @@ export interface GatherInput {
   assetSymbol: string | null | undefined;
   passportAssets: string[];
   ownerWallet: string | null | undefined;
+  /**
+   * The owner proved control of `ownerWallet` (verified Dynamic credential or a signed binding).
+   * A merely declared wallet fails R7 with CVI_NO_WALLET: its A-Pass would not be the owner's.
+   * Defaults to true for callers that verified the binding themselves.
+   */
+  ownerWalletVerified?: boolean;
   counterparty: string | null | undefined;
   nowSec?: number;
   /** Called with every A-Pass read (for persistence to CleanversePass). */
@@ -107,6 +113,8 @@ export async function gatherCompliance(input: GatherInput): Promise<ComplianceRe
     const wallet = input.ownerWallet;
     if (!wallet || !isAddress(wallet)) {
       ownerLeg = fail("CVI_NO_WALLET");
+    } else if (input.ownerWalletVerified === false) {
+      ownerLeg = fail("CVI_NO_WALLET", "the owner's wallet binding is not verified (sign a binding message or link it with Dynamic)");
     } else {
       const cacheKey = `${provider.backend}:${input.chain}:${wallet.toLowerCase()}`;
       const cached = ownerCache.get(cacheKey);

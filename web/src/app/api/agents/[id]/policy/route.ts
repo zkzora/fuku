@@ -1,4 +1,5 @@
 import { json, withSession } from "@/lib/api";
+import { rateLimit } from "@/lib/rate-limit";
 import { db } from "@/lib/db";
 import { revokeAgentPolicy, setAgentPolicy, toAgentView } from "@/lib/services/agents";
 
@@ -16,6 +17,7 @@ export const GET = withSession<P>(async (_req, identity, { id }) => {
 });
 
 export const PUT = withSession<P>(async (req, identity, { id }) => {
+  rateLimit("manage", identity.id);
   await ownedAgent(id, identity.id);
   const result = await setAgentPolicy(id, await req.json());
   const agent = await ownedAgent(id, identity.id);
@@ -23,6 +25,7 @@ export const PUT = withSession<P>(async (req, identity, { id }) => {
 });
 
 export const DELETE = withSession<P>(async (_req, identity, { id }) => {
+  rateLimit("manage", identity.id);
   await ownedAgent(id, identity.id);
   const { score, chainSync } = await revokeAgentPolicy(id);
   return json({ ok: true, score: score.score, chainSync });

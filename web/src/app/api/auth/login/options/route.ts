@@ -1,14 +1,13 @@
 import { generateAuthenticationOptions } from "@simplewebauthn/server";
-import { db } from "@/lib/db";
 import { json, withErrors } from "@/lib/api";
-import { rpFromRequest } from "@/lib/webauthn";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
+import { rpFromRequest, storeChallenge } from "@/lib/webauthn";
 
 export const POST = withErrors(async (req) => {
+  rateLimit("auth", clientIp(req));
   const { rpID } = rpFromRequest(req);
   // Discoverable credentials: the authenticator picks the passkey, so no allowCredentials.
-  const options = await generateAuthenticationOptions({ rpID, userVerification: "preferred" });
-  const challenge = await db.challenge.create({
-    data: { challenge: options.challenge, kind: "authenticate", expiresAt: new Date(Date.now() + 5 * 60_000) },
-  });
+  const options = await generateAuthenticationOptions({ rpID, userVerification: "required" });
+  const challenge = await storeChallenge(options.challenge, "authenticate");
   return json({ challengeId: challenge.id, options });
 });

@@ -4,6 +4,7 @@ import { json, withErrors } from "@/lib/api";
 import { createSession, getCurrentIdentity } from "@/lib/session";
 import { createIdentity } from "@/lib/services/identity";
 import { DynamicAuthError, verifyDynamicToken } from "@/lib/dynamic-auth";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
 
 const body = z.object({
   token: z.string().min(20),
@@ -17,6 +18,7 @@ const body = z.object({
  * address and email come from the token, never from the request body.
  */
 export const POST = withErrors(async (req) => {
+  rateLimit("auth", clientIp(req));
   const input = body.parse(await req.json());
   let user;
   try {
@@ -30,7 +32,7 @@ export const POST = withErrors(async (req) => {
   }
 
   const owner = await db.identity.findFirst({
-    where: { OR: [{ dynamicUserId: user.userId }, { walletAddress: user.evmAddress }] },
+    where: { OR: [{ dynamicUserId: user.userId }, { walletAddress: user.evmAddress.toLowerCase() }] },
   });
 
   if (input.link) {
@@ -41,7 +43,14 @@ export const POST = withErrors(async (req) => {
     }
     const identity = await db.identity.update({
       where: { id: current.id },
-      data: { walletAddress: user.evmAddress, dynamicUserId: user.userId, email: current.email ?? user.email },
+      data: {
+        walletAddress: user.evmAddress.toLowerCase(),
+        walletVerifiedBy: "dynamic",
+        walletVerifiedAt: new Date(),
+        walletProof: JSON.stringify({ dynamicUserId: user.userId }),
+        dynamicUserId: user.userId,
+        email: current.email ?? user.email,
+      },
     });
     return json({ identity, linked: true });
   }
@@ -55,13 +64,28 @@ export const POST = withErrors(async (req) => {
       displayName: user.displayName,
       authMethod: "dynamic",
       walletAddress: user.evmAddress,
+      walletVerifiedBy: "dynamic",
+      walletProof: JSON.stringify({ dynamicUserId: user.userId }),
       humanVerified: false,
     }));
     created = true;
   }
+  // The token's wallet is Dynamic-verified; a wallet already on the identity keeps its own evidence.
+  const adoptWallet = !identity.walletAddress || identity.walletAddress.toLowerCase() === user.evmAddress.toLowerCase();
   identity = await db.identity.update({
     where: { id: identity.id },
-    data: { dynamicUserId: user.userId, email: identity.email ?? user.email, walletAddress: identity.walletAddress ?? user.evmAddress },
+    data: {
+      dynamicUserId: user.userId,
+      email: identity.email ?? user.email,
+      ...(adoptWallet
+        ? {
+            walletAddress: user.evmAddress.toLowerCase(),
+            walletVerifiedBy: "dynamic",
+            walletVerifiedAt: identity.walletVerifiedAt ?? new Date(),
+            walletProof: JSON.stringify({ dynamicUserId: user.userId }),
+          }
+        : {}),
+    },
   });
   await createSession(identity.id);
   return json({ identity, created });
