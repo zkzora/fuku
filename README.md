@@ -40,6 +40,40 @@ Web tests (`cd web && npm test`, node:test via tsx) cover the permission engine,
 
 Without a deployment the web app runs in **mock settlement** mode: every decision is still hashed and gets a deterministic receipt, so the full flow works offline. To anchor real transactions, see the next section.
 
+## Deployments (Monad testnet, chain 10143)
+
+All seven contracts are live on Monad testnet. Their sources are verified on Sourcify (exact match), which MonadVision reads. The addresses are in [`contracts/deployments/monadTestnet.json`](contracts/deployments/monadTestnet.json). Every transaction of the 2026-09-30 run is listed in [`docs/CLEANVERSE.md`](docs/CLEANVERSE.md#on-monad-testnet-2026-09-30).
+
+| Contract | Address | Deployed |
+| --- | --- | --- |
+| HumanIdentityRegistry | [`0x9fe852bddcb71b765af9ca1b8390d9ccfe024a2b`](https://testnet.monadvision.com/address/0x9fe852bddcb71b765af9ca1b8390d9ccfe024a2b) | 2026-09-24 |
+| AgentRegistry | [`0x41a176a946ab83cd26cfad4f07e6afdf61475e29`](https://testnet.monadvision.com/address/0x41a176a946ab83cd26cfad4f07e6afdf61475e29) | 2026-09-24 |
+| PermissionRegistry | [`0xfe5caf3a4521ead0c8dce0f851461cdc072746cc`](https://testnet.monadvision.com/address/0xfe5caf3a4521ead0c8dce0f851461cdc072746cc) | 2026-09-24 |
+| ReputationRegistry | [`0x33a216af5621adab5a10aef7f538db4ff3d4efad`](https://testnet.monadvision.com/address/0x33a216af5621adab5a10aef7f538db4ff3d4efad) | 2026-09-24 |
+| FukuSpendGuard | [`0x3d5d3d38362fcb9ecc26250867cc3f30c99746dc`](https://testnet.monadvision.com/address/0x3d5d3d38362fcb9ecc26250867cc3f30c99746dc) | 2026-09-30 |
+| CleanverseAPassSim (Fuku's simulator, not Cleanverse) | [`0x0607ba109cf19e0ca3b8d6606a142b38c61fc579`](https://testnet.monadvision.com/address/0x0607ba109cf19e0ca3b8d6606a142b38c61fc579) | 2026-09-30 |
+| CleanverseATokenSim, aUSDC-SIM (Fuku's simulator, not Cleanverse) | [`0xb67038fc577315f0646fc4d1b84ee2d428878a14`](https://testnet.monadvision.com/address/0xb67038fc577315f0646fc4d1b84ee2d428878a14) | 2026-09-30 |
+
+Accounts:
+- The relayer [`0x248a9ACA0146b0112f102455fbc11B45338fD3DE`](https://testnet.monadvision.com/address/0x248a9ACA0146b0112f102455fbc11B45338fD3DE) owns the registries and is their enforcer and scorer.
+- FukuSpendGuard accepts attestations only from the compliance signer [`0xE50e45a4102B8d625b10793d1698A3d53810F62E`](https://testnet.monadvision.com/address/0xE50e45a4102B8d625b10793d1698A3d53810F62E).
+- Ava's custodial demo wallet is [`0x41Db346C3471818c47792eD5C57728923CE1DFFc`](https://testnet.monadvision.com/address/0x41Db346C3471818c47792eD5C57728923CE1DFFc).
+
+**ERC-8004.** The five seeded demo agents are registered on the canonical ERC-8004 Identity Registry on Monad testnet, [`0x8004A818BFB912233c491871b3d84c89A494BD9e`](https://testnet.monadvision.com/address/0x8004A818BFB912233c491871b3d84c89A494BD9e) (`getVersion()` 2.0.0).
+- Each agent NFT is owned by Ava's demo wallet.
+- Each `agentWallet` is the agent's own key, which Fuku holds sealed.
+- The agentURI is a `data:` URI holding the registration file. There is no public URL yet; `setAgentURI` can switch to one later.
+
+| Agent | Fuku agent id | ERC-8004 agent id | agentWallet |
+| --- | --- | --- | --- |
+| Trading Assistant | `fuku:agent:0xb6b1bec4676f0fa730a4a7f9316e33ce604729ac` | 1955 | `0x5e76F33C8F896946690Ed070195FE16120a53F1C` |
+| Research Agent | `fuku:agent:0xe778f6077fb9615564ee27c631065cec50b89151` | 1956 | `0xF1AF9865F69705aE67250A0148A68334601EdC21` |
+| Payments Agent | `fuku:agent:0x0e0acd52d5c78ee77274a6604717693214c34838` | 1957 | `0x526b436E4c069E3515b0517C26938ece0B93A96D` |
+| Ops Scheduler | `fuku:agent:0x45edacaef93036f9e9a0831b08db4212eacc8e88` | 1958 | `0x8B97339F86bCc34ecB5ECCC6d143c8A10EE5B594` |
+| Portfolio Rebalancer | `fuku:agent:0xc08cd9a25f55692b8476cd0893d669b542f3e969` | 1959 | `0xAfAA1fe0Ad9e85f0939641fAeC82761e78409B07` |
+
+These five are demo cohort `v2`. After a live climax, `npm run demo:cohort` registers a fresh cohort under new ids; this table stays the record of `v2`.
+
 ## Go live on Monad testnet
 
 You need exactly one thing: a private key holding some testnet MON. Then it is three commands from `contracts/`. Full detail, including what each script does, lives in [`contracts/README.md`](contracts/README.md#go-live-on-monad-testnet-chainid-10143).

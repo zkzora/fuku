@@ -242,7 +242,7 @@ Local runs on 2026-09-30:
 | `npm test` (root: web + sdk) | 82 web tests, 8 SDK tests, all passing |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
-| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `65/65 checks passed` on a fresh node |
+| Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `67/67 checks passed` on a fresh node, and again on the same node; 66/66 on Monad testnet (2026-09-30), where the reorg check cannot run |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
 | `cd web && npm run reconcile -- --anchor-seeded`, then `npm run verify-score`, on the local node after a demo reset | 40 transactions, then 5/5 demo agents verified (Trading Assistant 96 = 96 = 96, 15/15 records). After the withdraw climax: 92 = 92 = 92, 16/16. After the full smoke (which resets the demo), Trading Assistant still verifies |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 17 steps `ok`, exit 0 |
@@ -260,9 +260,15 @@ The production environment needs:
 - A shared database for several instances. SQLite is single-node.
 - Upgrade the rate limits to a shared store before scaling out.
 
-## 10. Testnet runbook (not executed; each step needs the owner's go-ahead)
+## 10. Testnet runbook (executed on 2026-09-30)
 
-Costs below are gas limit × 102 gwei (Monad charges the limit), measured on a local fork of Monad testnet that ran this exact sequence on 2026-09-30.
+Costs below are gas limit × 102 gwei (Monad charges the limit). They were measured on a local fork of Monad testnet that ran this exact sequence on 2026-09-30.
+
+The sequence then ran on Monad testnet the same day:
+- 116 transactions, none reverted, 1.83 MON of gas.
+- The anchoring cost 0.40 MON and the smoke 0.51 MON, both more than the fork predicted.
+- Every hash is in `docs/CLEANVERSE.md`, "On Monad testnet".
+- A newly funded wallet's first transaction can be refused for a few minutes ("Signer had insufficient balance"), so fund wallets ahead of their first transaction.
 
 1. `contracts/.env`: set `COMPLIANCE_SIGNER_ADDRESS` to a fresh key's address and `FUKU_COMPLIANCE_SIGNER_KEY` to that key.
 2. `cd contracts && npm run deploy:cleanverse:monad`. It sends two simulators, the guard and one enforcer grant, about 0.39 MON. The four registries are untouched.
