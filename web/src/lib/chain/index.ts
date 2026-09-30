@@ -8,7 +8,9 @@ import {
   isAddressEqual,
   isHex,
   keccak256,
+  parseUnits,
   stringToHex,
+  toHex,
   zeroAddress,
   type Abi,
   type Address,
@@ -18,10 +20,13 @@ import {
   type PublicClient,
   type WalletClient,
 } from "viem";
+import { randomBytes } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
 import { idToBytes32, hashJson, hashString } from "../ids";
+import { policyHashDoc } from "../engine/policy";
 import {
   AgentRegistryAbi,
+  FukuSpendGuardAbi,
   HumanIdentityRegistryAbi,
   PermissionRegistryAbi,
   ReputationRegistryAbi,
@@ -133,7 +138,7 @@ export function toAgentRef(
     name: string;
     version: string;
     capabilities: string | string[];
-    policy?: { allowed: string; blocked: string; scopeApps: string; version: number; active: boolean } | null;
+    policy?: { allowed: string; blocked: string; scopeApps: string; assets?: string | null; version: number; active: boolean } | null;
   },
   identity: { id: string; humanVerified: boolean; proofHash?: string | null },
 ): AgentRef {
@@ -141,11 +146,13 @@ export function toAgentRef(
   if (agent.policy) {
     try {
       policy = {
-        doc: {
+        // Same document (and key order) that setAgentPolicy hashes, so the anchored hash matches.
+        doc: policyHashDoc({
           allowed: JSON.parse(agent.policy.allowed),
           blocked: JSON.parse(agent.policy.blocked),
           scopeApps: JSON.parse(agent.policy.scopeApps),
-        },
+          assets: agent.policy.assets ? JSON.parse(agent.policy.assets) : [],
+        }),
         version: agent.policy.version,
         active: agent.policy.active,
       };
@@ -224,8 +231,34 @@ export function chainStatus() {
     rpc: c.rpc,
     explorer: c.explorer,
     contracts: addresses(),
+    spendGuard: spendGuardAddress(),
     signer: mode === "live" && key ? privateKeyToAccount(key).address : null,
   };
+}
+
+/** Read-only client for the settlement chain, or null in mock mode. */
+export function chainReader(): PublicClient | null {
+  if (chainMode() !== "live") return null;
+  const chain = settlementChain();
+  return createPublicClient({ chain, transport: http(chain.rpcUrls.default.http[0]), pollingInterval: POLLING_INTERVAL_MS });
+}
+
+function envAddress(name: string): Address | null {
+  const v = process.env[name]?.trim();
+  return v && /^0x[0-9a-fA-F]{40}$/.test(v) ? (v as Address) : null;
+}
+
+/** FukuSpendGuard address (FUKU_SPEND_GUARD), or null when not deployed / not wired. */
+export function spendGuardAddress(): Address | null {
+  return envAddress("FUKU_SPEND_GUARD");
+}
+
+/** The EIP-712 signer the guard trusts (FUKU_COMPLIANCE_SIGNER_KEY). Never the relayer by default. */
+function complianceSigner(): PrivateKeyAccount | null {
+  const raw = process.env.FUKU_COMPLIANCE_SIGNER_KEY?.trim();
+  if (!raw) return null;
+  const key = raw.startsWith("0x") ? raw : `0x${raw}`;
+  return isHex(key) && key.length === 66 ? privateKeyToAccount(key as Hex) : null;
 }
 
 let mockBlock = 18_204_331;
@@ -397,23 +430,27 @@ async function ensureAgentOnChain(ctx: LiveCtx, agent: AgentRef, opts: { syncPol
   if (opts.syncPolicy && agent.policy?.active) await ensurePolicyOnChain(ctx, agent);
 }
 
-/** Anchor the agent's current passport when the registry has no active policy for it. */
+/**
+ * Anchor the agent's current passport when the registry has no active policy for it, or when the
+ * anchored `policyHash` differs from the passport Fuku enforces (a stale passport).
+ */
 async function ensurePolicyOnChain(ctx: LiveCtx, agent: AgentRef): Promise<void> {
   if (!agent.policy?.active) return;
-  const active = await ctx.publicClient.readContract({
+  const expected = hashJson(agent.policy.doc);
+  const [onChainHash, , , active] = await ctx.publicClient.readContract({
     address: ctx.addresses.permissions,
     abi: PermissionRegistryAbi,
-    functionName: "hasActivePolicy",
+    functionName: "policies",
     args: [idToBytes32(agent.id)],
   });
-  if (active) return;
+  if (active && onChainHash.toLowerCase() === expected.toLowerCase()) return;
   await write(ctx, "setPolicy", {
     address: ctx.addresses.permissions,
     abi: PermissionRegistryAbi,
     functionName: "setPolicy",
-    args: [idToBytes32(agent.id), hashJson(agent.policy.doc), agent.policy.version, `fuku://agents/${agent.id}/policy`],
+    args: [idToBytes32(agent.id), expected, agent.policy.version, `fuku://agents/${agent.id}/policy`],
   });
-  ctx.notes.push(`passport v${agent.policy.version} for agent ${agent.id} anchored`);
+  ctx.notes.push(`passport v${agent.policy.version} for agent ${agent.id} ${active ? "re-anchored (hash changed)" : "anchored"}`);
 }
 
 /**
@@ -453,7 +490,81 @@ async function send(op: string, payload: unknown, run: (ctx: LiveCtx) => Promise
   }
 }
 
+/**
+ * Like `send`, but never falls back to a mock receipt in live mode: failures throw with the decoded
+ * reason. Used where silently pretending would be unsafe (kill switch, guarded transfers).
+ * `run` may return null when there is nothing to do on-chain.
+ */
+async function sendStrict(op: string, payload: unknown, run: (ctx: LiveCtx) => Promise<Mined | null>): Promise<ChainReceipt | null> {
+  if (chainMode() !== "live") return mockReceipt(op, payload);
+  const c = chainConfig();
+  const ctx = liveContext();
+  let mined: Mined | null;
+  try {
+    mined = await serialized(() => run(ctx));
+  } catch (err) {
+    throw new ChainWriteError(op, describeChainError(err), err);
+  }
+  if (!mined) return null;
+  return {
+    txHash: mined.hash,
+    block: Number(mined.block),
+    mode: "live",
+    explorerUrl: `${c.explorer}/tx/${mined.hash}`,
+    note: ctx.notes.length ? `Anchored first: ${ctx.notes.join("; ")}` : undefined,
+  };
+}
+
+export class ChainWriteError extends Error {
+  constructor(
+    readonly op: string,
+    readonly reason: string,
+    readonly cause?: unknown,
+  ) {
+    super(`${op} failed on-chain: ${reason}`);
+    this.name = "ChainWriteError";
+  }
+}
+
 // --- Public operations ---------------------------------------------------------------------
+
+/** Kill switch: revoke the passport on-chain. Returns null when nothing is active on-chain. */
+export function revokePolicyOnChain(agent: AgentRef) {
+  return sendStrict("revokePolicy", { agentId: agent.id }, async (ctx) => {
+    const key = idToBytes32(agent.id);
+    const exists = await ctx.publicClient.readContract({ address: ctx.addresses.agents, abi: AgentRegistryAbi, functionName: "exists", args: [key] });
+    if (!exists) return null;
+    const [, , , active] = await ctx.publicClient.readContract({
+      address: ctx.addresses.permissions,
+      abi: PermissionRegistryAbi,
+      functionName: "policies",
+      args: [key],
+    });
+    if (!active) return null;
+    return write(ctx, "revokePolicy", { address: ctx.addresses.permissions, abi: PermissionRegistryAbi, functionName: "revokePolicy", args: [key] });
+  });
+}
+
+/** Kill switch: pause (2) or resume (1) the agent on-chain. Returns null when already in that state. */
+export function setAgentStatusOnChain(agent: AgentRef, status: "active" | "paused") {
+  const code = status === "active" ? 1 : 2;
+  return sendStrict("setStatus", { agentId: agent.id, status }, async (ctx) => {
+    const key = idToBytes32(agent.id);
+    const exists = await ctx.publicClient.readContract({ address: ctx.addresses.agents, abi: AgentRegistryAbi, functionName: "exists", args: [key] });
+    if (!exists) {
+      // Never anchored: nothing can execute for it on-chain while paused. Resuming anchors it lazily later.
+      return null;
+    }
+    const record = (await ctx.publicClient.readContract({
+      address: ctx.addresses.agents,
+      abi: AgentRegistryAbi,
+      functionName: "agents",
+      args: [key],
+    })) as readonly unknown[];
+    if (Number(record[5]) === code) return null;
+    return write(ctx, "setStatus", { address: ctx.addresses.agents, abi: AgentRegistryAbi, functionName: "setStatus", args: [key, code] });
+  });
+}
 
 /** Anchor a freshly created identity; also marks it human-verified when `humanVerified` is set. */
 export function anchorIdentity(identityId: string, passkeyPubKeyHash: Hex, proofHash: Hex, humanVerified = false) {
@@ -520,7 +631,175 @@ export function updateScoreOnChain(agent: AgentRef, score: number, delta: number
   });
 }
 
-/** Content hash of a decision record — this is what gets anchored and what an auditor recomputes. */
+// --- Guarded transfers (FukuSpendGuard) ------------------------------------------------------
+
+export interface GuardedTransferInput {
+  agent: AgentRef;
+  actionId: string;
+  from: Address;
+  to: Address;
+  token: Address;
+  amountUsdc: number;
+  proofHash: Hex;
+  complianceRef: Hex;
+}
+
+export type GuardedTransferOutcome =
+  | { status: "executed"; receipt: ChainReceipt }
+  /** The guard (or the token behind it) would revert: the decision becomes BLOCKED R10. */
+  | { status: "rejected"; reason: string };
+
+const GUARDED_TRANSFER_TYPES = {
+  GuardedTransfer: [
+    { name: "agentId", type: "bytes32" },
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "token", type: "address" },
+    { name: "amount", type: "uint256" },
+    { name: "policyHash", type: "bytes32" },
+    { name: "actionHash", type: "bytes32" },
+    { name: "proofHash", type: "bytes32" },
+    { name: "complianceRef", type: "bytes32" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint64" },
+  ],
+} as const;
+
+const ATTESTATION_TTL_S = 300;
+
+function isRevert(err: unknown): boolean {
+  return err instanceof BaseError && err.walk((e) => e instanceof ContractFunctionRevertedError) instanceof ContractFunctionRevertedError;
+}
+
+/**
+ * Move `amountUsdc` of an A-Token from the owner's funding wallet through FukuSpendGuard. The
+ * compliance signer attests to exactly this transfer (EIP-712), against the policy hash that is on
+ * chain right now; the guard then re-checks agent status, passport, mandate and daily cap, the
+ * token applies its own compliance, and the guard records the decision (R6) itself.
+ *
+ * Unlike `send`, this never falls back to a mock receipt in live mode: a would-be revert comes back
+ * as `rejected` (R10) and any other failure (RPC, signing, anchoring) throws a ChainWriteError.
+ */
+export async function executeGuardedTransfer(input: GuardedTransferInput): Promise<GuardedTransferOutcome> {
+  if (chainMode() !== "live") {
+    return {
+      status: "executed",
+      receipt: mockReceipt("guardedTransfer", { agentId: input.agent.id, to: input.to, amountUsdc: input.amountUsdc }, "Mock guarded transfer (chain in mock mode; no tokens moved)"),
+    };
+  }
+  const guard = spendGuardAddress();
+  const signer = complianceSigner();
+  if (!guard || !signer) return { status: "rejected", reason: "GUARD_NOT_CONFIGURED" };
+  const c = chainConfig();
+  const ctx = liveContext();
+
+  return serialized(async (): Promise<GuardedTransferOutcome> => {
+    let transfer;
+    let signature: Hex;
+    try {
+      await ensureAgentOnChain(ctx, input.agent, { syncPolicy: true });
+      const agentId = idToBytes32(input.agent.id);
+      const [policyHash] = await ctx.publicClient.readContract({
+        address: ctx.addresses.permissions,
+        abi: PermissionRegistryAbi,
+        functionName: "policies",
+        args: [agentId],
+      });
+      transfer = {
+        agentId,
+        from: input.from,
+        to: input.to,
+        token: input.token,
+        amount: parseUnits(input.amountUsdc.toFixed(6), 6),
+        policyHash,
+        actionHash: hashString(input.actionId),
+        proofHash: input.proofHash,
+        complianceRef: input.complianceRef,
+        nonce: BigInt(toHex(randomBytes(32))),
+        deadline: BigInt(Math.floor(Date.now() / 1000) + ATTESTATION_TTL_S),
+      };
+      signature = await signer.signTypedData({
+        domain: { name: "FukuSpendGuard", version: "1", chainId: ctx.chain.id, verifyingContract: guard },
+        types: GUARDED_TRANSFER_TYPES,
+        primaryType: "GuardedTransfer",
+        message: transfer,
+      });
+    } catch (err) {
+      throw new ChainWriteError("guardedTransfer", describeChainError(err), err);
+    }
+
+    let request;
+    try {
+      ({ request } = await ctx.publicClient.simulateContract({
+        address: guard,
+        abi: FukuSpendGuardAbi,
+        functionName: "execute",
+        args: [transfer, signature],
+        account: ctx.account,
+        chain: ctx.chain,
+      }));
+    } catch (err) {
+      if (isRevert(err)) return { status: "rejected", reason: describeChainError(err) };
+      throw new ChainWriteError("guardedTransfer", describeChainError(err), err);
+    }
+
+    let hash: Hex;
+    let mined;
+    try {
+      hash = await ctx.walletClient.writeContract(request);
+      mined = await ctx.publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
+    } catch (err) {
+      throw new ChainWriteError("guardedTransfer", describeChainError(err), err);
+    }
+    if (mined.status !== "success") return { status: "rejected", reason: `REVERTED_ON_CHAIN(${hash})` };
+    console.log(`[fuku-chain] guardedTransfer mined: tx ${hash} block ${mined.blockNumber}`);
+    return {
+      status: "executed",
+      receipt: {
+        txHash: hash,
+        block: Number(mined.blockNumber),
+        mode: "live",
+        explorerUrl: `${c.explorer}/tx/${hash}`,
+        note: ctx.notes.length ? `Anchored first: ${ctx.notes.join("; ")}` : undefined,
+      },
+    };
+  });
+}
+
+export interface MandateView {
+  guard: Address;
+  wallet: string;
+  token: string;
+  dailyCapUsdc: number;
+  spentTodayUsdc: number;
+  active: boolean;
+}
+
+/** The owner's on-chain mandate for this agent, or null in mock mode / without a guard. */
+export async function readMandate(agentId: string, wallet: string): Promise<MandateView | null> {
+  const guard = spendGuardAddress();
+  const client = chainReader();
+  if (!guard || !client || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) return null;
+  const key = idToBytes32(agentId);
+  const [[token, dailyCap, active], spent] = await Promise.all([
+    client.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "mandates", args: [key, wallet as Address] }),
+    client.readContract({ address: guard, abi: FukuSpendGuardAbi, functionName: "spentToday", args: [key, wallet as Address] }),
+  ]);
+  return {
+    guard,
+    wallet: wallet.toLowerCase(),
+    token: token.toLowerCase(),
+    dailyCapUsdc: Number(dailyCap) / 1e6,
+    spentTodayUsdc: Number(spent) / 1e6,
+    active,
+  };
+}
+
+/**
+ * Content hash of a decision record — this is what gets anchored and what an auditor recomputes.
+ * `complianceRef` is appended only when Cleanverse evidence exists, so every other action keeps
+ * the original hash format.
+ */
 export function decisionProofHash(record: {
   agentId: string;
   action: string;
@@ -530,6 +809,8 @@ export function decisionProofHash(record: {
   ruleId: string;
   policyHash: Hex | null;
   at: string;
+  complianceRef?: Hex | null;
 }): Hex {
-  return hashJson(record);
+  const { complianceRef, ...base } = record;
+  return hashJson(complianceRef ? { ...base, complianceRef } : base);
 }

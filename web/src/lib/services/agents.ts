@@ -1,9 +1,10 @@
 import type { Agent, Identity, Policy, ReputationEvent } from "@prisma/client";
 import { db } from "../db";
 import { newAgentId, hashJson } from "../ids";
-import { parsePolicy, policySchema, type PolicyDoc } from "../engine/policy";
+import { parsePolicy, policyHashDoc, policySchema, type PolicyDoc } from "../engine/policy";
+import { utcDayStart } from "../engine/permission";
 import { computeScore, type ScoreResult } from "../engine/reputation";
-import { registerAgentOnChain, setPolicyOnChain, toAgentRef } from "../chain";
+import { ChainWriteError, registerAgentOnChain, revokePolicyOnChain, setAgentStatusOnChain, setPolicyOnChain, toAgentRef, type ChainReceipt } from "../chain";
 
 export type AgentRow = Agent & { policy: Policy | null };
 
@@ -125,15 +126,17 @@ export async function setAgentPolicy(agentId: string, raw: unknown) {
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
   const existing = agent.policy;
   const version = (existing?.version ?? 0) + 1;
-  const receipt = await setPolicyOnChain(toAgentRef(agent, agent.identity), doc, version);
+  const hashDoc = policyHashDoc(doc);
+  const receipt = await setPolicyOnChain(toAgentRef(agent, agent.identity), hashDoc, version);
   const data = {
     allowed: JSON.stringify(doc.allowed),
     blocked: JSON.stringify(doc.blocked),
     scopeApps: JSON.stringify(doc.scopeApps),
+    assets: JSON.stringify(doc.assets),
     version,
     active: true,
     txHash: receipt.txHash,
-    policyHash: hashJson(doc),
+    policyHash: hashJson(hashDoc),
   };
   const policy = existing
     ? await db.policy.update({ where: { agentId }, data })
@@ -144,20 +147,53 @@ export async function setAgentPolicy(agentId: string, raw: unknown) {
   return { policy, receipt, score };
 }
 
+/** Result of pushing a kill-switch change on-chain. `ok: false` is surfaced to the caller. */
+export interface ChainSync {
+  ok: boolean;
+  receipts: { op: string; txHash: string; mode: string }[];
+  error?: string;
+}
+
+async function syncOnChain(tasks: { op: string; run: () => Promise<ChainReceipt | null> }[]): Promise<ChainSync> {
+  const receipts: ChainSync["receipts"] = [];
+  for (const t of tasks) {
+    try {
+      const r = await t.run();
+      if (r) receipts.push({ op: t.op, txHash: r.txHash, mode: r.mode });
+    } catch (err) {
+      return { ok: false, receipts, error: err instanceof ChainWriteError ? err.message : (err as Error).message };
+    }
+  }
+  return { ok: true, receipts };
+}
+
+/**
+ * Kill switch: revoke the passport and pause the agent. The database changes first (fail safe:
+ * Fuku stops evaluating the agent as allowed immediately), then the registries: PermissionRegistry
+ * .revokePolicy and AgentRegistry.setStatus(Paused), so FukuSpendGuard rejects it on-chain too.
+ */
 export async function revokeAgentPolicy(agentId: string) {
   await db.policy.updateMany({ where: { agentId }, data: { active: false } });
   await db.agent.update({ where: { id: agentId }, data: { status: "paused" } });
-  return refreshScore(agentId);
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
+  const ref = toAgentRef(agent, agent.identity);
+  const chainSync = await syncOnChain([
+    { op: "revokePolicy", run: () => revokePolicyOnChain(ref) },
+    { op: "setStatus(paused)", run: () => setAgentStatusOnChain(ref, "paused") },
+  ]);
+  return { score: await refreshScore(agentId), chainSync };
 }
 
 export async function setAgentStatus(agentId: string, status: "active" | "paused") {
   await db.agent.update({ where: { id: agentId }, data: { status } });
-  return refreshScore(agentId);
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, identity: true } });
+  const chainSync = await syncOnChain([{ op: `setStatus(${status})`, run: () => setAgentStatusOnChain(toAgentRef(agent, agent.identity), status) }]);
+  return { score: await refreshScore(agentId), chainSync };
 }
 
+/** Allowed USDC volume for `action` since the start of the current UTC day (matches FukuSpendGuard). */
 export async function spentTodayUsdc(agentId: string, action: string) {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const start = utcDayStart();
   const agg = await db.agentAction.aggregate({
     where: { agentId, action, decision: "ALLOWED", createdAt: { gte: start } },
     _sum: { amountUsdc: true },

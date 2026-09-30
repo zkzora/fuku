@@ -23,6 +23,6 @@ export const PATCH = withSession<P>(async (req, identity, { id }) => {
   if (!report.agent.policy?.active && input.status === "active") {
     return json({ error: "Attach a permission passport before activating this agent." }, { status: 400 });
   }
-  const score = await setAgentStatus(id, input.status);
-  return json({ ok: true, score: score.score });
+  const { score, chainSync } = await setAgentStatus(id, input.status);
+  return json({ ok: true, score: score.score, chainSync });
 });

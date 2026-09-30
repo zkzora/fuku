@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 import type { Identity } from "@prisma/client";
 import { requireIdentity, UnauthorizedError } from "./session";
 import { identityFromApiKey } from "./services/identity";
+import { ChainWriteError } from "./chain";
 
 export type Ctx<P = Record<string, string>> = { params: Promise<P> };
 
@@ -14,6 +15,11 @@ function handleError(err: unknown) {
   }
   if (err instanceof ZodError) {
     return NextResponse.json({ error: "Invalid request", issues: err.issues }, { status: 400 });
+  }
+  if (err instanceof ChainWriteError) {
+    // Surfaced, never swallowed: the on-chain write (kill switch, guarded transfer) did not happen.
+    console.error("[fuku-api]", err.message);
+    return NextResponse.json({ error: err.message, chain: { op: err.op, reason: err.reason } }, { status: 502 });
   }
   const message = err instanceof Error ? err.message : "Unexpected error";
   console.error("[fuku-api]", err);

@@ -11,7 +11,8 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:generate": "prisma generate",
     "db:setup": "prisma db push && tsx prisma/seed.ts",
-    "test": "tsx --test \"src/**/*.test.ts\""
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "cleanverse:setup": "tsx scripts/setup-cleanverse-demo.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

@@ -24,16 +24,6 @@ export async function createIdentity(input: {
       proofHash,
       proofTxHash: receipt.txHash,
       proofBlock: receipt.block,
-      credentials: input.humanVerified
-        ? {
-            create: {
-              issuer: "Cleanverse",
-              kind: "Verified identity credential",
-              status: "valid",
-              validUntil: new Date(Date.now() + 365 * 86_400_000),
-            },
-          }
-        : undefined,
     },
   });
   return { identity, receipt };

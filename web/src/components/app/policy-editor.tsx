@@ -38,6 +38,7 @@ export function PolicyEditor({ agent, onSaved }: { agent: AgentView; onSaved: ()
       })),
       blocked: ACTIONS.filter((a) => rules[a] === "blocked"),
       scopeApps: scope.split(",").map((s) => s.trim()).filter(Boolean),
+      assets: agent.policy?.assets ?? [],
     };
     if (doc.allowed.length === 0) return toast.error("Allow at least one capability.");
     setBusy("save");

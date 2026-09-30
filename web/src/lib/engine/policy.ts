@@ -70,20 +70,37 @@ export const policySchema = z.object({
   allowed: z.array(allowedRuleSchema).default([]),
   blocked: z.array(z.string()).default([]),
   scopeApps: z.array(z.string()).default([]),
+  /** Cleanverse A-Token symbols this passport may move. Non-empty = an "A-Token passport". */
+  assets: z.array(z.string().min(1)).default([]),
 });
 
 export type AllowedRule = z.infer<typeof allowedRuleSchema>;
 export type PolicyDoc = z.infer<typeof policySchema>;
 
 export function parsePolicy(
-  row: { allowed: string; blocked: string; scopeApps: string } | null | undefined,
+  row: { allowed: string; blocked: string; scopeApps: string; assets?: string | null } | null | undefined,
 ): PolicyDoc | null {
   if (!row) return null;
   return {
     allowed: JSON.parse(row.allowed),
     blocked: JSON.parse(row.blocked),
     scopeApps: JSON.parse(row.scopeApps),
+    assets: row.assets ? JSON.parse(row.assets) : [],
   };
+}
+
+/** A passport with a non-empty `assets` list enters the Cleanverse perimeter. */
+export function isATokenPassport(doc: PolicyDoc | null | undefined): boolean {
+  return Boolean(doc && doc.assets.length > 0);
+}
+
+/**
+ * The document whose hash is anchored as the passport's `policyHash`. `assets` is included only
+ * when non-empty, so every passport anchored before A-Tokens existed keeps its on-chain hash.
+ */
+export function policyHashDoc(doc: PolicyDoc): Record<string, unknown> {
+  const base = { allowed: doc.allowed, blocked: doc.blocked, scopeApps: doc.scopeApps };
+  return doc.assets.length > 0 ? { ...base, assets: doc.assets } : base;
 }
 
 export function labelFor(action: string) {

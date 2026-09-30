@@ -7,7 +7,10 @@ import { keccak256, stringToHex } from "viem";
 import { deriveVaultKey, encryptText, DEMO_VAULT_PASSPHRASE } from "./vault-crypto";
 import { hashApiKey } from "./services/identity";
 import { computeScore } from "./engine/reputation";
-import { labelFor } from "./engine/policy";
+import { labelFor, policyHashDoc, type PolicyDoc } from "./engine/policy";
+import { hashJson } from "./ids";
+import { DEMO_RECIPIENTS, demoOwnerWallet } from "./cleanverse/demo";
+import { cleanverseChain } from "./cleanverse/mode";
 
 export const DEMO_IDENTITY_ID = "fuku:id:0x3e91c4d0a71f4b2c9e8d5a6f0c1b2d3e4f5ab7a4";
 export const DEMO_API_KEY = "fk_live_demo_ava_chen_2026";
@@ -16,6 +19,8 @@ const TRADING = "fuku:agent:0x7a3f19c0b4d2e6f8a1c3e5b7d9f0a2c4e6b89c21";
 const RESEARCH = "fuku:agent:0x2b8e4c6d1f3a5b7c9d0e2f4a6b8c0d1e3f5a41d0";
 const OPS = "fuku:agent:0x9d17e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b303ee";
 const REBALANCER = "fuku:agent:0xf10b2c4d6e8f0a1b3c5d7e9f1a3b5c7d9e1f77a2";
+/** Moves Cleanverse A-Tokens (aUSDC) under an A-Token passport. */
+export const PAYMENTS_AGENT_ID = "fuku:agent:0x9a7e3c1d5b8f2a4c6e0d1b3f5a7c9e1d3b5f7a92";
 
 const h = (s: string) => keccak256(stringToHex(s));
 const daysAgo = (d: number, hour = 10, minute = 0) => {
@@ -28,6 +33,8 @@ const todayAt = (hour: number, minute: number) => daysAgo(0, hour, minute);
 
 export async function seedDemo(db: PrismaClient) {
   await db.identity.deleteMany({ where: { id: DEMO_IDENTITY_ID } });
+  // Ava's wallet is the address of DEMO_OWNER_PRIVATE_KEY when set (the Cleanverse demo owner).
+  const ownerWallet = demoOwnerWallet();
 
   const identity = await db.identity.create({
     data: {
@@ -35,19 +42,11 @@ export async function seedDemo(db: PrismaClient) {
       displayName: "Ava Chen",
       humanVerified: true,
       authMethod: "passkey",
-      walletAddress: "0x3e91c4d0a71f4b2c9e8d5a6f0c1b2d3e4f5ab7a4",
+      walletAddress: ownerWallet,
       proofHash: h("proof:" + DEMO_IDENTITY_ID),
       proofTxHash: "0x91af3c2e7d5b4a6f8c0e1d3b5a7f9c2e4d6b8a0f1c3e5d7b9a2f4c6e8d0b2e07",
       proofBlock: 18_204_331,
       createdAt: daysAgo(8),
-      credentials: {
-        create: {
-          issuer: "Cleanverse",
-          kind: "Verified identity credential",
-          status: "valid",
-          validUntil: new Date(new Date().getFullYear() + 1, 8, 14),
-        },
-      },
       connectedApps: {
         create: [
           { name: "Monad DEX", scopes: JSON.stringify(["identity", "trust_score"]), status: "active", connectedAt: daysAgo(4) },
@@ -190,6 +189,73 @@ export async function seedDemo(db: PrismaClient) {
     },
   });
 
+  const paymentsPolicy: PolicyDoc = {
+    allowed: [{ action: "transfer", limitUsdcPerDay: 1000 }, { action: "read_balances" }],
+    blocked: ["withdraw", "change_owner"],
+    scopeApps: [],
+    assets: ["aUSDC"],
+  };
+  await db.agent.create({
+    data: {
+      id: PAYMENTS_AGENT_ID,
+      identityId: identity.id,
+      name: "Payments Agent",
+      version: "1.0",
+      status: "active",
+      capabilities: JSON.stringify(["transfer", "read_balances"]),
+      description: "Pays verified suppliers in Cleanverse aUSDC from Ava's A-Pass wallet, up to 1,000 a day.",
+      registeredTx: h("tx:register:" + PAYMENTS_AGENT_ID),
+      createdAt: daysAgo(2),
+      policy: {
+        create: {
+          allowed: JSON.stringify(paymentsPolicy.allowed),
+          blocked: JSON.stringify(paymentsPolicy.blocked),
+          scopeApps: JSON.stringify(paymentsPolicy.scopeApps),
+          assets: JSON.stringify(paymentsPolicy.assets),
+          version: 1,
+          active: true,
+          txHash: h("tx:policy:" + PAYMENTS_AGENT_ID),
+          policyHash: hashJson(policyHashDoc(paymentsPolicy)),
+        },
+      },
+    },
+  });
+
+  // ---- Cleanverse simulator fixtures ----
+  // Read by the simulator in mock-chain mode; in sim-chain mode the contracts are the source of truth
+  // and live reads overwrite these rows.
+  const chain = cleanverseChain();
+  const yearAhead = Math.floor(Date.now() / 1000) + 365 * 86_400;
+  const fixtures = [
+    { wallet: ownerWallet.toLowerCase(), cvRecordId: "cv-sim-ava-chen", status: 1, tier: 2 },
+    ...DEMO_RECIPIENTS.filter((r) => r.apass).map((r) => ({
+      wallet: r.address.toLowerCase(),
+      cvRecordId: `cv-sim-${r.label}`,
+      status: r.apass!.status,
+      tier: r.apass!.tier,
+    })),
+  ];
+  for (const f of fixtures) {
+    const data = {
+      found: true,
+      cvRecordId: f.cvRecordId,
+      status: f.status,
+      tier: f.tier,
+      subTier: 0,
+      group: null,
+      subGroup: null,
+      expiresAt: yearAhead,
+      countries: JSON.stringify(["ID"]),
+      raw: JSON.stringify({ fixture: true }),
+      checkedAt: new Date(),
+    };
+    await db.cleanversePass.upsert({
+      where: { chain_wallet_source: { chain, wallet: f.wallet, source: "simulated" } },
+      create: { chain, wallet: f.wallet, source: "simulated", ...data },
+      update: data,
+    });
+  }
+
   // ---- Ledger: actions + reputation events ----
   type Act = {
     agentId: string;
@@ -263,7 +329,7 @@ export async function seedDemo(db: PrismaClient) {
       },
     });
   }
-  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER]) {
+  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER, PAYMENTS_AGENT_ID]) {
     const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     await db.reputationEvent.createMany({
       data: [
@@ -274,7 +340,7 @@ export async function seedDemo(db: PrismaClient) {
   }
 
   // ---- Scores (same formula as src/lib/engine/reputation.ts) ----
-  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER]) {
+  for (const agentId of [TRADING, RESEARCH, OPS, REBALANCER, PAYMENTS_AGENT_ID]) {
     const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId }, include: { policy: true, reputationEvents: true } });
     const ev = agent.reputationEvents;
     const score = computeScore({

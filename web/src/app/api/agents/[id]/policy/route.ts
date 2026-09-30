@@ -24,6 +24,6 @@ export const PUT = withSession<P>(async (req, identity, { id }) => {
 
 export const DELETE = withSession<P>(async (_req, identity, { id }) => {
   await ownedAgent(id, identity.id);
-  const score = await revokeAgentPolicy(id);
-  return json({ ok: true, score: score.score });
+  const { score, chainSync } = await revokeAgentPolicy(id);
+  return json({ ok: true, score: score.score, chainSync });
 });

@@ -16,6 +16,6 @@ export const PUT = withApiKey<P>(async (req, identity, { id }) => {
 export const DELETE = withApiKey<P>(async (_req, identity, { id }) => {
   const agent = await db.agent.findFirst({ where: { id, identityId: identity.id } });
   if (!agent) return json({ error: "Agent not found for this identity" }, { status: 404 });
-  const score = await revokeAgentPolicy(id);
-  return json({ ok: true, score: score.score });
+  const { score, chainSync } = await revokeAgentPolicy(id);
+  return json({ ok: true, score: score.score, chainSync });
 });

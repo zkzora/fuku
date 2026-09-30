@@ -79,6 +79,7 @@ model Policy {
   allowed   String   @default("[]")   // JSON: [{ action, limitUsdcPerDay? }]
   blocked   String   @default("[]")   // JSON: string[]
   scopeApps String   @default("[]")   // JSON: string[]
+  assets    String   @default("[]")   // JSON: Cleanverse A-Token symbols (non-empty = A-Token passport)
   version   Int      @default(1)
   active    Boolean  @default(true)
   txHash    String?
@@ -102,6 +103,12 @@ model AgentAction {
   txHash      String?
   trustDelta  Int      @default(0)
   explanation String?
+  counterparty   String?              // recipient wallet for value actions
+  asset          String?              // A-Token symbol for value actions on an A-Token passport
+  compliance     String?              // JSON: Cleanverse legs + evidence
+  complianceRef  String?              // keccak256 of the canonical evidence JSON
+  transferTxHash String?              // FukuSpendGuard.execute transaction
+  travelRuleRef  String?              // hash of the Travel Rule record
   createdAt   DateTime @default(now())
   agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
   identity    Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
@@ -170,4 +177,26 @@ model ApiKey {
   createdAt  DateTime  @default(now())
   lastUsedAt DateTime?
   identity   Identity  @relation(fields: [identityId], references: [id], onDelete: Cascade)
+}
+
+/** Every A-Pass (CVI) read, from the Cleanverse API or the Fuku simulator. The UI and the trust
+ *  score read this table and never call the provider synchronously. */
+model CleanversePass {
+  id         String   @id @default(cuid())
+  chain      String
+  wallet     String                    // lowercased
+  source     String                    // cleanverse | simulated
+  found      Boolean  @default(true)   // false = the provider reported no A-Pass
+  cvRecordId String?
+  status     Int?                      // 1 active, 2 frozen
+  tier       Int?
+  subTier    Int?
+  group      String?
+  subGroup   String?
+  expiresAt  Int?                      // unix seconds, 0 = no expiry
+  countries  String   @default("[]")   // JSON string[]
+  raw        String?                   // JSON as returned by the provider
+  checkedAt  DateTime @default(now())
+
+  @@unique([chain, wallet, source])
 }
