@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Card, CardTitle, Mono, PageHeader, StatusPill } from "@/components/bits";
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { Erc8004Card } from "@/components/app/erc8004-card";
+import { ScoreVerifyCard } from "@/components/app/score-verify-card";
 import { PolicySummary } from "@/components/app/policy-editor";
 import { ReputationReport, type Report } from "@/components/app/reputation-report";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -66,6 +67,7 @@ export default function AgentDetailPage() {
         {a.description && <p className="mt-3 text-[13.5px] text-ink-3">{a.description}</p>}
       </Card>
       <ReputationReport report={data} />
+      <ScoreVerifyCard agentId={a.id} />
       <Erc8004Card agentId={a.id} />
       <Card>
         <CardTitle>Execution history</CardTitle>

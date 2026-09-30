@@ -139,6 +139,8 @@ Rules that follow from the lifecycle:
    - A pause or a withdrawn allowance does not void it: an attestation signed before them executes after a resume or re-approval, until its 5-minute deadline.
 3. **The guard's owner** can rotate the compliance signer. The simulator contracts' owner issues simulator A-Passes and mints `aUSDC-SIM`; they are not Cleanverse.
 4. **The engine and database.** The passport's allowed actions, app scope and off-chain limits, and the reputation ledger, live in Fuku's database and are enforced by Fuku's server. On-chain commitments prove the integrity of a recorded decision, not that an AUTHORIZED action was executed or executed correctly.
+   - The score cannot be recomputed from the chain alone. Several inputs are off-chain: an A-Pass read through the Cleanverse API, the reason behind an R10 denial, security events, and ledger events that were never anchored (the seeded demo history).
+   - `npm run verify-score`, and **Recompute from chain** on the agent page, recompute it from the chain anyway. They use the passkey flag, the passport state, `GuardedTransferExecuted`, `ActionDecision` rule ids and the simulator A-Pass. They compare the result with the anchored score and the ledger, and name each input the chain does not hold.
 5. **Cleanverse** runs in simulator mode until the API invite lands (`docs/CLEANVERSE.md`). The real A-Token's transfer rules for third-party contracts are unverified.
 6. **Memory vault.** Items are encrypted in the browser with a key derived from the owner's passphrase (PBKDF2-SHA256, 100,000 iterations, salted with the identity id, into AES-256-GCM).
    - Every identity except the seeded demo chooses its own passphrase (at least 10 characters). The server stores ciphertext and one encrypted check value that tells a wrong passphrase from a right one; it never receives the passphrase or the key. The key stays in the tab's memory and is not persisted.
@@ -202,11 +204,12 @@ Local runs on 2026-09-30:
 | Command | Expected |
 | --- | --- |
 | `cd contracts && npm test` | 67 passing (8 of them adversarial) |
-| `npm test` (root: web + sdk) | 67 web tests, 8 SDK tests, all passing |
+| `npm test` (root: web + sdk) | 79 web tests, 8 SDK tests, all passing |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
 | Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `63/63 checks passed` on a fresh node |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
+| `cd web && npm run verify-score` on the local node after a demo reset, one guarded transfer and one blocked action | Agents whose history is on-chain reproduce their anchored score (Payments Agent 68 = 68). The seeded Trading Assistant reports 61 from the chain against 92 anchored: its seeded history is ledger-only |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 17 steps `ok`, exit 0 |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 

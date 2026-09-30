@@ -436,3 +436,11 @@ describe("memory vault passphrases", () => {
     assert.equal(vault.vaultStateOf(after).hasPassphrase, false);
   });
 });
+
+describe("verify score from chain", () => {
+  it("refuses on a mocked chain: there is nothing on-chain to recompute from", async () => {
+    const { verifyScoreFromChain } = await import("./verify-score");
+    const agent = await m.db.agent.findFirstOrThrow({ where: { identityId: m.seed.DEMO_IDENTITY_ID } });
+    await assert.rejects(() => verifyScoreFromChain(agent.id), /mocked/);
+  });
+});
