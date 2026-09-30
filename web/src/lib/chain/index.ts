@@ -1006,6 +1006,30 @@ export async function findGuardExecution(agentId: string, actionId: string, from
   return hit ? { txHash: hit.transactionHash, block: Number(hit.blockNumber), blockHash: hit.blockHash, logIndex: hit.logIndex } : null;
 }
 
+export interface AgentOnChain {
+  exists: boolean;
+  /** AgentRegistry status: 0 Registered, 1 Active, 2 Paused, 3 Revoked. */
+  status: number | null;
+  policyHash: Hex | null;
+  policyVersion: number | null;
+  policyActive: boolean;
+}
+
+/** What the registries say about an agent right now (null in mock mode). */
+export async function readAgentOnChain(agentId: string): Promise<AgentOnChain | null> {
+  const client = chainReader();
+  const a = addresses();
+  if (!client || !a) return null;
+  const key = idToBytes32(agentId);
+  const exists = await client.readContract({ address: a.agents, abi: AgentRegistryAbi, functionName: "exists", args: [key] });
+  if (!exists) return { exists: false, status: null, policyHash: null, policyVersion: null, policyActive: false };
+  const [record, policy] = await Promise.all([
+    client.readContract({ address: a.agents, abi: AgentRegistryAbi, functionName: "agents", args: [key] }) as Promise<readonly unknown[]>,
+    client.readContract({ address: a.permissions, abi: PermissionRegistryAbi, functionName: "policies", args: [key] }),
+  ]);
+  return { exists: true, status: Number(record[5]), policyHash: policy[0], policyVersion: Number(policy[1]), policyActive: policy[3] };
+}
+
 export async function latestBlock(): Promise<bigint | null> {
   const client = chainReader();
   return client ? client.getBlockNumber() : null;

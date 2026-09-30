@@ -1,0 +1,23 @@
+import { db } from "@/lib/db";
+import { json, withApiKey } from "@/lib/api";
+import { rateLimit } from "@/lib/rate-limit";
+import { chainMode, readMandate, spendGuardAddress } from "@/lib/chain";
+import { authorizedAgent } from "@/lib/services/authz";
+
+type P = { id: string };
+
+/**
+ * SDK: fuku.getMandate() — the owner's on-chain FukuSpendGuard mandate for this agent (token, daily
+ * cap, per-transfer limit, expiry, payee restriction, version, spent today). The mandate is the
+ * owner's own delegation to the agent: opened from the owner's wallet, enforced by the guard.
+ */
+export const GET = withApiKey<P>(async (_req, caller, { id }) => {
+  rateLimit("read", caller.id);
+  const { agent } = await authorizedAgent(caller, id, "agents:execute");
+  const owner = await db.identity.findUniqueOrThrow({ where: { id: agent.identityId } });
+  const wallet = owner.walletVerifiedBy ? owner.walletAddress : null;
+  if (chainMode() !== "live") return json({ mandate: null, wallet, reason: "mock-chain" });
+  if (!spendGuardAddress()) return json({ mandate: null, wallet, reason: "guard-not-configured" });
+  if (!wallet) return json({ mandate: null, wallet: null, reason: "no-verified-wallet" });
+  return json({ mandate: await readMandate(agent.id, wallet), wallet, reason: null });
+});

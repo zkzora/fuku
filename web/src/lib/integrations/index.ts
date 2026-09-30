@@ -1,13 +1,16 @@
 import { aiProviderStatus } from "../engine/explain";
-import { chainMode } from "../chain";
+import { chainConfig, chainMode, lastChainWrite } from "../chain";
+import { lastDynamicVerification } from "../dynamic-auth";
 import { envioStatus, startBlock } from "./envio";
 import { DEFAULT_BASE_URL } from "../cleanverse/client";
 import { cleanverseRuntime, lastLiveCall } from "../services/cleanverse";
 
 /**
- * Sponsor integration registry. Each integration reports whether it is running live
- * (credentials configured and reachable) or simulated (deterministic local behaviour). The
- * Developer Console renders this so the demo is honest about what is wired up.
+ * Sponsor integration registry, rendered on the Developer Console. A card says "live" only when
+ * the working code path has actually succeeded against the sponsor (a mined write, a verified
+ * token, an answered call), never because an env var is set. "configured": keys are present but
+ * nothing has succeeded yet (or it cannot be checked from here). "simulated": a local stand-in
+ * runs instead. "off": not integrated.
  */
 export interface IntegrationStatus {
   key: string;
@@ -72,26 +75,43 @@ export async function integrationStatus(): Promise<IntegrationStatus[]> {
   const has = (k: string) => Boolean(process.env[k]);
   const [nansen, envio] = await Promise.all([nansenAccount(), envioStatus()]);
   return [
-    {
-      key: "monad",
-      name: "Monad",
-      category: "Settlement",
-      role: "Identity, agent, permission and reputation registries",
-      envVars: ["FUKU_CHAIN_MODE", "DEPLOYER_PRIVATE_KEY", "FUKU_*_REGISTRY"],
-      mode: chain === "live" ? "live" : "simulated",
-      detail:
-        chain === "live"
-          ? "Transactions are signed and anchored on Monad testnet (chain 10143)."
-          : "Proof hashes are computed locally; receipts are mocked until contracts are deployed.",
-    },
+    (() => {
+      const c = chainConfig();
+      const w = lastChainWrite();
+      if (chain !== "live") {
+        return {
+          key: "monad",
+          name: "Monad",
+          category: "Settlement" as const,
+          role: "Identity, agent, permission and reputation registries; FukuSpendGuard",
+          envVars: ["FUKU_CHAIN_MODE", "DEPLOYER_PRIVATE_KEY", "FUKU_*_REGISTRY"],
+          mode: "simulated" as const,
+          detail: "Proof hashes are computed locally; receipts are labelled mock and have no transaction behind them.",
+        };
+      }
+      return {
+        key: "monad",
+        name: "Monad",
+        category: "Settlement" as const,
+        role: "Identity, agent, permission and reputation registries; FukuSpendGuard",
+        envVars: ["FUKU_CHAIN_MODE", "DEPLOYER_PRIVATE_KEY", "FUKU_*_REGISTRY"],
+        mode: w?.ok ? ("live" as const) : ("configured" as const),
+        detail: w?.ok
+          ? `Transactions are signed and mined on ${c.name} (chain ${c.id}); last ${w.op} succeeded at ${w.at}.`
+          : w
+            ? `Live settlement is configured for ${c.name} (chain ${c.id}), but the last write (${w.op}) failed: ${w.error ?? "unknown error"}. Failed writes are recorded as failed, never as mock.`
+            : `Live settlement is configured for ${c.name} (chain ${c.id}); no write has been mined by this server process yet.`,
+      };
+    })(),
     {
       key: "mera",
       name: "Mera",
       category: "Identity",
-      role: "Passkey onboarding and approval layer (WebAuthn / P-256)",
+      role: "Passkey onboarding and approval layer",
       envVars: [],
-      mode: "live",
-      detail: "Passkeys are created and verified with WebAuthn in this browser. Face ID / Windows Hello / security keys all work.",
+      mode: "off",
+      detail:
+        "Not integrated: passkeys use standard WebAuthn through @simplewebauthn (user verification required), and no Mera SDK or API is called.",
     },
     {
       key: "privy",
@@ -99,22 +119,29 @@ export async function integrationStatus(): Promise<IntegrationStatus[]> {
       category: "Wallet",
       role: "Embedded wallet for agents and owners",
       envVars: ["NEXT_PUBLIC_PRIVY_APP_ID", "PRIVY_APP_SECRET"],
-      mode: has("NEXT_PUBLIC_PRIVY_APP_ID") ? "live" : "simulated",
-      detail: has("NEXT_PUBLIC_PRIVY_APP_ID")
-        ? "Embedded wallets are provisioned through Privy."
-        : "Wallet addresses are derived locally. Add a Privy app id to provision embedded wallets.",
+      mode: has("NEXT_PUBLIC_PRIVY_APP_ID") || has("PRIVY_APP_ID") ? "configured" : "off",
+      detail:
+        has("NEXT_PUBLIC_PRIVY_APP_ID") || has("PRIVY_APP_ID")
+          ? "A Privy app id is configured, but no Privy client or server code is wired yet, so no wallet is provisioned through Privy."
+          : "Not integrated. Owner wallets come from Dynamic or a signed binding.",
     },
-    {
-      key: "dynamic",
-      name: "Dynamic",
-      category: "Identity",
-      role: "Email sign-in with an embedded EVM wallet",
-      envVars: ["NEXT_PUBLIC_DYNAMIC_ENV_ID"],
-      mode: has("NEXT_PUBLIC_DYNAMIC_ENV_ID") ? "live" : "simulated",
-      detail: has("NEXT_PUBLIC_DYNAMIC_ENV_ID")
-        ? "Sign in with email through the Dynamic JavaScript SDK, or link a wallet on the Identity page. Dynamic creates an embedded EVM wallet; Fuku verifies Dynamic's JWT (RS256, JWKS) on the server and records the wallet as the identity's owner wallet. Email sign-in alone is not human verification."
-        : "Passkey sign-in is the active method. Add a Dynamic environment id to enable email and wallet sign-in.",
-    },
+    (() => {
+      const configured = has("NEXT_PUBLIC_DYNAMIC_ENV_ID");
+      const v = lastDynamicVerification();
+      return {
+        key: "dynamic",
+        name: "Dynamic",
+        category: "Identity" as const,
+        role: "Email sign-in with an embedded EVM wallet",
+        envVars: ["NEXT_PUBLIC_DYNAMIC_ENV_ID"],
+        mode: !configured ? ("off" as const) : v?.ok ? ("live" as const) : ("configured" as const),
+        detail: !configured
+          ? "Not configured. Passkey sign-in is the active method."
+          : `Email sign-in and wallet linking through the Dynamic JavaScript SDK; the server verifies Dynamic's JWT (RS256, JWKS, issuer, scope) and records the wallet as Dynamic-verified. ${
+              v?.ok ? `Last verification succeeded at ${v.at}.` : v ? `The last verification failed: ${v.error}.` : "No token has been verified by this server process yet."
+            } Email sign-in alone is not a passkey verification.`,
+      };
+    })(),
     {
       key: "nansen",
       name: "Nansen",
@@ -152,17 +179,25 @@ export async function integrationStatus(): Promise<IntegrationStatus[]> {
       category: "AI",
       role: "Trust explanations and behaviour analysis",
       envVars: ["KIMI_API_KEY"],
-      mode: ai.kimi ? "live" : "simulated",
-      detail: ai.kimi ? "Explanations are generated by Kimi." : "Explanations use Fuku's deterministic rule narrator.",
+      mode: !ai.kimi ? "simulated" : ai.kimiHealth?.ok ? "live" : "configured",
+      detail: !ai.kimi
+        ? "Explanations use Fuku's deterministic rule narrator."
+        : ai.kimiHealth?.ok
+          ? `Explanations are generated by Kimi (last call ${ai.kimiHealth.at}). The AI explains decisions; it never makes them.`
+          : `KIMI_API_KEY is set; ${ai.kimiHealth ? `the last call failed (${ai.kimiHealth.error}), so the rule narrator answered` : "no call has succeeded yet"}.`,
     },
     {
       key: "qwen",
       name: "Qwen",
       category: "AI",
-      role: "Agent planning and policy interpretation",
+      role: "Explanations (tried after Kimi)",
       envVars: ["QWEN_API_KEY"],
-      mode: ai.qwen ? "live" : "simulated",
-      detail: ai.qwen ? "Policy interpretation is generated by Qwen." : "Policy interpretation uses the rule narrator.",
+      mode: !ai.qwen ? "simulated" : ai.qwenHealth?.ok ? "live" : "configured",
+      detail: !ai.qwen
+        ? "Explanations use the rule narrator."
+        : ai.qwenHealth?.ok
+          ? `Explanations are generated by Qwen (last call ${ai.qwenHealth.at}).`
+          : `QWEN_API_KEY is set; ${ai.qwenHealth ? `the last call failed (${ai.qwenHealth.error})` : "no call has succeeded yet"}.`,
     },
     {
       key: "chainlink-cre",
@@ -170,10 +205,10 @@ export async function integrationStatus(): Promise<IntegrationStatus[]> {
       category: "Automation",
       role: "Workflow: request → verify → execute → record",
       envVars: ["CRE_WORKFLOW_ID"],
-      mode: has("CRE_WORKFLOW_ID") ? "live" : "simulated",
+      mode: has("CRE_WORKFLOW_ID") ? "configured" : "simulated",
       detail: has("CRE_WORKFLOW_ID")
-        ? `Deployed workflow fuku-guard (${process.env.CRE_WORKFLOW_ID!.slice(0, 10)}…) orchestrates agent actions on the Chainlink DON: verify via the Fuku API, execute, then read the Monad registries.`
-        : "Workflow cre/fuku-guard (HTTP trigger → verify via the Fuku API → execute → EVM read of the Monad registries) runs end to end with `cre workflow simulate`, the path Chainlink recommends for hackathons. Deploying to the DON requires a commercial agreement with Chainlink; CRE_WORKFLOW_ID would come from `cre workflow deploy` after that.",
+        ? `CRE_WORKFLOW_ID is set (${process.env.CRE_WORKFLOW_ID!.slice(0, 10)}…). Fuku cannot see the DON from here, so the card stays "configured". The workflow calls the same public API, so every Fuku rule applies to it.`
+        : "Workflow cre/fuku-guard (HTTP trigger → verify via the Fuku API → execute → EVM read of the Monad registries) runs end to end with `cre workflow simulate`, the path Chainlink recommends for hackathons. It calls the same public API as any client, so it cannot bypass Fuku's rules. Deploying to the DON requires a commercial agreement with Chainlink.",
     },
     cleanverseStatus(),
   ];
