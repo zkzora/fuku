@@ -30,6 +30,14 @@ const config: HardhatUserConfig = {
       },
     },
   },
+  // Source verification through Sourcify, which MonadVision reads (BlockVision's instance supports
+  // Monad testnet, chain 10143). scripts/verify-sourcify.ts verifies every deployed contract.
+  verify: {
+    sourcify: {
+      enabled: true,
+      apiUrl: process.env.SOURCIFY_API_URL ?? "https://sourcify-api-monad.blockvision.org",
+    },
+  },
   networks: {
     hardhatMainnet: {
       type: "edr-simulated",

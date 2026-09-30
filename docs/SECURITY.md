@@ -260,13 +260,31 @@ The production environment needs:
 
 ## 10. Testnet runbook (not executed; each step needs the owner's go-ahead)
 
+Costs below are gas limit × 102 gwei (Monad charges the limit), measured on a local fork of Monad testnet that ran this exact sequence on 2026-09-30.
+
 1. `contracts/.env`: set `COMPLIANCE_SIGNER_ADDRESS` to a fresh key's address and `FUKU_COMPLIANCE_SIGNER_KEY` to that key.
-2. `cd contracts && npm run deploy:cleanverse:monad`. This is four transactions: two simulators, the guard, and one enforcer grant. The four registries are untouched.
+2. `cd contracts && npm run deploy:cleanverse:monad`. It sends two simulators, the guard and one enforcer grant, about 0.39 MON. The four registries are untouched.
 3. `npm run wire:env`. It writes `FUKU_SPEND_GUARD`, `CLEANVERSE_SIM_*` and the signer key into `web/.env`.
-4. Add a fresh `DEMO_OWNER_PRIVATE_KEY` to `web/.env`, then run `cd web && npm run cleanverse:setup`. That is about 8 transactions: passes, mint, gas top-up, approve, mandate and payee.
+4. Prepare `web/.env`:
+   - add a fresh `DEMO_OWNER_PRIVATE_KEY` and `FUKU_AGENT_KEY_SECRET` (at least 32 random characters);
+   - set `FUKU_PUBLIC_URL` only if the app is served publicly over https;
+   - then run `cd web && SETUP_OWNER_MIN_MON=0.35 SETUP_OWNER_TOPUP_MON=0.4 npm run cleanverse:setup`.
+
+   The setup costs about 0.06 MON and tops Ava's wallet up with 0.4 MON. She pays her own ERC-8004 registrations and the smoke's approvals, about 0.25 MON.
 5. Restart the app. Reset the demo so Ava's wallet binding uses the new key.
-6. `cd web && npm run reconcile -- --anchor-seeded`. It anchors the demo's seeded history: 5 agents, 3 passports, 25 decisions and 5 scores, about 38 transactions (Ava's identity is already on testnet). It prints every transaction. Do not run live actions on the demo agents before the pitch: a reset cannot rewind the chain.
-7. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… node scripts/live-smoke.mjs`.
-   - The reorg check is skipped off Hardhat.
-   - The owner-custody section needs `SMOKE_OWNER_PRIVATE_KEY`: a separate key with its own MON (about 0.1), since the owner's wallet pays for its five registry writes.
-   - The Cleanverse section spends most of Ava's daily cap, so run it once per UTC day.
+6. `npm run reconcile -- --anchor-seeded`.
+   - It anchors the seeded history: 5 agents, 3 passports, 25 decisions and 5 scores, about 38 transactions and 0.32 MON (Ava's identity is already on testnet). It prints every transaction.
+   - Do not run live actions on the demo agents before the pitch: a reset cannot rewind the chain.
+7. `npm run erc8004:register -- --allow-testnet`. It registers the 5 demo agents from Ava's wallet on the canonical Identity Registry, with Fuku-held agent keys as `agentWallet`, and prints each transaction and agent id.
+   - Cost: about 0.24 MON with `data:` URIs, or about 0.13 MON with `FUKU_PUBLIC_URL`, whose registration endpoint is checked to resolve first.
+8. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… DEMO_OWNER_PRIVATE_KEY=… SMOKE_OWNER_PRIVATE_KEY=… node scripts/live-smoke.mjs`.
+   - About 0.25 MON from the relayer.
+   - The owner-custody section needs `SMOKE_OWNER_PRIVATE_KEY`: a separate key with about 0.1 MON, since the owner's wallet pays for its registry writes.
+   - The Cleanverse checks run on a fresh A-Token agent whose mandate Ava's wallet opens, so the demo agents stay verifiable. The reorg check is skipped off Hardhat.
+9. `cd contracts && npm run verify:monad`. It publishes every contract's source through Sourcify for MonadVision. No transaction.
+10. Record every transaction hash in `docs/CLEANVERSE.md` and `docs/PITCH.md`.
+11. Restart the app on 3001, then check two things:
+    - Trading Assistant shows 96;
+    - **Recompute from chain** shows ✓ for it.
+
+The relayer spends about 1.2 MON over this sequence, including the funding it sends to Ava and the smoke owner. `examples/sdk-consumer` against testnet is optional, about 0.16 MON.
