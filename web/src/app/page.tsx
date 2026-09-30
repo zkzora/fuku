@@ -4,7 +4,7 @@ import { Logo } from "@/components/brand";
 import { Pill } from "@/components/bits";
 import { Reveal } from "@/components/landing/reveal";
 
-const SPONSORS = ["Monad", "Mera", "Privy", "Dynamic", "Nansen", "Envio", "Kimi", "Qwen", "Chainlink CRE", "Cleanverse"];
+const SPONSORS = ["Monad", "Dynamic", "Nansen", "Envio", "Kimi", "Qwen", "Chainlink CRE", "Cleanverse"];
 
 export default function Landing() {
   return (

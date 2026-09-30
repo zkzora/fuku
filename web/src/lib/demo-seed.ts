@@ -68,7 +68,6 @@ export async function seedDemo(db: PrismaClient) {
         create: [
           { name: "Monad DEX", scopes: JSON.stringify(["identity", "trust_score"]), status: "active", connectedAt: daysAgo(4) },
           { name: "Notion", scopes: JSON.stringify(["identity", "vault:knowledge"]), status: "active", connectedAt: daysAgo(6) },
-          { name: "Privy Wallet", scopes: JSON.stringify(["identity", "embedded_wallet"]), status: "active", connectedAt: daysAgo(8) },
         ],
       },
       accessRequests: {
@@ -89,7 +88,7 @@ export async function seedDemo(db: PrismaClient) {
           deviceType: "multiDevice",
           backedUp: true,
           transports: JSON.stringify(["internal", "hybrid"]),
-          label: "Face ID on MacBook Pro · via Mera",
+          label: "Face ID on MacBook Pro",
           createdAt: daysAgo(8),
         },
       },

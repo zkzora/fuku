@@ -103,28 +103,6 @@ export async function integrationStatus(): Promise<IntegrationStatus[]> {
             : `Live settlement is configured for ${c.name} (chain ${c.id}); no write has been mined by this server process yet.`,
       };
     })(),
-    {
-      key: "mera",
-      name: "Mera",
-      category: "Identity",
-      role: "Passkey onboarding and approval layer",
-      envVars: [],
-      mode: "off",
-      detail:
-        "Not integrated: passkeys use standard WebAuthn through @simplewebauthn (user verification required), and no Mera SDK or API is called.",
-    },
-    {
-      key: "privy",
-      name: "Privy",
-      category: "Wallet",
-      role: "Embedded wallet for agents and owners",
-      envVars: ["NEXT_PUBLIC_PRIVY_APP_ID", "PRIVY_APP_SECRET"],
-      mode: has("NEXT_PUBLIC_PRIVY_APP_ID") || has("PRIVY_APP_ID") ? "configured" : "off",
-      detail:
-        has("NEXT_PUBLIC_PRIVY_APP_ID") || has("PRIVY_APP_ID")
-          ? "A Privy app id is configured, but no Privy client or server code is wired yet, so no wallet is provisioned through Privy."
-          : "Not integrated. Owner wallets come from Dynamic or a signed binding.",
-    },
     (() => {
       const configured = has("NEXT_PUBLIC_DYNAMIC_ENV_ID");
       const v = lastDynamicVerification();
