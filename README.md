@@ -5,10 +5,12 @@ Human-backed AI agent trust infrastructure on Monad. Fuku gives humans and AI ag
 ```
 web/        Next.js 16 app: landing, dashboard, identity, agents, permissions, reputation,
             activity, memory vault, developer console + the API (session and public v1)
-contracts/  Solidity registries for Monad (Hardhat 3): HumanIdentityRegistry, AgentRegistry,
-            PermissionRegistry, ReputationRegistry — 18 passing tests
-sdk/        @fuku/sdk — createIdentity, registerAgent, verifyAgent, requestPermission,
-            getTrustScore, checkPermission, executeAction
+contracts/  Solidity for Monad (Hardhat 3): HumanIdentityRegistry, AgentRegistry,
+            PermissionRegistry, ReputationRegistry, FukuSpendGuard, and the Cleanverse
+            simulators CleanverseAPassSim / CleanverseATokenSim — 49 passing tests
+sdk/        @fuku/sdk 0.2.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
+            getTrustScore, checkPermission, executeAction (with Cleanverse A-Token payments)
+docs/       PITCH.md (talk track, status, judge Q&A) and CLEANVERSE.md (CVI/CVA integration)
 indexer/    Envio HyperIndex config + handlers for the on-chain events (real Monad addresses)
 cre/        Chainlink CRE workflow fuku-guard (request -> verify -> execute -> record on Monad)
 Fuku UI mockups/  Design source (Claude Design exports) and the product specs
@@ -29,8 +31,10 @@ npm run dev -- -p 3001      # http://localhost:3001
 Contracts (standalone, own `node_modules`):
 
 ```bash
-cd contracts && npm install && npm test        # 18 passing
+cd contracts && npm install && npm test        # 49 passing
 ```
+
+Web tests (`cd web && npm test`, node:test via tsx) cover the permission engine and the Cleanverse module; `npm test` at the root also runs the SDK's contract tests.
 
 Without a deployment the web app runs in **mock settlement** mode: every decision is still hashed and gets a deterministic receipt, so the full flow works offline. To anchor real transactions, see the next section.
 
@@ -82,7 +86,7 @@ npm run wire:env         # backs up web/.env to web/.env.bak and upserts the liv
 
 - **Insufficient funds**: the deployer ran out of MON (a deploy is six transactions). Top up at the faucet; `npm run check:deployer` shows the balance.
 - **Wrong chain id**: `MONAD_RPC_URL` points at mainnet (143), a local node (31337) or a stale endpoint; `hardhat.config.ts` pins 10143. `check:deployer` reports the id the RPC returns.
-- **RPC rate limits** (HTTP 429, timeouts on the public endpoint): use a dedicated endpoint, set `MONAD_RPC_URL` in `contracts/.env`, re-run `wire:env`, restart. A failed live write is recorded as a mock receipt with a `Live settlement failed (...)` note and a `[fuku-chain]` log line.
+- **RPC rate limits** (HTTP 429, timeouts on the public endpoint): use a dedicated endpoint, set `MONAD_RPC_URL` in `contracts/.env`, re-run `wire:env`, restart. A failed decision or score write is recorded as a mock receipt with a `Live settlement failed (...)` note and a `[fuku-chain]` log line. Guarded transfers and the on-chain kill switch never fall back: they return HTTP 502 or `chainSync.ok: false`.
 - **`NotIdentityController`**: the signer in `web/.env` is not the controller recorded on-chain for that identity (`AgentRegistry.registerAgent` requires `msg.sender == controllerOf(ownerIdentityId)`). Use the key that anchored the identity, or redeploy fresh registries (`deploy:monad` + `wire:env`) so everything re-anchors with the current key.
 - **`NotAuthorized` / `NotScorer`**: the signer is not the deployer (who was granted enforcer + scorer). Sign with the deployer key, or grant the roles from the owner.
 - **Still "simulated" after wiring**: the server logs `[fuku-chain] FUKU_CHAIN_MODE=live but DEPLOYER_PRIVATE_KEY or a FUKU_*_REGISTRY address is missing`; run `npm run wire:env -- --dry-run`, fix, re-run, restart.
@@ -95,7 +99,8 @@ npm run wire:env         # backs up web/.env to web/.env.bak and upserts the liv
 4. **Permissions**: approve a passport (allow / limit / block per capability, app scope). The agent becomes active; the passport hash is anchored.
 5. **Test an action** on the Permissions page, or go back to the Dashboard and press **Run agent action**: Trading Assistant tries to withdraw 4,800 USDC.
 6. Fuku blocks it (rule R2), shows the workflow trace, the decision hash and the Monad receipt, and explains why in plain language.
-7. **Reputation**: the score drops (96 → 92) with a breakdown and an explanation. **Activity** shows the proof.
+7. **Pay a verified supplier** (Dashboard): Payments Agent sends 250 aUSDC to Nusantara Supplies. Fuku checks the asset rule and both A-Passes (Cleanverse simulator until the API invite lands), then FukuSpendGuard moves the token under the owner's on-chain mandate. Pick the Frozen or Unverified wallet in the Run action form to see R8.
+8. **Reputation**: the score drops (96 → 92) with a breakdown and an explanation. **Activity** shows the proof.
 
 The Developer Console has API keys, the SDK reference, a sandbox that runs the same flow through the public API, and the sponsor integration board (live vs simulated per env var).
 
@@ -110,13 +115,25 @@ Permission engine (`web/src/lib/engine/permission.ts`), deterministic and rule-a
 | R2 action on the block list | blocked |
 | R3 action not on the allow list | blocked |
 | R4 app outside the passport scope | blocked |
-| R5 daily USDC limit exceeded | blocked |
+| R9 A-Token passports: asset not on the passport or not a Cleanverse A-Token | blocked |
+| R7 A-Token passports: owner has no active, unexpired A-Pass, or verify_apass ≠ 4 | blocked |
+| R8 A-Token passports: recipient fails verify_apass | blocked |
+| R5 daily USDC limit exceeded (UTC day) | blocked |
 | R6 | allowed |
+| R10 A-Token transfers: the on-chain FukuSpendGuard would revert | blocked |
+
+Rules run in the order shown. R9, R7 and R8 apply only to value actions on passports that list A-Tokens; every other passport behaves as before. Cleanverse failures fail closed and carry a sub-code (for example `CVI_FROZEN`).
 
 Trust score (`web/src/lib/engine/reputation.ts`): 40 baseline, +20 verified human owner, +5 active passport, +2.5 per successful action (max +35), −4 per violation (max −40), −10 per security event. Bounded 0–100; High ≥ 85, Medium ≥ 60.
 
 Every action runs the same workflow: request → owner verified → passport evaluated → execute or block → proof anchored on Monad → reputation updated → explanation generated (Kimi/Qwen when keys are set, otherwise a rule-based narrator).
 
+## Cleanverse A-Token payments
+
+A passport that lists A-Tokens (`assets: ["aUSDC"]`) lets its agent `transfer` only after Cleanverse checks: the asset rule, the owner's A-Pass and the recipient's A-Pass. Fuku's compliance signer then attests to that exact transfer (EIP-712), and `FukuSpendGuard` moves the token from the owner's wallet. The owner opened a mandate and approved the guard; the guard checks the agent's status, the current passport hash and a UTC daily cap on-chain, and records the decision in the same transaction.
+
+The live Cleanverse API is invite-only and has not been called yet. Until then a Fuku-built simulator answers (`CleanverseAPassSim` / `CleanverseATokenSim` on a live chain, DB fixtures in mock mode), labelled "Cleanverse simulator" in the UI and `mode: "simulated"` in the SDK. Modes, env vars, the API contract and its provenance, the local run, the flip-to-live checklist and the open questions are in [`docs/CLEANVERSE.md`](docs/CLEANVERSE.md).
+
 ## Sponsor stack
 
-Monad (settlement), Mera (passkey identity, WebAuthn), Dynamic (email sign-in with an embedded EVM wallet; the server verifies Dynamic's JWT), Privy (adapter card), Nansen (behavioural intelligence; the free `account` endpoint drives the status card, wallet labels cost 100 Nansen credits per lookup and are cached for a day), Envio (HyperSync indexes the Fuku registries on Monad for Activity → On-chain; HyperRPC verifies each decision's proof hash; HyperIndex config in `/indexer`), Kimi and Qwen (trust explanations), Chainlink CRE (`cre/fuku-guard`: HTTP-triggered workflow that verifies an agent through the Fuku API, executes the action, then reads the Monad registries through the DON; simulated end to end with `cre workflow simulate`; DON deployment requires a commercial agreement with Chainlink, see `cre/README.md`), Cleanverse (credentials). Each integration reports live or simulated in the Developer Console.
+Monad (settlement), Mera (passkey identity, WebAuthn), Dynamic (email sign-in with an embedded EVM wallet; the server verifies Dynamic's JWT), Privy (adapter card), Nansen (behavioural intelligence; the free `account` endpoint drives the status card, wallet labels cost 100 Nansen credits per lookup and are cached for a day), Envio (HyperSync indexes the Fuku registries on Monad for Activity → On-chain; HyperRPC verifies each decision's proof hash; HyperIndex config in `/indexer`), Kimi and Qwen (trust explanations), Chainlink CRE (`cre/fuku-guard`: HTTP-triggered workflow that verifies an agent through the Fuku API, executes the action, then reads the Monad registries through the DON; simulated end to end with `cre workflow simulate`; DON deployment requires a commercial agreement with Chainlink, see `cre/README.md`), Cleanverse (A-Pass and A-Token checks before an agent moves value; simulated until the API invite lands, see `docs/CLEANVERSE.md`). Each integration reports its mode in the Developer Console.

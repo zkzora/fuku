@@ -2,7 +2,7 @@
 
 Track: Trust, Identity & AI Infrastructure on Monad.
 Audience: the judges, and the founder who delivers it.
-Every claim below was checked against the code in this repository on 2026-09-23. Where something is simulated, this document says so.
+Every claim below was checked against the code in this repository on 2026-09-30. Where something is simulated, this document says so.
 
 ---
 
@@ -14,59 +14,65 @@ Every claim below was checked against the code in this repository on 2026-09-23.
 
 "AI agents are starting to hold money, keys and calendars, and nobody can answer three questions about an agent: who is the human behind it, what is it allowed to do, and should I trust it. Fuku answers all three. A human creates an identity with a passkey. They register their agent and approve a permission passport: allowed actions, daily USDC limits, hard blocks, app scope. Every action the agent attempts runs through a deterministic engine that allows or blocks it with a rule id, anchors a proof on Monad, updates an explainable trust score and explains the outcome in plain language. Any application can verify an agent with one SDK call. Identity, permissions, reputation: one primitive, built on Monad."
 
-Settlement status (2026-09-24): the four registries are deployed on Monad testnet (chain 10143, `contracts/deployments/monadTestnet.json`) and the app runs in live mode, so "anchors a proof on Monad" is literally true; every receipt links to a real transaction on testnet.monadexplorer.com. Keep the mock-mode substitutions in section 2 only as a contingency if the deployer wallet runs out of MON or the RPC is down on the day.
+Settlement status (2026-09-24): the four registries are deployed on Monad testnet (chain 10143, `contracts/deployments/monadTestnet.json`) and the app runs in live mode, so "anchors a proof on Monad" is literally true; every receipt links to a real transaction on testnet.monadexplorer.com. Keep the mock-mode substitutions in section 2 only as a contingency if the deployer wallet runs out of MON or the RPC is down on the day. The Cleanverse simulator and FukuSpendGuard are not on Monad testnet yet: they were verified on a local node, and deploying them to the existing testnet stack is four transactions that still need a go-ahead (section 4, step 5).
 
 ---
 
 ## 2. Three-minute talk track (synchronised with the live demo)
 
-**Before you walk on.** Open `http://localhost:3001/api/auth/demo?reset=1&next=/sign-in` once. This reseeds Ava Chen so the Trading Assistant starts at 96, then lands on the sign-in page. Leave that tab open. Spoken words below: 345, which leaves room to breathe. The lines are written for live settlement; if the Monad card still says simulated on the day, apply the three substitutions listed after the talk track.
+**Before you walk on.** Open `http://localhost:3001/api/auth/demo?reset=1&next=/sign-in` once. This reseeds Ava Chen so the Trading Assistant starts at 96, then lands on the sign-in page. Leave that tab open. The supplier-payment beat needs the Cleanverse simulator and FukuSpendGuard on the chain you present on, plus `npm run cleanverse:setup` once (section 4). Without them the preset is blocked with R7 `PROVIDER_OFF`, so skip that beat. Spoken words below: 344, which leaves room to breathe. The lines are written for live settlement; if the Monad card still says simulated on the day, apply the three substitutions listed after the talk track.
 
-### 0:00 to 0:20 · Sign in
+### 0:00 to 0:15 · Sign in
 
 **Click:** on `/sign-in`, press **Try the demo as Ava Chen**. (If Windows Hello is set up on this machine and you want a real WebAuthn ceremony, type a name and press **Create with passkey** instead. Only do this if you rehearsed it on this exact machine.)
 
-**Say:** "AI agents are about to hold our money and our calendars, and nobody can answer three questions about one: who is the human behind it, what is it allowed to do, and should I trust it. Fuku answers all three on Monad. Sign-in is by passkey, a real WebAuthn ceremony, and a passkey identity is human-verified from the first second. I am taking the demo shortcut into Ava's seeded account to save time."
+**Say:** "AI agents are about to hold our money, and nobody can answer three questions about one: who is the human behind it, what is it allowed to do, and should I trust it. Fuku answers all three on Monad. Sign-in is a real passkey ceremony; I'm taking the demo shortcut into Ava's account."
 
-### 0:20 to 0:45 · Dashboard
+### 0:15 to 0:35 · Dashboard
 
-**Click:** nothing. Point at the identity card, the trust ring (96), the Agents tile (4), and the Permission status list.
+**Click:** nothing. Point at the identity card, the trust ring (96), the Agents tile (5), and the Permission status list.
 
-**Say:** "This is Ava. She owns four agents. Her Trading Assistant scores 96 and carries a passport: swap up to 5,000 USDC a day on Monad DEX, read balances, price feeds. Withdraw, transfer and change owner are hard-blocked. That passport is the product."
+**Say:** "This is Ava. She owns five agents. Her Trading Assistant scores 96 and carries a passport: swap up to 5,000 USDC a day on Monad DEX, read balances, price feeds. Withdraw, transfer and change owner are hard-blocked. That passport is the product."
 
-### 0:45 to 1:10 · Register an agent
+### 0:35 to 0:55 · Register an agent
 
 **Click:** **Register agent** (top right). Name: `Support Agent`. Keep the default capabilities (Swap assets, Read balances). Press **Register agent**. You land on the Permission Manager with the new agent selected, status pill "Just registered", "No passport".
 
-**Say:** "Registering an agent takes ten seconds. It gets a portable Fuku identity owned by Ava, in the direction of ERC-8004, and it stays inactive until she attaches a passport. Deny by default."
+**Say:** "Registering an agent takes ten seconds. It gets a portable identity owned by Ava, and stays inactive until she approves a passport. Deny by default."
 
-### 1:10 to 1:35 · Approve the passport
+### 0:55 to 1:15 · Approve the passport
 
 **Click:** the editor is prefilled: declared capabilities allowed, swap limited to 5,000 USDC a day, withdraw and change owner blocked. Type `Monad DEX` in the app scope field. Press **Approve passport**. The status pill flips to "active".
 
 **Say:** "Allowed, limited, or blocked, per capability, plus an app scope. Approving hashes the policy and anchors the hash, and the agent goes active. The owner never writes code."
 
-### 1:35 to 2:15 · Run the unauthorized action (the climax)
+### 1:15 to 1:50 · Run the unauthorized action (the climax)
 
 **Click:** sidebar **Dashboard**. In the card titled "Run an unauthorized action", press **Run agent action**. A result dialog opens. Leave it open while you talk.
 
-**Say:** "Now the part that matters. Trading Assistant tries to withdraw 4,800 USDC. Every action runs the same seven-step workflow: request, owner verified, passport evaluated, execute or block, proof anchored on Monad, reputation updated, explanation. Blocked by rule R2: withdraw is on the hard block list. Here is the trace, the proof hash, the Monad receipt, and an explanation a non-technical owner can read. Nothing left Ava's control."
+**Say:** "Trading Assistant tries to withdraw 4,800 USDC. Every action runs the same workflow: request, owner verified, passport evaluated, execute or block, proof anchored on Monad, reputation, explanation. Blocked by rule R2: withdraw is hard-blocked. Here is the trace, the proof hash, the Monad receipt, and a plain-language explanation. Nothing left Ava's control."
 
-### 2:15 to 2:40 · Reputation
+### 1:50 to 2:20 · Pay a verified supplier (Cleanverse)
+
+**Click:** close the dialog. In the card titled "Pay a verified supplier", press **Run agent action**. Point at the three Cleanverse checks, the "Cleanverse simulator" badge and the "Token moved via FukuSpendGuard" link.
+
+**Say:** "Now money that should move. Payments Agent pays 250 aUSDC to Nusantara Supplies. Fuku checks the token rule and both A-Passes with Cleanverse, then FukuSpendGuard moves the token from Ava's wallet under her on-chain daily cap, in one transaction. A frozen recipient gets rule R8. Until our Cleanverse API invite lands, a labelled simulator answers these checks."
+
+### 2:20 to 2:40 · Reputation
 
 **Click:** close the dialog, sidebar **Reputation**. The Trading Assistant chip now reads 92. Point at the Score breakdown card.
 
-**Say:** "The score moved from 96 to 92, and it is fully explainable: 40 baseline, plus 20 for a verified human owner, plus 5 for an active passport, plus 35 for successful actions, minus 4 per violation. Deterministic, bounded, and anyone can recompute it from the event log."
+**Say:** "The score moved from 96 to 92: 40 baseline, plus 20 for a passkey-verified owner, plus 5 for an active passport, plus 35 for successful actions, minus 4 per violation. Anyone can recompute it from the event log."
 
 ### 2:40 to 3:00 · Developer Console
 
 **Click:** sidebar **Developer Console**. Press **Run demo flow** in the "Testing environment" card. Scroll to "Integration status".
 
-**Say:** "Developers get all of this through one SDK and seven endpoints: verify an agent, dry-run a permission, execute through Fuku, read the trust score. The sandbox just ran that against the public API. And this board is honest: every sponsor card reports live or simulated from its own env var. Fuku: identity, permissions, reputation, on Monad."
+**Say:** "Developers get all of this through one SDK: verify an agent, dry-run a permission, execute through Fuku, read the trust score. The sandbox just ran that against the public API. And this board says, per sponsor, what is live and what is simulated. Fuku: identity, permissions, reputation, on Monad."
 
 ### If settlement is still mock on the day
 
-Three substitutions keep the spoken lines true. At 1:10, "anchors the hash" becomes "commits the hash for anchoring". At 1:35, "proof anchored on Monad" becomes "proof hashed for Monad", and "the Monad receipt" becomes "the receipt, mocked today; the contracts are written and tested, and the live path is one deploy away". The result dialog labels it "Monad receipt (mock)" itself, so never call it a transaction.
+Four substitutions keep the spoken lines true. At 0:55, "anchors the hash" becomes "commits the hash for anchoring". At 1:15, "proof anchored on Monad" becomes "proof hashed for Monad", and "the Monad receipt" becomes "the receipt, mocked today; the contracts are written and tested, and the live path is one deploy away". At 1:50, "moves the token ... in one transaction" becomes "would move the token; today the receipt is mocked and nothing moves". The result dialog labels mock receipts itself, so never call them transactions.
 
 ---
 
@@ -82,7 +88,7 @@ Three substitutions keep the spoken lines true. At 1:10, "anchors the hash" beco
 - Fuku writes a transaction per decision (`recordDecision`) and per score change (`updateScore`). A per-action proof log only makes sense on a chain built for high throughput and low cost per write. That is Monad's design goal, and it is why the contracts emit an event for every decision instead of batching.
 - Monad is EVM-compatible, so the four Solidity registries deploy through Hardhat unchanged and the app talks to them with viem. No custom tooling.
 - The AgentRegistry follows the ERC-8004 direction (owner-bound agent record, metadata URI, capabilities hash, lifecycle status), so Fuku agents can line up with the emerging EVM agent-identity standard rather than a proprietary format.
-- Illustrative scale, not a measurement: the seeded demo holds 25 decisions for one person's four agents over one week. A fleet of agents acting for thousands of owners is thousands of decisions per day, each one an on-chain event.
+- Illustrative scale, not a measurement: the seeded demo holds 25 decisions across one person's agents over one week. A fleet of agents acting for thousands of owners is thousands of decisions per day, each one an on-chain event.
 
 ---
 
@@ -90,7 +96,7 @@ Three substitutions keep the spoken lines true. At 1:10, "anchors the hash" beco
 
 1. **Identity.** A passkey (WebAuthn via `@simplewebauthn`) creates a Fuku identity, human-verified at creation; the passkey public-key hash and a proof hash are anchored in `HumanIdentityRegistry`, and the verified flag is set on-chain in live mode. "Human-verified" means a completed WebAuthn registration, no KYC; the server does not require the authenticator's user-verification flag.
 2. **Agents.** `AgentRegistry` binds each agent to its owner identity: name, version, capabilities hash, metadata URI, status (Registered, Active, Paused, Revoked).
-3. **Permissions.** A passport (allowed rules with optional daily USDC limits, a block list, scope apps) is evaluated by a deterministic engine with rules R0 to R6; the policy hash and version go to `PermissionRegistry`, and every decision emits `ActionDecision(agentId, actionHash, allowed, proofHash, ruleId)`.
+3. **Permissions.** A passport (allowed rules with optional daily USDC limits, a block list, scope apps, and optionally Cleanverse A-Tokens) is evaluated by a deterministic engine with rules R0 to R6, plus R7 to R10 for transfers on A-Token passports; the policy hash and version go to `PermissionRegistry`, and every decision emits `ActionDecision(agentId, actionHash, allowed, proofHash, ruleId)`. A-Token transfers move through `FukuSpendGuard`, which enforces the owner's mandate, a UTC daily cap, the agent's status and the current passport hash on-chain.
 4. **Reputation.** Score = 40 baseline + 20 verified human + 5 active passport + 2.5 per success (max 35) minus 4 per violation (max 40) minus 10 per security event, clamped to 0 to 100; the latest score is written to `ReputationRegistry` by an allow-listed scorer.
 5. **Surface.** Next.js app, public v1 API with hashed API keys, `@fuku/sdk`, Envio HyperSync indexing the four registries (Activity → On-chain) plus HyperRPC proof verification, an Envio HyperIndex config, Kimi/Qwen explanations with a rule-based fallback, and an AES-GCM encrypted memory vault.
 
@@ -99,12 +105,13 @@ Three substitutions keep the spoken lines true. At 1:10, "anchors the hash" beco
 | Component | State |
 | --- | --- |
 | Passkey identity | Real WebAuthn registration and login; identity is human-verified at creation; the stored passkey keeps its signature counter. |
-| Permission engine | Deterministic, every decision attributed to R0 to R6, per-day USDC limits, app scope. |
+| Permission engine | Deterministic, every decision attributed to a rule id: R0 to R6 as before, and R9, R7, R8 (Cleanverse asset, owner and recipient checks) plus R10 (on-chain guard) for transfers on A-Token passports. Daily limits count UTC days. 28 engine and Cleanverse tests (`cd web && npm test`). |
 | Trust score | Deterministic formula with a six-line breakdown, served by the UI, the session API and the public API. |
-| Solidity registries | Four contracts in Hardhat 3, Solidity 0.8.28, 18 passing tests, deploy script with role grants, ABI export, pre-flight and env-wiring scripts. Deployed on Monad testnet on 2026-09-24 (`contracts/deployments/monadTestnet.json`: HumanIdentityRegistry 0x9fe8…4a2b, AgentRegistry 0x41a1…5e29, PermissionRegistry 0xfe5c…46cc, ReputationRegistry 0x33a2…efad) and verified end to end against it with `web/scripts/live-smoke.mjs` (19 of 19 checks, real receipts and on-chain reads). |
-| Settlement adapter | Live path simulates each call before sending (reverts decode to the contract's custom errors), waits for the receipt, anchors missing identities, agents and passports lazily (so data created in mock mode is settled on its first live write), serializes writes from the single signer, and falls back to a mock receipt with the reason instead of failing the action. Proven end to end on a local Hardhat node with `web/scripts/live-smoke.mjs` (19 checks). |
-| SDK | `@fuku/sdk` 0.1.0, built to `dist/`, eight methods (the seven endpoints the Developer Console documents plus `revokePermission`, a DELETE on the permissions route), exercised against the running server. |
-| Proofs | `proofHash = keccak256` of the decision record (agent, action, amount, app, decision, rule id, policy hash, timestamp); seven-step workflow trace on every action. |
+| Solidity registries | Four registries plus FukuSpendGuard and two Cleanverse simulators in Hardhat 3, Solidity 0.8.28, 49 passing tests, deploy scripts with role grants, ABI export, pre-flight and env-wiring scripts. Only the four registries are on testnet. Deployed on Monad testnet on 2026-09-24 (`contracts/deployments/monadTestnet.json`: HumanIdentityRegistry 0x9fe8…4a2b, AgentRegistry 0x41a1…5e29, PermissionRegistry 0xfe5c…46cc, ReputationRegistry 0x33a2…efad) and verified end to end against it with `web/scripts/live-smoke.mjs` (19 of 19 checks, real receipts and on-chain reads). |
+| Settlement adapter | Live path simulates each call before sending (reverts decode to the contract's custom errors), waits for the receipt, anchors missing identities, agents and passports lazily (so data created in mock mode is settled on its first live write), serializes writes from the single signer, and falls back to a mock receipt with the reason instead of failing the action. Guarded transfers and the on-chain kill switch never fall back: they fail visibly. Proven end to end on a local Hardhat node with `web/scripts/live-smoke.mjs` (36 checks, 17 of them for Cleanverse and the guard). |
+| SDK | `@fuku/sdk` 0.2.0, built to `dist/`, eight methods (the seven endpoints the Developer Console documents plus `revokePermission`, a DELETE on the permissions route), with `to`, `asset` and `compliance` for A-Token payments. Four contract tests against a fake HTTP server; exercised against the running server. |
+| Proofs | `proofHash = keccak256` of the decision record (agent, action, amount, app, decision, rule id, policy hash, timestamp, plus the Cleanverse `complianceRef` when evidence exists); a workflow trace on every action. |
+| Cleanverse CVI / CVA | Real integration code: cooperate API client (envelope, AES-CBC bodies, fail-closed code mapping), asset / owner / recipient checks, evidence hashed into a `complianceRef`, A-Pass reads persisted, UI and SDK. The live API has never been called (invite pending); answers come from a Fuku-built simulator, labelled everywhere. See `docs/CLEANVERSE.md`. |
 | Memory vault | AES-GCM-256 with a PBKDF2 key (100,000 iterations) derived in the browser; the server stores ciphertext and IVs only. Today there is no passphrase prompt: every identity derives its key from the fixed `DEMO_VAULT_PASSPHRASE` constant, so the encryption is structural, not yet a secrecy guarantee. |
 
 ### What is simulated until keys are configured
@@ -115,24 +122,25 @@ Three substitutions keep the spoken lines true. At 1:10, "anchors the hash" beco
 | AI explanations | Rule-based narrator (`fuku-rules`). | Literally one env var: `KIMI_API_KEY` or `QWEN_API_KEY`. The adapter has not been exercised with a real key; on any error it falls back to the narrator. |
 | Nansen | Key configured and verified against the live API (free plan). Wallet-label lookups cost 100 Nansen credits each, so until the account holds at least 100 credits the Reputation card shows ledger-derived signals and says so. | Top up Nansen credits (or Pro plan); the code path is exercised and cached per address for a day. |
 | Envio | Live. HyperSync indexes every Fuku registry event on Monad testnet for the signed-in identity and its agents (Activity → On-chain · Envio, with block times and explorer links). HyperRPC verifies a single decision: its receipt, its ActionDecision event, and that the on-chain proof hash equals the Fuku ledger ("Verify on-chain" on an activity row). The HyperIndex config in `/indexer` carries the real addresses but is not run (it needs Docker). | Nothing for the demo. Running HyperIndex would add a GraphQL API over the same events. |
-| Privy, Cleanverse | Status cards driven by env vars. No client code behind them yet. The Cleanverse credential is a demo row attached to verified identities. | Real integration work, not just a key. Say so if asked. |
+| Privy | Status card driven by an env var. No client code behind it yet. | Real integration work, not just a key. Say so if asked. |
+| Cleanverse | Simulated, "API invite pending". With a live chain, Fuku's `CleanverseAPassSim` and `CleanverseATokenSim` (aUSDC-SIM) answer; with a mocked chain, DB fixtures with the same semantics do. Verified end to end on a local node (36/36 smoke), not yet deployed to Monad testnet. | The API invite, then the checklist in `docs/CLEANVERSE.md` (`npm run cleanverse:check` first). For the simulator on testnet: `npm run deploy:cleanverse:monad` (four transactions, needs the owner's go-ahead). |
 | Chainlink CRE | Real workflow in `cre/fuku-guard` (TypeScript, CRE SDK 1.22): HTTP trigger, verify through the Fuku API, execute, then an EVM read of the Monad registries through the DON. Proven with `cre workflow simulate` against the live app: a blocked withdraw produced a real Monad transaction and CRE read back the matching score. Not deployed to the DON: Chainlink answered our access request (2026-09-24) that hackathon teams simulate locally, and that testnet or mainnet deployment goes through a commercial call and an MNDA. | A commercial agreement with Chainlink, then `node cre/deploy.mjs` (tunnel, secret, deploy, `CRE_WORKFLOW_ID`) is ready to run. |
 | On-chain human flag | In live mode the app sets `setHumanVerified` itself, because its signer is the registry owner (the verifier role). | An independent verifier holding that role is future work. |
-| Signing model | In live mode the server signs everything with one relayer key that is registry owner, identity controller, enforcer and scorer. | Owner-controlled keys (next step). |
+| Signing model | In live mode the server signs everything with one relayer key that is registry owner, identity controller, enforcer and scorer. A second server key, the compliance signer, signs guarded-transfer attestations. The owner's own wallet signs only the token approval and the guard mandate. | Owner-controlled keys (next step). |
 | Seeded demo data | Ava Chen, her four agents and their history are seeded; their tx hashes are placeholders. In live mode they are anchored lazily on the first write (extra transactions on that first action). | Pre-warm before the pitch (see the runbook). |
 
 ### Going live on Monad testnet before the demo (the founder's runbook)
 
 1. Generate a fresh key and fund it from the Monad faucet (`https://faucet.monad.xyz`). Never reuse a mainnet key.
 2. `contracts/.env`: `DEPLOYER_PRIVATE_KEY=0x...` and `MONAD_RPC_URL=https://testnet-rpc.monad.xyz`.
-3. `cd contracts && npm install && npm test` (18 passing), then `npm run check:deployer`. It derives the address, confirms chain id 10143 and a non-zero MON balance, and warns below 0.1 MON. A full deploy sends six transactions (four deploys, two role grants).
-4. `npm run deploy:monad`. It deploys the four contracts in order, grants the deployer the enforcer and scorer roles, and writes `contracts/deployments/monadTestnet.json`.
-5. `npm run wire:env`. It backs up `web/.env` to `web/.env.bak`, then upserts `FUKU_CHAIN_MODE=live`, `FUKU_CHAIN_ID=10143`, `MONAD_RPC_URL`, `DEPLOYER_PRIVATE_KEY` and the four `FUKU_*_REGISTRY` lines. Preview first with `node scripts/wire-env.mjs --dry-run`. The web signer must be the account that deployed, because it holds the owner, enforcer and scorer roles; `wire:env` copies the same key.
+3. `cd contracts && npm install && npm test` (49 passing), then `npm run check:deployer`. It derives the address, confirms chain id 10143 and a non-zero MON balance, and warns below 0.1 MON. A full deploy sends ten transactions (seven deploys, three role grants).
+4. `npm run deploy:monad`. It deploys the four registries in order, grants the deployer the enforcer and scorer roles, deploys the two Cleanverse simulators and FukuSpendGuard (compliance signer from `COMPLIANCE_SIGNER_ADDRESS`, else the deployer with a warning), makes the guard an enforcer, and writes `contracts/deployments/monadTestnet.json`. For the stack that is already on testnet, `npm run deploy:cleanverse:monad` adds only the three new contracts and the enforcer grant (four transactions) and never touches the registries.
+5. `npm run wire:env`. It backs up `web/.env` to `web/.env.bak`, then upserts `FUKU_CHAIN_MODE=live`, `FUKU_CHAIN_ID=10143`, `MONAD_RPC_URL`, `DEPLOYER_PRIVATE_KEY`, the four `FUKU_*_REGISTRY` lines and, when deployed, `FUKU_SPEND_GUARD`, `CLEANVERSE_SIM_APASS` and `CLEANVERSE_SIM_ATOKEN` (plus `FUKU_COMPLIANCE_SIGNER_KEY` from `contracts/.env`). Then, for the supplier-payment beat, add `DEMO_OWNER_PRIVATE_KEY` (a fresh testnet key for Ava's wallet) to `web/.env` and run `cd web && npm run cleanverse:setup`: it issues the simulator A-Passes, mints 10,000 aUSDC-SIM to Ava, tops up her gas, and opens the 1,000/day mandate. Preview first with `node scripts/wire-env.mjs --dry-run`. The web signer must be the account that deployed, because it holds the owner, enforcer and scorer roles; `wire:env` copies the same key.
 6. Restart the dev server (`cd web && npm run dev -- -p 3001`); env is read at startup.
 7. Check: Developer Console, the pill next to "Integration status" reads "Monad Testnet · chain 10143 · live settlement" and the Monad card says live. `curl http://localhost:3001/api/integrations` shows `chain.mode: "live"` and the signer address.
 8. Produce a real receipt: **Create with passkey** (`registerIdentity` then `setHumanVerified`), **Register agent** (`registerAgent`), **Approve passport** (`setPolicy`), then run a withdraw of 4,800 from the Permission Manager's "Test an action against the passport" form (`recordDecision` then `updateScore`; the dashboard preset only targets Trading Assistant). The result dialog now says "Monad transaction" and the link opens on `testnet.monadexplorer.com`. Each write waits for its receipt (up to 90 seconds), so expect a short pause per anchor.
 9. Pre-warm the seeded demo. Ava Chen and Trading Assistant were never anchored, so their first live action adds three transactions in front (`registerIdentity`, `setHumanVerified`, `registerAgent`) and the receipt notes "Anchored first: ...". Run one action on Trading Assistant before the pitch (the sandbox's **Run demo flow** does it), then open the `?reset=1` link. The on-chain records survive the reseed because the ids are fixed, so the live demo action is two transactions again.
-10. Rehearse without testnet if you want: `npx hardhat node` in `contracts/`, `npx hardhat run scripts/deploy.ts --network localhost`, then wire the web app to the node's account #0 for that run only: `DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 MONAD_RPC_URL=http://127.0.0.1:8545 npm run wire:env -- --network localhost` (without those two overrides `wire:env` writes the testnet RPC and refuses to run without a key), and set `FUKU_CHAIN_NAME="Hardhat local"` in `web/.env`. Same code path, chain id 31337, receipts are real but the explorer link points at Monad's explorer and will not resolve. Re-run `npm run wire:env` with no overrides to point back at testnet.
+10. Rehearse without testnet if you want: `npx hardhat node` in `contracts/`, `COMPLIANCE_SIGNER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 npx hardhat run scripts/deploy.ts --network localhost` (account #1 is the compliance signer, account #2 is Ava for `DEMO_OWNER_PRIVATE_KEY`; `docs/CLEANVERSE.md` has the full local run), then wire the web app to the node's account #0 for that run only: `DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 MONAD_RPC_URL=http://127.0.0.1:8545 npm run wire:env -- --network localhost` (without those two overrides `wire:env` writes the testnet RPC and refuses to run without a key), and set `FUKU_CHAIN_NAME="Hardhat local"` in `web/.env`. Same code path, chain id 31337, receipts are real but the explorer link points at Monad's explorer and will not resolve. Re-run `npm run wire:env` with no overrides to point back at testnet.
 11. Optional: open Activity → On-chain · Envio to show the same decisions read back from Monad by Envio HyperSync, and press Verify on-chain on the fresh blocked withdraw (Envio HyperRPC).
 12. Never commit `web/.env`, `web/.env.bak` or `contracts/.env`.
 
@@ -153,7 +161,7 @@ Source of truth: `web/src/lib/integrations/index.ts`, rendered on the Developer 
 | Kimi | AI | Trust explanations for decisions and scores (OpenAI-compatible chat, 9 s timeout). | `KIMI_API_KEY` (adapter not yet exercised with a real key). | Deterministic rule narrator. |
 | Qwen | AI | Policy interpretation and explanations (same adapter, tried after Kimi). | `QWEN_API_KEY` (same caveat). | Deterministic rule narrator. |
 | Chainlink CRE | Automation | `fuku-guard` workflow: request (HTTP trigger), verify (Fuku API: human owner, trust score, dry run; low-trust agents are rejected before execution), execute (Fuku API, one call across the DON), record (EVM read of PermissionRegistry and ReputationRegistry on monad-testnet). Actions it submits are tagged "via Chainlink CRE" in the activity timeline. | `CRE_WORKFLOW_ID` from `cre workflow deploy`, which Chainlink gates behind a commercial agreement (hackathons simulate). | Runs end to end with `cre workflow simulate`; the in-app seven-step trace runs on every action regardless. |
-| Cleanverse | Credentials | Verified identity credential shown on the Identity page. | `CLEANVERSE_API_KEY` flips the card. | A demo credential row is attached to every verified identity. |
+| Cleanverse | Credentials | A-Pass (CVI) and A-Token (CVA) checks before an agent moves value: asset rule (R9), owner A-Pass (R7), recipient A-Pass (R8), evidence hashed into the attestation that FukuSpendGuard verifies; the owner's A-Pass card on the Identity page. | Live only after a call to the cooperate API has succeeded with `CLEANVERSE_API_ID` and `CLEANVERSE_API_KEY` (the card says "configured" before that). | Simulated, "API invite pending": Fuku's simulator contracts (live chain) or DB fixtures (mock chain), labelled "Cleanverse simulator" in the UI and `mode: "simulated"` in the SDK. |
 
 ---
 
@@ -184,10 +192,13 @@ Direction, not conformance. `AgentRegistry` follows the ERC-8004 shape: an agent
 The Developer Console already issues API keys, so the natural model is usage-based: free for owners, metered `verifyAgent`, `checkPermission` and `executeAction` calls for applications, and paid policy features for teams running agent fleets.
 
 **9. What would you build next?**
-Owner-controlled keys as the on-chain identity controller (passkey-signed or a Privy embedded wallet) instead of the relayer. An independent verifier for the human flag. Run Envio HyperIndex for a GraphQL API over the registry events. Deploy the `fuku-guard` CRE workflow to the DON after a commercial agreement with Chainlink (the deploy script is ready). ERC-8004 interface conformance. Risk-weighted scoring. A per-user vault passphrase (or a passkey-derived key) in place of the fixed demo constant. Publish `@fuku/sdk` to npm.
+Cleanverse live once the API invite lands (the client and checklist are ready). Owner-controlled keys as the on-chain identity controller (passkey-signed or a Privy embedded wallet) instead of the relayer. An independent verifier for the human flag. Run Envio HyperIndex for a GraphQL API over the registry events. Deploy the `fuku-guard` CRE workflow to the DON after a commercial agreement with Chainlink (the deploy script is ready). ERC-8004 interface conformance. Risk-weighted scoring. A per-user vault passphrase (or a passkey-derived key) in place of the fixed demo constant. Publish `@fuku/sdk` to npm.
 
 **10. How are daily limits enforced?**
-Per agent and per action type. Before evaluating a value action (swap, withdraw, transfer, stake), Fuku sums that agent's allowed actions of the same type since local midnight and blocks with rule R5 when the amount exceeds the limit minus what was spent. In the seed, Trading Assistant may swap 5,000 USDC a day and has already swapped 1,200 today, so 3,800 remains. Blocked attempts do not consume budget. Limits reset at midnight, server time; a rolling 24-hour window and on-chain limit checks are future work.
+Per agent and per action type. Before evaluating a value action (swap, withdraw, transfer, stake), Fuku sums that agent's allowed actions of the same type since midnight UTC and blocks with rule R5 when the amount exceeds the limit minus what was spent. In the seed, Trading Assistant may swap 5,000 USDC a day and has already swapped 1,200 today, so 3,800 remains. Blocked attempts do not consume budget. For A-Token transfers there is a second, on-chain limit: FukuSpendGuard enforces the owner's mandate cap per agent, wallet and UTC day in token base units, atomically with the transfer, so two concurrent requests cannot both spend the same remainder. The off-chain R5 check is a pre-check and is not atomic.
+
+**11. Is this real Cleanverse?**
+The integration code is real; the answers are not Cleanverse's yet, and the product says so. Fuku has a client for Cleanverse's cooperate API (`query_apass`, `verify_apass`, `atoken/rules`, the A-Token list, Travel Rule), with the envelope, encryption and fail-closed code mapping, tested against a fake server. API access is invite-only and ours is pending, so a Fuku-built simulator answers today: an A-Pass contract and an `aUSDC-SIM` token with the same verify codes, or DB fixtures when the chain is mocked. The UI badges it "Cleanverse simulator", the SDK returns `mode: "simulated"`, and the integration card reads "API invite pending". What does not depend on Cleanverse is real on the chain we run: FukuSpendGuard checks the attestation, the agent's status, the current passport hash, the owner's mandate and the daily cap before the token moves. When the invite lands, it is credentials plus the checklist in `docs/CLEANVERSE.md`.
 
 ---
 
@@ -222,6 +233,7 @@ Per agent and per action type. Before evaluating a value action (swap, withdraw,
 - Jangan klik link explorer selama mode mock. Transaksinya tidak ada di explorer. Klik hanya kalau dialog hasil menulis "Monad transaction", bukan "Monad receipt (mock)".
 - Kalau juri membaca catatan "Mock settlement" di dialog, jawab jujur dan singkat: "Settlement hari ini mock. Kontraknya ada, 18 test lulus, satu deploy plus `npm run wire:env` membuatnya live." Jujur lebih menang daripada mengaku-aku.
 - Biarkan dialog hasil terbuka sekitar sepuluh detik. Sebut "rule R2" dengan jelas, lalu bacakan satu kalimat penjelasannya. Itu bagian yang paling gampang diingat.
+- Di beat Cleanverse, ucapkan kata "simulator" dengan jelas dan tunjuk badge "Cleanverse simulator". Jangan pernah bilang A-Pass itu diterbitkan Cleanverse selama kartunya masih "API invite pending".
 - Di Developer Console, jangan buru-buru scroll. Tunjuk kartu yang bertulis "simulated" dan bilang itu disengaja: juri menghargai kejujuran.
 
 **Ringkasan cara uji di Monad testnet** (detail lengkap di bagian 4, runbook).
