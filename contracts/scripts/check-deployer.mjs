@@ -129,7 +129,7 @@ async function main() {
 
   if (Number(balanceMon) < LOW_BALANCE_MON) {
     console.warn("");
-    console.warn(`Warning: balance is below ${LOW_BALANCE_MON} MON. A full deploy sends 6 transactions; if it`);
+    console.warn(`Warning: balance is below ${LOW_BALANCE_MON} MON. A full deploy sends 10 transactions; if it`);
     console.warn(`fails with "insufficient funds", top up at ${FAUCET_URL} and re-run.`);
   }
 

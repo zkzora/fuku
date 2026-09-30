@@ -10,6 +10,8 @@
     "check:deployer": "node scripts/check-deployer.mjs",
     "deploy:local": "hardhat run scripts/deploy.ts",
     "deploy:monad": "hardhat run scripts/deploy.ts --network monadTestnet",
+    "deploy:cleanverse:local": "hardhat run scripts/deploy-cleanverse.ts --network localhost",
+    "deploy:cleanverse:monad": "hardhat run scripts/deploy-cleanverse.ts --network monadTestnet",
     "wire:env": "node scripts/wire-env.mjs",
     "export-abi": "node scripts/export-abi.mjs",
     "clean": "hardhat clean"

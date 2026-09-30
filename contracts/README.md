@@ -13,11 +13,16 @@ root: run every command from inside `contracts/` and install dependencies here o
 | `AgentRegistry` | ERC-8004-inspired agent identity. Each agent is owned by a human identity; only that identity's controller can register it or change its status (`0 Registered, 1 Active, 2 Paused, 3 Revoked`). |
 | `PermissionRegistry` | The "Agent Permission Passport": per-agent policy commitment (`policyHash`, `version`, `policyURI`, `active`) plus an append-only `ActionDecision` event log and allow/violation counters. Decisions are recorded by the agent owner or by allow-listed enforcers. |
 | `ReputationRegistry` | Latest 0–100 score per agent written by allow-listed scorers; every update emits `ScoreUpdated`. |
+| `FukuSpendGuard` | Moves a funding wallet's tokens for an agent only with an EIP-712 attestation from the compliance signer, an open mandate with a daily cap, a live agent and a matching active policy. Records each transfer as an allowed decision (`"R6"`) in `PermissionRegistry` (it is an enforcer). See [below](#cleanverse-simulator-contracts--fukuspendguard). |
+| `sim/CleanverseAPassSim` | **Simulator** of the Cleanverse A-Pass (CVI): wallet-bound, non-transferable compliance credential; `verify` mirrors Cleanverse `verify_apass` codes. |
+| `sim/CleanverseATokenSim` | **Simulator** of a Cleanverse aToken (`aUSDC-SIM`, 6 decimals): ERC-20 whose transfers require an eligible A-Pass on both sides. |
 
 `Ownable.sol` is a tiny inline owner pattern (no OpenZeppelin). `IAgentRegistry.sol` is the
 narrow interface shared by the permission and reputation registries.
 
-Dependency order: `HumanIdentityRegistry` → `AgentRegistry` → `PermissionRegistry` / `ReputationRegistry`.
+Dependency order: `HumanIdentityRegistry` → `AgentRegistry` → `PermissionRegistry` / `ReputationRegistry`
+→ `CleanverseAPassSim` → `CleanverseATokenSim`, and `FukuSpendGuard` (needs `AgentRegistry` +
+`PermissionRegistry`, then `PermissionRegistry.setEnforcer(guard, true)`).
 
 ## Requirements
 
@@ -86,9 +91,15 @@ MONAD_RPC_URL=https://testnet-rpc.monad.xyz     # public endpoint; a QuickNode/A
 
 ```bash
 npm run check:deployer   # address, chain id (must be 10143) and MON balance; fails early if unfunded
-npm run deploy:monad     # 4 contracts + 2 role grants, writes deployments/monadTestnet.json
+npm run deploy:monad     # 7 contracts + 3 role grants, writes deployments/monadTestnet.json
 npm run wire:env         # backs up ../web/.env to ../web/.env.bak, upserts the live settings into it
 ```
+
+Set `COMPLIANCE_SIGNER_ADDRESS` in `.env` first (see
+[Cleanverse simulator contracts + FukuSpendGuard](#cleanverse-simulator-contracts--fukuspendguard));
+otherwise the deployer becomes the guard's compliance signer and the deploy prints a warning.
+Already deployed the four registries? `npm run deploy:cleanverse:monad` adds only the three
+new contracts to the existing `deployments/monadTestnet.json` instead of redeploying everything.
 
 Then restart the web app (`Ctrl+C`, `cd ../web && npm run dev -- -p 3001`): Next.js reads
 `.env` when it starts.
@@ -105,7 +116,11 @@ What the two helper scripts do:
   `monadTestnet`) and upserts into `../web/.env`: `FUKU_CHAIN_MODE=live`, `FUKU_CHAIN_ID`,
   `MONAD_RPC_URL`, `DEPLOYER_PRIVATE_KEY` (copied from `.env` or the environment) and
   `FUKU_IDENTITY_REGISTRY`, `FUKU_AGENT_REGISTRY`, `FUKU_PERMISSION_REGISTRY`,
-  `FUKU_REPUTATION_REGISTRY`. Existing lines are replaced in place, commented placeholders
+  `FUKU_REPUTATION_REGISTRY`; plus, when the deployments file has them, `FUKU_SPEND_GUARD`,
+  `CLEANVERSE_SIM_APASS`, `CLEANVERSE_SIM_ATOKEN`, and `FUKU_COMPLIANCE_SIGNER_KEY` when it is
+  set in `.env` or the environment (masked in `--dry-run` like the deployer key; the script
+  warns when that key's address is not the deployment's `complianceSigner`, because every
+  guarded transfer would then revert with `BadAttestation`). Existing lines are replaced in place, commented placeholders
   such as `# FUKU_AGENT_REGISTRY=0x...` are uncommented, every other line is kept, and the
   previous file is copied to `.env.bak` first. Flags: `--network <name>` (or positional),
   `--env <path>` to target another file, `--dry-run` to print the resulting file to stdout
@@ -133,11 +148,21 @@ environment), so one-off overrides work:
 
 #### Rehearse against a local node (optional)
 
-`npx hardhat node` in one terminal, then `npx hardhat run scripts/deploy.ts --network localhost`
+`npx hardhat node` in one terminal, then
+`COMPLIANCE_SIGNER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 npx hardhat run scripts/deploy.ts --network localhost`
 writes `deployments/localhost.json` (chain 31337). Wire the web app to it with the node's
-account #0 key and RPC for that run only:
-`DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 MONAD_RPC_URL=http://127.0.0.1:8545 npm run wire:env -- --network localhost`.
+account keys and RPC for that run only:
+`DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 FUKU_COMPLIANCE_SIGNER_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d MONAD_RPC_URL=http://127.0.0.1:8545 npm run wire:env -- --network localhost`.
 Re-run `npm run wire:env` (no overrides) to point it back at testnet.
+
+Local node account roles (Hardhat's well-known default accounts; **local-test values only**,
+publicly known, never fund them on a real network):
+
+| Account | Role on localhost | Address | Private key |
+| --- | --- | --- | --- |
+| #0 | Deployer: owner of every contract, registry enforcer + scorer, A-Pass issuer, aToken minter | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80` |
+| #1 | Compliance signer (`COMPLIANCE_SIGNER_ADDRESS` / `FUKU_COMPLIANCE_SIGNER_KEY`): signs `GuardedTransfer` attestations | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` | `0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d` |
+| #2 | Demo owner: the funding wallet that holds an A-Pass and aUSDC-SIM, opens the mandate and approves the guard | `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` | `0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a` |
 
 #### Monad testnet facts (verified 2026-09-23)
 
@@ -155,7 +180,8 @@ Sources agree on chain id, RPC and faucet. The only drift is the explorer hostna
 #### Troubleshooting
 
 - **insufficient funds / insufficient balance** while deploying: the deployer ran out of MON.
-  A full deploy is six transactions (four contract creations, two role grants). Top up at the
+  A full deploy is ten transactions (seven contract creations, three role grants);
+  `deploy:cleanverse:monad` is four (three creations, one role grant). Top up at the
   faucet and re-run `npm run check:deployer` until it prints a non-zero balance.
 - **Wrong chain id** (`check:deployer` says "Wrong chain", or Hardhat refuses to connect):
   `MONAD_RPC_URL` points at mainnet (143), a local node (31337) or a stale endpoint.
@@ -190,8 +216,10 @@ Sources agree on chain id, RPC and faucet. The only drift is the explorer hostna
 ### Deploy script details
 
 `npm run deploy:monad` runs `npx hardhat run scripts/deploy.ts --network monadTestnet`. The
-script deploys the four contracts in dependency order, grants the deployer the
-`enforcer` (PermissionRegistry) and `scorer` (ReputationRegistry) roles, and writes
+script deploys the four registries in dependency order, grants the deployer the
+`enforcer` (PermissionRegistry) and `scorer` (ReputationRegistry) roles, deploys the
+Cleanverse simulators and `FukuSpendGuard` through the shared `scripts/lib/cleanverse.ts`
+(which also makes the guard a PermissionRegistry enforcer), and writes
 `deployments/<network>.json`:
 
 ```json
@@ -200,17 +228,129 @@ script deploys the four contracts in dependency order, grants the deployer the
   "chainId": 10143,
   "deployer": "0x...",
   "deployedAt": "2026-...",
+  "complianceSigner": "0x...",
   "contracts": {
     "HumanIdentityRegistry": "0x...",
     "AgentRegistry": "0x...",
     "PermissionRegistry": "0x...",
-    "ReputationRegistry": "0x..."
+    "ReputationRegistry": "0x...",
+    "CleanverseAPassSim": "0x...",
+    "CleanverseATokenSim": "0x...",
+    "FukuSpendGuard": "0x..."
   }
 }
 ```
 
+Files written before the Cleanverse contracts existed have only the four registries and no
+`complianceSigner`; `scripts/deploy-cleanverse.ts` adds the rest (below).
+
 If `DEPLOYER_PRIVATE_KEY` is unset the `monadTestnet` network is configured without
 signers (read-only), and the deploy script exits with a clear error.
+
+## Cleanverse simulator contracts + FukuSpendGuard
+
+Cleanverse is not deployed on Monad testnet, so `contracts/sim/` holds two **simulators**
+that reproduce the parts of Cleanverse the demo needs. They are not Cleanverse code and hold
+no real value. `FukuSpendGuard` is a real Fuku contract (not the `cre/` workflow of a similar
+name) and works with any ERC-20, including a real Cleanverse aToken.
+
+### `CleanverseAPassSim` (A-Pass / CVI)
+
+- `APass { status, tier, subTier, group, subGroup, expiresAt, cvRecordId }`; status `0` none,
+  `1` active, `2` frozen; `expiresAt == 0` never expires.
+- Wallet-bound: there is no transfer function at all. Issuers call `issue(wallet, pass)`
+  (status must be 1 or 2) and `setStatus(wallet, status)` (0 revokes; the pass must exist).
+  The deployer is an issuer by default; the owner manages issuers with `setIssuer(addr, bool)`.
+- `verify(wallet, Rule{group, subGroup, minTier, minSubTier})` returns the Cleanverse
+  `verify_apass` code, evaluated in this order: **2** no A-Pass (status 0 / never issued) ->
+  **3** frozen or expired (`expiresAt != 0 && expiresAt <= block.timestamp`) -> **1** rule
+  rejected (`tier < minTier`, or `tier == minTier && subTier < minSubTier`, or a non-zero
+  `group` / `subGroup` that differs) -> **4** eligible. A zero rule field means "any".
+- Events `APassIssued`, `APassStatusChanged`, `IssuerSet`; errors `NotIssuer`,
+  `InvalidStatus`, `NoAPass`, `ZeroAddress`, `NotOwner`.
+
+### `CleanverseATokenSim` (aToken)
+
+- ERC-20 "Cleanverse aUSDC (Fuku simulator)" / `aUSDC-SIM`, 6 decimals, no permit.
+- Constructor takes the A-Pass address and a `Rule`; the deploy scripts use `minTier = 1`,
+  everything else "any". The owner can `setRule` (event `RuleSet`).
+- `transfer` / `transferFrom` require `verify(from) == 4` and then `verify(to) == 4`, else
+  `ComplianceRejected(address who, uint8 code)`. The spender (`msg.sender` of
+  `transferFrom`) is not checked, so the guard can move funds between eligible wallets.
+- `mint(to, amount)` is owner-only and only to eligible wallets. `setPaused(bool)` (owner,
+  mirrors Cleanverse `atoken/set_paused`) blocks transfer / transferFrom / mint with
+  `TokenPaused`. `type(uint256).max` allowances are never decremented.
+
+### `FukuSpendGuard`
+
+- `constructor(agentRegistry, permissionRegistry, complianceSigner)`; owner-only
+  `setComplianceSigner(address)` (event `ComplianceSignerSet`).
+- Mandates, keyed by (agentId, wallet), are opened by the funding wallet itself:
+  `openMandate(agentId, token, dailyCap)` / `closeMandate(agentId)`; view
+  `mandates(agentId, wallet) -> (token, dailyCap, active)`. The agent need not exist yet. The
+  wallet must also `approve` the guard on the token.
+- `execute(GuardedTransfer t, bytes sig)` (non-reentrant, callable by any relayer) checks, in
+  order: `AttestationExpired` (`block.timestamp > deadline`), `NonceUsed` (nonces are global to
+  the guard), `BadAttestation` (65-byte signature only, low-s, `v` 27/28, `ecrecover` must equal
+  `complianceSigner`), `AgentNotFound` / `AgentNotActive` (Registered and Active pass; Paused
+  and Revoked fail), `PolicyNotActive` / `PolicyMismatch` (on-chain `policyHash` must equal
+  `t.policyHash`), `NoMandate` / `TokenNotMandated`, `ZeroAmount` / `ZeroRecipient`,
+  `DailyCapExceeded(remaining)` (per agent, wallet and UTC day `block.timestamp / 1 days`).
+  It then marks the nonce, adds to the day's spend, calls `token.transferFrom(from, to, amount)`
+  (tokens that return nothing are accepted; a failing token's revert data, such as
+  `ComplianceRejected`, is bubbled unchanged), calls
+  `PermissionRegistry.recordDecision(agentId, actionHash, true, proofHash, "R6")` and emits
+  `GuardedTransferExecuted(agentId, from, to, token, amount, proofHash, complianceRef, nonce)`.
+- Views: `spentToday(agentId, wallet)`, `hashTransfer(t)` (full EIP-712 digest),
+  `domainSeparator()`, `nonceUsed(nonce)`, `GUARDED_TRANSFER_TYPEHASH`.
+
+EIP-712, as signed by the compliance signer (viem `signTypedData` with exactly these values;
+`test/FukuSpendGuard.test.ts` checks `hashTransfer` against viem `hashTypedData`):
+
+```ts
+const domain = { name: "FukuSpendGuard", version: "1", chainId, verifyingContract: guardAddress };
+const types = {
+  GuardedTransfer: [
+    { name: "agentId", type: "bytes32" },
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "token", type: "address" },
+    { name: "amount", type: "uint256" },
+    { name: "policyHash", type: "bytes32" },
+    { name: "actionHash", type: "bytes32" },
+    { name: "proofHash", type: "bytes32" },
+    { name: "complianceRef", type: "bytes32" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint64" },
+  ],
+} as const;
+// typehash: GuardedTransfer(bytes32 agentId,address from,address to,address token,uint256 amount,bytes32 policyHash,bytes32 actionHash,bytes32 proofHash,bytes32 complianceRef,uint256 nonce,uint64 deadline)
+```
+
+### Deploying them
+
+- Fresh stack: `scripts/deploy.ts` deploys them after the registries (see above).
+- Existing stack: `scripts/deploy-cleanverse.ts` reads `deployments/<network>.json`, checks
+  the chain id, that `AgentRegistry` / `PermissionRegistry` have code on chain and that the
+  signer owns `PermissionRegistry`, deploys **only** the three new contracts against the
+  existing registries, grants the guard the enforcer role, and writes the three addresses and
+  `complianceSigner` back into the same file (other fields kept). Re-running it replaces them
+  and revokes the previous guard's enforcer role. `FUKU_DEPLOYMENT_FILE=<path>` targets a
+  different file.
+
+```bash
+npm run deploy:cleanverse:local   # hardhat run scripts/deploy-cleanverse.ts --network localhost
+npm run deploy:cleanverse:monad   # hardhat run scripts/deploy-cleanverse.ts --network monadTestnet
+```
+
+The compliance signer is `COMPLIANCE_SIGNER_ADDRESS` (`.env` or environment). If it is unset,
+the deployer is used and a loud warning is printed; rotate later with
+`setComplianceSigner`. The matching private key goes in `FUKU_COMPLIANCE_SIGNER_KEY` for
+`wire:env` to copy into `web/.env`. On localhost the convention is account #1 (see the
+account table under [Rehearse against a local node](#rehearse-against-a-local-node-optional)).
+
+The deploy step does not issue A-Passes, mint aUSDC-SIM or open mandates; that demo setup
+(for example for account #2 on localhost) is left to the caller.
 
 ## ABIs
 
@@ -223,7 +363,10 @@ npm run export-abi     # node scripts/export-abi.mjs
 This writes:
 
 - `abi/HumanIdentityRegistry.json`, `abi/AgentRegistry.json`,
-  `abi/PermissionRegistry.json`, `abi/ReputationRegistry.json` — plain ABI arrays
+  `abi/PermissionRegistry.json`, `abi/ReputationRegistry.json`,
+  `abi/CleanverseAPassSim.json`, `abi/CleanverseATokenSim.json`,
+  `abi/FukuSpendGuard.json` — plain ABI arrays (the simulators' artifacts come from
+  `artifacts/contracts/sim/`)
 - `abi/index.ts` — `as const` exports for viem / wagmi:
 
 ```ts
@@ -233,7 +376,10 @@ const agent = getContract({ address, abi: AgentRegistryAbi, client });
 ```
 
 Exported names: `HumanIdentityRegistryAbi`, `AgentRegistryAbi`, `PermissionRegistryAbi`,
-`ReputationRegistryAbi`, plus the `FukuAbis` map and the `FukuContractName` type.
+`ReputationRegistryAbi`, `CleanverseAPassSimAbi`, `CleanverseATokenSimAbi`,
+`FukuSpendGuardAbi`, plus the `FukuAbis` map and the `FukuContractName` type. The same
+exports are also written to `../web/src/lib/chain/abi.ts` (set `FUKU_WEB_ABI_PATH=skip` to
+skip that copy).
 
 Re-run the export whenever a contract interface changes; `abi/` is committed so
 consumers do not need to compile.
@@ -242,10 +388,13 @@ consumers do not need to compile.
 
 ```
 contracts/
-  contracts/            Solidity sources
-  test/                 node:test suites + fixtures.ts
+  contracts/            Solidity sources (registries, FukuSpendGuard)
+  contracts/sim/        Cleanverse simulators (CleanverseAPassSim, CleanverseATokenSim)
+  test/                 node:test suites + fixtures.ts (deployFukuStack, deployCleanverseStack)
   scripts/check-deployer.mjs   pre-flight: address, chain id, MON balance (npm run check:deployer)
   scripts/deploy.ts            deploy + role grants + deployments/<network>.json
+  scripts/deploy-cleanverse.ts add only the Cleanverse sims + guard to an existing deployment
+  scripts/lib/cleanverse.ts    shared deploy step for the sims + guard
   scripts/wire-env.mjs         deployments/<network>.json -> ../web/.env (npm run wire:env)
   scripts/export-abi.mjs
   abi/                  exported ABIs (JSON + index.ts)

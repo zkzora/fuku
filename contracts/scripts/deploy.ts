@@ -1,6 +1,12 @@
 /**
  * Deploys the Fuku Protocol registries in dependency order, grants the deployer the
- * enforcer + scorer roles, and writes deployments/<network>.json.
+ * enforcer + scorer roles, deploys the Cleanverse simulators + FukuSpendGuard on top
+ * (scripts/lib/cleanverse.ts; the guard becomes an enforcer), and writes
+ * deployments/<network>.json.
+ *
+ * The guard's compliance signer is COMPLIANCE_SIGNER_ADDRESS (falls back to the deployer
+ * with a warning). To add only the Cleanverse contracts to an existing stack, use
+ * scripts/deploy-cleanverse.ts instead.
  *
  *   npx hardhat run scripts/deploy.ts                        # in-process simulated network
  *   npx hardhat run scripts/deploy.ts --network monadTestnet # needs DEPLOYER_PRIVATE_KEY
@@ -8,8 +14,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { network } from "hardhat";
+import { deployCleanverse } from "./lib/cleanverse.ts";
 
-const { viem, networkName } = await network.create();
+const connection = await network.create();
+const { viem, networkName } = connection;
 const publicClient = await viem.getPublicClient();
 const walletClients = await viem.getWalletClients();
 
@@ -53,16 +61,26 @@ console.log("Granting roles to deployer...");
 await wait("setEnforcer(deployer)", permissionRegistry.write.setEnforcer([deployer.account.address, true]));
 await wait("setScorer(deployer)", reputationRegistry.write.setScorer([deployer.account.address, true]));
 
+console.log("Deploying Cleanverse simulators + FukuSpendGuard...");
+const cleanverse = await deployCleanverse(connection, {
+  AgentRegistry: agentRegistry.address,
+  PermissionRegistry: permissionRegistry.address,
+});
+
 const deployment = {
   network: networkName,
   chainId,
   deployer: deployer.account.address,
   deployedAt: new Date().toISOString(),
+  complianceSigner: cleanverse.complianceSigner,
   contracts: {
     HumanIdentityRegistry: identityRegistry.address,
     AgentRegistry: agentRegistry.address,
     PermissionRegistry: permissionRegistry.address,
     ReputationRegistry: reputationRegistry.address,
+    CleanverseAPassSim: cleanverse.CleanverseAPassSim,
+    CleanverseATokenSim: cleanverse.CleanverseATokenSim,
+    FukuSpendGuard: cleanverse.FukuSpendGuard,
   },
 };
 

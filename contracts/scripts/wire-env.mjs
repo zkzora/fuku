@@ -14,16 +14,23 @@
  *   FUKU_IDENTITY_REGISTRY, FUKU_AGENT_REGISTRY,
  *   FUKU_PERMISSION_REGISTRY, FUKU_REPUTATION_REGISTRY
  *
- *   npm run wire:env                                   # monadTestnet -> ../web/.env
+ * and, when present:
+ *
+ *   FUKU_SPEND_GUARD, CLEANVERSE_SIM_APASS, CLEANVERSE_SIM_ATOKEN   (from the deployments file)
+ *   FUKU_COMPLIANCE_SIGNER_KEY=<key>   (from contracts/.env or the environment: the key whose
+ *                                       address FukuSpendGuard trusts, see "complianceSigner")
+ *
+ *   npm run wire:env                                  # monadTestnet -> ../web/.env
  *   node scripts/wire-env.mjs --network monadTestnet   # same
  *   node scripts/wire-env.mjs --dry-run                # print the result to stdout, write nothing
  *   node scripts/wire-env.mjs --env /path/to/.env      # target another env file
  *
- * The private key value is masked in --dry-run output and never logged.
+ * Private key values are masked in --dry-run output and never logged.
  */
 import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { privateKeyToAccount } from "viem/accounts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const contractsEnv = path.join(root, ".env");
@@ -36,7 +43,13 @@ const CONTRACT_KEYS = {
   PermissionRegistry: "FUKU_PERMISSION_REGISTRY",
   ReputationRegistry: "FUKU_REPUTATION_REGISTRY",
 };
-const SECRET_KEYS = new Set(["DEPLOYER_PRIVATE_KEY"]);
+/** Written only when the deployments file has them (added by the Cleanverse deploy step). */
+const OPTIONAL_CONTRACT_KEYS = {
+  FukuSpendGuard: "FUKU_SPEND_GUARD",
+  CleanverseAPassSim: "CLEANVERSE_SIM_APASS",
+  CleanverseATokenSim: "CLEANVERSE_SIM_ATOKEN",
+};
+const SECRET_KEYS = new Set(["DEPLOYER_PRIVATE_KEY", "FUKU_COMPLIANCE_SIGNER_KEY"]);
 
 /** A problem the user can fix; reported without a stack trace. */
 class UserError extends Error {}
@@ -163,12 +176,17 @@ function main() {
     ]);
   }
 
-  // --- key + rpc -------------------------------------------------------------------
-  const rawKey = process.env.DEPLOYER_PRIVATE_KEY?.trim();
-  const key = rawKey ? (rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`) : undefined;
-  if (key && !/^0x[0-9a-fA-F]{64}$/.test(key)) {
-    fail(["DEPLOYER_PRIVATE_KEY is malformed: expected 0x followed by 64 hex characters."]);
-  }
+  // --- keys + rpc ------------------------------------------------------------------
+  const readKey = (name) => {
+    const raw = process.env[name]?.trim();
+    const value = raw ? (raw.startsWith("0x") ? raw : `0x${raw}`) : undefined;
+    if (value && !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+      fail([`${name} is malformed: expected 0x followed by 64 hex characters.`]);
+    }
+    return value;
+  };
+  const key = readKey("DEPLOYER_PRIVATE_KEY");
+  const complianceKey = readKey("FUKU_COMPLIANCE_SIGNER_KEY");
   if (!key && !opts.dryRun) {
     fail([
       "DEPLOYER_PRIVATE_KEY is not set, so the web app would have nothing to sign with.",
@@ -184,7 +202,32 @@ function main() {
     MONAD_RPC_URL: rpcUrl,
     ...(key ? { DEPLOYER_PRIVATE_KEY: key } : {}),
     ...Object.fromEntries(Object.entries(CONTRACT_KEYS).map(([name, envKey]) => [envKey, contracts[name]])),
+    ...Object.fromEntries(
+      Object.entries(OPTIONAL_CONTRACT_KEYS)
+        .filter(([name]) => isAddress(contracts[name]))
+        .map(([name, envKey]) => [envKey, contracts[name]]),
+    ),
+    ...(complianceKey ? { FUKU_COMPLIANCE_SIGNER_KEY: complianceKey } : {}),
   };
+
+  // FukuSpendGuard only accepts attestations from deployment.complianceSigner; any other key
+  // would make every guarded transfer revert with BadAttestation.
+  const notes = [];
+  if (complianceKey && isAddress(deployment.complianceSigner)) {
+    const signerAddress = privateKeyToAccount(complianceKey).address;
+    if (signerAddress.toLowerCase() !== deployment.complianceSigner.toLowerCase()) {
+      notes.push(
+        `Warning:    FUKU_COMPLIANCE_SIGNER_KEY belongs to ${signerAddress}, but FukuSpendGuard trusts ${deployment.complianceSigner}.`,
+        "            Guarded transfers would revert with BadAttestation. Use the matching key, or call",
+        "            FukuSpendGuard.setComplianceSigner(<your key's address>) from the owner account.",
+      );
+    }
+  } else if (isAddress(contracts.FukuSpendGuard) && !complianceKey) {
+    notes.push(
+      "Note:       FUKU_COMPLIANCE_SIGNER_KEY not set; line omitted. The web app needs it to sign",
+      `            GuardedTransfer attestations (FukuSpendGuard trusts ${deployment.complianceSigner ?? "?"}).`,
+    );
+  }
 
   const envExists = existsSync(opts.env);
   const before = envExists ? readFileSync(opts.env, "utf8") : "";
@@ -197,13 +240,18 @@ function main() {
   );
   log(`Target:     ${opts.env}${envExists ? "" : " (does not exist yet, will be created)"}`);
   if (!key) log("Note:       DEPLOYER_PRIVATE_KEY not set; line omitted. Live mode needs it (see contracts/.env.example).");
+  for (const line of notes) log(line);
   log("");
   for (const [k, v] of Object.entries(updates)) log(`  ${pad(`${k}=${mask(k, v)}`, 78)} ${changes.get(k) ?? "unchanged"}`);
   log("");
 
   if (opts.dryRun) {
-    log(`--- dry run: resulting ${path.basename(opts.env)} (nothing written, secret masked) ---`);
-    const shown = after.replace(/^(DEPLOYER_PRIVATE_KEY=)(\S+)$/m, (_, k, v) => `${k}${mask("DEPLOYER_PRIVATE_KEY", v)}`);
+    log(`--- dry run: resulting ${path.basename(opts.env)} (nothing written, secrets masked) ---`);
+    let shown = after;
+    for (const k of SECRET_KEYS) {
+      // no `$` anchor: with CRLF line endings the \r would sit between the value and `$`
+      shown = shown.replace(new RegExp(`^(${k}=)(\\S+)`, "gm"), (_, prefix, v) => `${prefix}${mask(k, v)}`);
+    }
     process.stdout.write(shown);
     log("--- end dry run ---");
     return;
