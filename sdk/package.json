@@ -1,6 +1,6 @@
 {
   "name": "@fuku/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Fuku Protocol SDK: human-backed AI agent identity, permission passports and portable reputation on Monad.",
   "type": "module",
   "main": "./dist/index.js",
