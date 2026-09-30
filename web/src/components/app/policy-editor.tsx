@@ -21,10 +21,11 @@ export function PolicyEditor({ agent, onSaved }: { agent: AgentView; onSaved: ()
   const [rules, setRules] = useState(initial.rules);
   const [limits, setLimits] = useState(initial.limits);
   const [scope, setScope] = useState(initial.scope);
+  const [assets, setAssets] = useState(initial.assets);
   const [busy, setBusy] = useState<null | "save" | "revoke">(null);
   // The parent remounts this editor (via `key`) whenever the agent or its passport changes.
 
-  const dirty = JSON.stringify({ rules, limits, scope }) !== JSON.stringify(initial);
+  const dirty = JSON.stringify({ rules, limits, scope, assets }) !== JSON.stringify(initial);
 
   function setRule(action: string, state: RuleState) {
     setRules((r) => ({ ...r, [action]: state }));
@@ -38,7 +39,8 @@ export function PolicyEditor({ agent, onSaved }: { agent: AgentView; onSaved: ()
       })),
       blocked: ACTIONS.filter((a) => rules[a] === "blocked"),
       scopeApps: scope.split(",").map((s) => s.trim()).filter(Boolean),
-      assets: agent.policy?.assets ?? [],
+      // Only transfer moves A-Tokens, so the asset list goes with it.
+      assets: rules.transfer === "allowed" ? assets : [],
     };
     if (doc.allowed.length === 0) return toast.error("Allow at least one capability.");
     setBusy("save");
@@ -141,6 +143,11 @@ export function PolicyEditor({ agent, onSaved }: { agent: AgentView; onSaved: ()
                   </label>
                 )}
               </div>
+              {a === "transfer" && state === "allowed" && (
+                <div className="md:col-span-3">
+                  <AssetSelector assets={assets} onChange={setAssets} />
+                </div>
+              )}
             </div>
           );
         })}
@@ -201,7 +208,41 @@ function fromPolicy(policy: AgentView["policy"], capabilities: string[]) {
     for (const b of DEFAULT_BLOCKED) if (rules[b] !== "allowed") rules[b] = "blocked";
     if (rules.swap === "allowed") limits.swap = "5000";
   }
-  return { rules, limits, scope: policy?.scopeApps.join(", ") ?? "" };
+  return { rules, limits, scope: policy?.scopeApps.join(", ") ?? "", assets: policy?.assets ?? [] };
+}
+
+/** A-Tokens a passport can list. Transfers of these go through Cleanverse checks and FukuSpendGuard. */
+const ATOKEN_OPTIONS = [{ symbol: "aUSDC", label: "aUSDC · Cleanverse A-Token" }];
+
+function AssetSelector({ assets, onChange }: { assets: string[]; onChange: (a: string[]) => void }) {
+  const toggle = (symbol: string) =>
+    onChange(assets.includes(symbol) ? assets.filter((x) => x !== symbol) : [...assets, symbol]);
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-xl bg-surface px-3 py-2.5 text-[12.5px]">
+      <span className="font-medium text-ink-2">Assets</span>
+      {ATOKEN_OPTIONS.map((o) => {
+        const on = assets.includes(o.symbol);
+        return (
+          <button
+            key={o.symbol}
+            type="button"
+            onClick={() => toggle(o.symbol)}
+            className={cn(
+              "rounded-lg px-2.5 py-1 font-medium transition",
+              on ? "bg-violet text-white shadow-sm" : "bg-white text-ink-3 hover:text-ink",
+            )}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+      <span className="text-ink-3">
+        {assets.length
+          ? "A-Token passport: every transfer needs the owner's and the recipient's A-Pass, then runs through FukuSpendGuard."
+          : "No A-Token listed: transfers are evaluated against the passport only."}
+      </span>
+    </div>
+  );
 }
 
 // Re-exported so the permissions page can render the simple on/off summary used on the dashboard.
@@ -218,6 +259,11 @@ export function PolicySummary({ policy }: { policy: AgentView["policy"] }) {
       {policy.blocked.map((b) => (
         <Pill key={b} tone="block" className="normal-case tracking-normal">
           {labelFor(b)}
+        </Pill>
+      ))}
+      {(policy.assets ?? []).map((a) => (
+        <Pill key={`asset-${a}`} tone="violet" className="normal-case tracking-normal">
+          {a} · A-Token
         </Pill>
       ))}
     </div>

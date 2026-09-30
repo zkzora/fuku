@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Empty, PageHeader, StatusPill } from "@/components/bits";
 import { PolicyEditor } from "@/components/app/policy-editor";
+import { MandatePanel } from "@/components/app/mandate-panel";
 import { RunAction } from "@/components/app/run-action";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useJson } from "@/lib/client";
@@ -58,6 +59,7 @@ function Permissions() {
           </div>
           <div className="space-y-4">
             {agent && <PolicyEditor key={agent.id + (agent.policy?.updatedAt ?? "")} agent={agent} onSaved={() => refetch({ silent: true })} />}
+            {agent && (agent.policy?.assets?.length ?? 0) > 0 && <MandatePanel key={`mandate-${agent.id}`} agentId={agent.id} />}
             <div>
               <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">Test an action against the passport</div>
               <RunAction agents={data.agents} onDone={() => refetch({ silent: true })} />

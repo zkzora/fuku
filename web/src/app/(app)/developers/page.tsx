@@ -37,7 +37,11 @@ const result = await fuku.executeAction(agentId, { action: "swap", amountUsdc: 1
 // 4. Register your own agent and attach a passport.
 const { agent } = await fuku.registerAgent({ name: "Support Agent", capabilities: ["read_vault", "summarize"] });
 await fuku.requestPermission(agent.id, { allowed: [{ action: "read_vault" }], blocked: ["withdraw"] });
-const trust = await fuku.getTrustScore(agent.id);`;
+const trust = await fuku.getTrustScore(agent.id);
+
+// 5. Pay with a Cleanverse A-Token: both A-Passes are checked, then FukuSpendGuard moves the token.
+const pay = await fuku.executeAction(paymentsAgentId, { action: "transfer", amountUsdc: 250, asset: "aUSDC", to: supplierWallet });
+//    pay.compliance: { asset, owner, counterparty, complianceRef } · pay.transfer?.txHash`;
 
 export default function DevelopersPage() {
   const keys = useJson<Keys>("/api/dev/keys");
@@ -169,13 +173,29 @@ export default function DevelopersPage() {
               <div key={i.key} className="rounded-xl bg-surface p-4">
                 <div className="flex items-center justify-between">
                   <div className="text-[14px] font-semibold text-ink">{i.name}</div>
-                  <Pill tone={i.mode === "live" ? "allow" : "neutral"} dot>
-                    {i.mode}
-                  </Pill>
+                  <div className="flex items-center gap-1.5">
+                    {i.badge && (
+                      <Pill tone="warn" className="normal-case tracking-normal">
+                        {i.badge}
+                      </Pill>
+                    )}
+                    <Pill tone={i.mode === "live" ? "allow" : i.mode === "off" ? "block" : i.mode === "configured" ? "warn" : "neutral"} dot>
+                      {i.mode}
+                    </Pill>
+                  </div>
                 </div>
                 <div className="mt-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3">{i.category}</div>
                 <div className="mt-2 text-[13px] text-ink-2">{i.role}</div>
                 <div className="mt-1.5 text-[12px] text-ink-3">{i.detail}</div>
+                {i.endpoints && i.endpoints.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {i.endpoints.map((e) => (
+                      <Mono key={e} className="rounded bg-white px-1.5 py-0.5 text-[10.5px]">
+                        /{e}
+                      </Mono>
+                    ))}
+                  </div>
+                )}
                 {i.envVars.length > 0 && (
                   <div className="mt-2 text-[11px] text-ink-3">
                     env: <Mono className="text-[11px]">{i.envVars.join(", ")}</Mono>

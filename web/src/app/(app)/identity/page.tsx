@@ -6,10 +6,12 @@ import { ExternalLink, Wallet } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardTitle, Mono, PageHeader, Pill, Row, StatusPill } from "@/components/bits";
 import { IdentityCard } from "@/components/app/identity-card";
+import { APassCard } from "@/components/app/apass-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, useJson } from "@/lib/client";
 import { fmtDate } from "@/lib/format";
 import { shortHex } from "@/lib/ids";
+import type { APassView } from "@/lib/services/cleanverse";
 
 const DynamicLogin = dynamic(() => import("@/components/dynamic/dynamic-login"), {
   ssr: false,
@@ -36,7 +38,7 @@ interface IdentityData {
   chain: { mode: string; explorer: string; network: string };
   passkeys: { id: string; label: string; deviceType: string; backedUp: boolean; createdAt: string }[];
   connectedApps: { id: string; name: string; scopes: string[]; status: string; connectedAt: string }[];
-  credentials: { id: string; issuer: string; kind: string; status: string; validUntil: string | null }[];
+  apass: APassView;
   accessRequests: { id: string; app: string; resource: string; status: string; createdAt: string }[];
 }
 
@@ -168,25 +170,11 @@ export default function IdentityPage() {
         </div>
 
         <div className="space-y-4">
-          <Card>
-            <CardTitle>Credentials</CardTitle>
-            {data.credentials.length === 0 ? (
-              <p className="text-[13.5px] text-ink-3">No credentials attached.</p>
-            ) : (
-              data.credentials.map((c) => (
-                <div key={c.id} className="flex items-center justify-between py-1">
-                  <div>
-                    <div className="text-[14px] font-medium text-ink">{c.kind}</div>
-                    <div className="text-[12.5px] text-ink-3">
-                      Issued by {c.issuer}
-                      {c.validUntil ? ` · valid to ${fmtDate(c.validUntil, { day: undefined })}` : ""}
-                    </div>
-                  </div>
-                  <StatusPill status={c.status} />
-                </div>
-              ))
-            )}
-          </Card>
+          <APassCard
+            apass={data.apass}
+            onChanged={() => refetch({ silent: true })}
+            onLinkWallet={DYNAMIC_ENABLED ? () => setLinking(true) : undefined}
+          />
 
           <Card>
             <CardTitle>

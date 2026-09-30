@@ -9,6 +9,7 @@ import { IdentityCard } from "@/components/app/identity-card";
 import { TrustScore } from "@/components/trust-score";
 import { ActivityTimeline } from "@/components/app/activity-timeline";
 import { RunAction } from "@/components/app/run-action";
+import { DEMO_RECIPIENTS } from "@/lib/cleanverse/demo";
 import { RegisterAgentDialog } from "@/components/app/register-agent-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useJson } from "@/lib/client";
@@ -129,6 +130,19 @@ export default function DashboardPage() {
               app: "Monad DEX",
               title: "Run an unauthorized action",
               body: "Trading Assistant will attempt to withdraw 4,800 USDC. Fuku should block it, anchor the proof and explain why.",
+            }}
+          />
+          <RunAction
+            agents={data.agents}
+            onDone={() => refetch({ silent: true })}
+            preset={{
+              agentName: "Payments Agent",
+              action: "transfer",
+              amountUsdc: 250,
+              to: DEMO_RECIPIENTS[0].address,
+              asset: "aUSDC",
+              title: "Pay a verified supplier",
+              body: "Payments Agent sends 250 aUSDC to Nusantara Supplies. Fuku checks both A-Passes with Cleanverse (simulator until the API invite lands), then moves the token through FukuSpendGuard.",
             }}
           />
         </div>

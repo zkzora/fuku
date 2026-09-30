@@ -5,7 +5,7 @@ import { Check, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Mono, Pill } from "@/components/bits";
 import { labelFor } from "@/lib/engine/policy";
-import type { ActionResult } from "@/lib/services/actions";
+import type { ActionResult, ComplianceView } from "@/lib/services/actions";
 import { shortHex } from "@/lib/ids";
 import { cn } from "@/lib/utils";
 
@@ -39,8 +39,9 @@ export function ActionResultDialog({
                     </DialogTitle>
                     <p className="mt-0.5 text-[13.5px] text-ink-2">
                       {result.agentName} · {labelFor(result.action)}
-                      {result.amountUsdc ? ` · ${result.amountUsdc.toLocaleString("en-US")} USDC` : ""}
-                      {result.app ? ` · ${result.app}` : ""}
+                      {result.amountUsdc ? ` · ${result.amountUsdc.toLocaleString("en-US")} ${result.asset ?? "USDC"}` : ""}
+                      {result.to ? ` · to ${shortHex(result.to, 6, 4)}` : ""}
+                      {result.app && !result.to ? ` · ${result.app}` : ""}
                     </p>
                   </div>
                 </div>
@@ -50,7 +51,13 @@ export function ActionResultDialog({
               </div>
               <p className="mt-5 text-pretty text-[15px] leading-[1.55] text-ink">{result.explanation}</p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <Pill tone={blocked ? "block" : "allow"}>Rule {result.ruleId}</Pill>
+                <Pill tone={blocked ? "block" : "allow"}>
+                  Rule {result.ruleId}
+                  {result.subCode ? ` · ${result.subCode}` : ""}
+                </Pill>
+                {result.compliance?.mode === "simulated" && (
+                  <Pill tone="warn" className="normal-case tracking-normal">Cleanverse simulator</Pill>
+                )}
                 <Pill tone="neutral" className="normal-case tracking-normal">Explained by {result.explanationProvider}</Pill>
                 <Pill tone="violet" className="normal-case tracking-normal">
                   Trust {result.scoreBefore} → {result.scoreAfter} ({result.trustDelta >= 0 ? "+" : ""}
@@ -101,12 +108,67 @@ export function ActionResultDialog({
                   </a>
                   <div className="text-[12px] text-ink-3">block {result.receipt.block.toLocaleString("en-US")}</div>
                 </div>
+                {result.transfer && (
+                  <div>
+                    <div className="text-[12px] text-ink-3">Token moved via FukuSpendGuard</div>
+                    <a href={result.transfer.explorerUrl} target="_blank" rel="noreferrer" className="mono text-[12.5px] text-violet hover:underline">
+                      {shortHex(result.transfer.txHash, 10, 6)}
+                    </a>
+                    <div className="text-[12px] text-ink-3">
+                      {result.transfer.mode === "live" ? "same transaction records the decision (R6)" : "mock: no token moved"}
+                    </div>
+                  </div>
+                )}
                 {result.receipt.note && <p className="text-[11.5px] leading-snug text-ink-3">{result.receipt.note}</p>}
               </div>
             </div>
+            {result.compliance && <ComplianceLegs compliance={result.compliance} />}
           </>
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+const LEGS: { key: "asset" | "owner" | "counterparty"; label: string; rule: string }[] = [
+  { key: "asset", label: "CVA: asset rule", rule: "R9" },
+  { key: "owner", label: "CVI: owner A-Pass", rule: "R7" },
+  { key: "counterparty", label: "CVI: recipient A-Pass", rule: "R8" },
+];
+
+/** Pass / fail for each Cleanverse leg, with the evidence behind the complianceRef on request. */
+function ComplianceLegs({ compliance }: { compliance: ComplianceView }) {
+  return (
+    <div className="border-t border-line px-7 py-5">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
+          Cleanverse checks {compliance.mode === "simulated" ? "· simulator, not issued by Cleanverse" : compliance.mode === "off" ? "· off" : "· live"}
+        </div>
+        <Mono className="text-[11px]">ref {shortHex(compliance.complianceRef, 8, 6)}</Mono>
+      </div>
+      <div className="grid gap-2 md:grid-cols-3">
+        {LEGS.map((l) => {
+          const leg = compliance[l.key];
+          const skipped = !leg.ok && leg.detail.startsWith("not evaluated");
+          return (
+            <div key={l.key} className={cn("rounded-xl p-3", leg.ok ? "bg-allow-soft" : skipped ? "bg-surface" : "bg-block-soft")}>
+              <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink">
+                {leg.ok ? <Check className="size-3.5 text-allow" /> : <X className={cn("size-3.5", skipped ? "text-ink-3" : "text-block")} />}
+                {l.label}
+              </div>
+              <div className="mt-1 text-[11.5px] leading-snug text-ink-3">
+                {leg.ok ? leg.detail : `${l.rule} ${leg.subCode}${leg.detail ? `: ${leg.detail}` : ""}`}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <details className="mt-3 text-[12px] text-ink-3">
+        <summary className="cursor-pointer select-none font-medium text-ink-2">Evidence (hashed into the complianceRef)</summary>
+        <pre className="mt-2 max-h-56 overflow-auto rounded-lg bg-surface p-3 text-[11px] leading-snug text-ink-2">
+          {JSON.stringify(compliance.evidence, null, 2)}
+        </pre>
+      </details>
+    </div>
   );
 }
