@@ -25,7 +25,12 @@
  *   - 250 aUSDC-SIM from Ava to Nusantara Supplies is ALLOWED and moves the balances on-chain;
  *   - the frozen and the unverified wallets are blocked with R8 (CVI_FROZEN / CVI_NOT_FOUND) and
  *     their transactions carry no Transfer event;
- *   - an over-cap attestation sent straight to the guard reverts with DailyCapExceeded;
+ *   - a repeated Idempotency-Key replays instead of paying twice;
+ *   - direct attestations revert with PerTxLimitExceeded, PayeeNotApproved and DailyCapExceeded;
+ *   - two concurrent requests cannot spend the same remainder, and balances move exactly once;
+ *   - reconcile (run as a separate process) recovers a transfer whose hash was never stored,
+ *     without double credit, and returns a reorged-out confirmation to PENDING (evm_snapshot /
+ *     evm_revert on the local node); needs DATABASE_URL pointing at the web instance's database;
  *   - revoking in the app emits PolicyRevoked, after which a pre-signed attestation reverts with
  *     PolicyNotActive. The demo is reset again at the end.
  *   FUKU_COMPLIANCE_SIGNER_KEY  signs the direct attestations (Hardhat account #1 locally)
@@ -33,6 +38,7 @@
  * Exit code 0 when every check passes, 1 otherwise.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -142,10 +148,10 @@ function printTable() {
 
 let cookie = "";
 
-async function api(method, route, body) {
+async function api(method, route, body, headers = {}) {
   const res = await fetch(`${BASE_URL}${route}`, {
     method,
-    headers: { "content-type": "application/json", cookie },
+    headers: { "content-type": "application/json", cookie, ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -312,6 +318,7 @@ const GUARDED_TRANSFER_TYPES = {
     { name: "actionHash", type: "bytes32" },
     { name: "proofHash", type: "bytes32" },
     { name: "complianceRef", type: "bytes32" },
+    { name: "mandateVersion", type: "uint64" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint64" },
   ],
@@ -340,7 +347,7 @@ function eventsFrom(receipt, address, abi) {
 }
 
 async function cleanverseSmoke(publicClient, addresses, cv) {
-  console.log(`\nCleanverse (simulator) + FukuSpendGuard:\n  aToken ${cv.atoken}\n  guard  ${cv.guard}`);
+  console.log(`\nCleanverse (simulator) + FukuSpendGuard v2:\n  aToken ${cv.atoken}\n  guard  ${cv.guard}`);
   const guardAbi = loadAbi("FukuSpendGuard");
   const tokenAbi = loadAbi("CleanverseATokenSim");
   const permAbi = loadAbi("PermissionRegistry");
@@ -352,61 +359,60 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
   if (!check("demo reset seeds the Payments Agent (A-Token passport)", pay?.policy?.assets?.includes("aUSDC"), pay?.id ?? "missing")) return;
   const ident = await api("GET", "/api/identity");
   const owner = ident.json?.identity?.walletAddress;
-  if (!check("Ava's wallet is set (DEMO_OWNER_PRIVATE_KEY)", owner && isAddress(owner), owner ?? "none")) return;
+  if (!check("Ava's wallet is set and bound (DEMO_OWNER_PRIVATE_KEY)", owner && isAddress(owner) && ident.json?.identity?.walletVerifiedBy === "signature", `${owner ?? "none"} via ${ident.json?.identity?.walletVerifiedBy}`)) return;
 
   const agentKey = idToBytes32(pay.id);
   const read = (address, abi, functionName, args = []) => publicClient.readContract({ address, abi, functionName, args });
-  const [mToken, cap, mActive] = await read(cv.guard, guardAbi, "mandates", [agentKey, owner]);
+  const [mToken, cap, maxPerTx, , restrictPayees, , mActive] = await read(cv.guard, guardAbi, "mandates", [agentKey, owner]);
   const mandateOk = check(
-    "owner opened a mandate for the Payments Agent",
-    mActive && mToken.toLowerCase() === cv.atoken.toLowerCase(),
-    mActive ? `cap ${formatUnits(cap, 6)} aUSDC-SIM/day` : "run `npm run cleanverse:setup` first",
+    "owner opened a v2 mandate (cap, per-tx limit, approved payees)",
+    mActive && mToken.toLowerCase() === cv.atoken.toLowerCase() && maxPerTx > 0n && restrictPayees,
+    mActive ? `cap ${formatUnits(cap, 6)}/day, ${formatUnits(maxPerTx, 6)} per transfer, payees restricted ${restrictPayees}` : "run `npm run cleanverse:setup` first",
   );
   if (!mandateOk) return;
 
   const nus = demoAddress("nusantara");
+  const frozen = demoAddress("frozen");
   const bal = (w) => read(cv.atoken, tokenAbi, "balanceOf", [w]);
-  const [ownerBefore, nusBefore] = await Promise.all([bal(owner), bal(nus)]);
+  const [ownerStart, nusStart] = await Promise.all([bal(owner), bal(nus)]);
+  const pay$ = (body, headers = {}) => api("POST", `/api/agents/${encodeURIComponent(pay.id)}/actions`, body, headers);
+  let moved = 0n;
 
   // 1. allowed: 250 aUSDC-SIM to Nusantara
-  const ok = await api("POST", `/api/agents/${encodeURIComponent(pay.id)}/actions`, { action: "transfer", amountUsdc: 250, to: nus, asset: "aUSDC" });
+  const ok = await pay$({ action: "transfer", amountUsdc: 250, to: nus, asset: "aUSDC" });
   const legs = ok.json?.compliance;
   check(
-    "transfer 250 aUSDC to Nusantara is ALLOWED (R6)",
-    ok.status === 200 && ok.json?.decision === "ALLOWED" && ok.json?.ruleId === "R6",
-    `status ${ok.status} ${ok.json?.ruleId ?? ""} ${ok.json?.subCode ?? ""} ${ok.json?.reason ?? ok.json?.error ?? ""}`.trim(),
+    "transfer 250 aUSDC to Nusantara is ALLOWED and CONFIRMED",
+    ok.status === 200 && ok.json?.decision === "ALLOWED" && ok.json?.ruleId === "R6" && ok.json?.status === "CONFIRMED",
+    `status ${ok.status} ${ok.json?.ruleId ?? ""} ${ok.json?.status ?? ""} ${ok.json?.reason ?? ok.json?.error ?? ""}`.trim(),
   );
-  check(
-    "all three Cleanverse legs pass (simulator)",
-    legs?.asset?.ok && legs?.owner?.ok && legs?.counterparty?.ok && legs?.mode === "simulated",
-    `mode ${legs?.mode}`,
-  );
-  check("token moved through the guard with a live receipt", ok.json?.transfer?.mode === "live", fmtReceipt(ok.json?.receipt));
+  check("all three Cleanverse legs pass (simulator)", legs?.asset?.ok && legs?.owner?.ok && legs?.counterparty?.ok && legs?.mode === "simulated", `mode ${legs?.mode}`);
   if (ok.json?.transfer?.txHash) {
+    moved += parseUnits("250", 6);
     const rc = await publicClient.getTransactionReceipt({ hash: ok.json.transfer.txHash });
-    const guardEvents = eventsFrom(rc, cv.guard, guardAbi).map((e) => e.eventName);
+    const executed = eventsFrom(rc, cv.guard, guardAbi).filter((e) => e.eventName === "GuardedTransferExecuted");
     const tokenTransfers = eventsFrom(rc, cv.atoken, tokenAbi).filter((e) => e.eventName === "Transfer");
     const decisions = eventsFrom(rc, addresses.permissions, permAbi).filter((e) => e.eventName === "ActionDecision");
+    const bound = executed[0]?.args?.actionHash === keccak256(stringToHex(ok.json.id));
     check(
-      "same tx: GuardedTransferExecuted + Transfer + ActionDecision",
-      rc.status === "success" && guardEvents.includes("GuardedTransferExecuted") && tokenTransfers.length === 1 && decisions.length === 1,
-      `status ${rc.status} guard [${guardEvents.join(", ")}] transfers ${tokenTransfers.length} decisions ${decisions.length}`,
+      "same tx: GuardedTransferExecuted (bound to the action id) + Transfer + ActionDecision",
+      rc.status === "success" && executed.length === 1 && bound && tokenTransfers.length === 1 && decisions.length === 1,
+      `actionHash bound ${bound}, transfers ${tokenTransfers.length}, decisions ${decisions.length}, log #${ok.json.transfer.logIndex}`,
     );
-    const [ownerAfter, nusAfter] = await Promise.all([bal(owner), bal(nus)]);
-    const amt = parseUnits("250", 6);
+    const receipt = await api("GET", `/api/v1/actions/${encodeURIComponent(ok.json.id)}`);
     check(
-      "balances moved exactly 250 aUSDC-SIM",
-      ownerBefore - ownerAfter === amt && nusAfter - nusBefore === amt,
-      `owner ${formatUnits(ownerBefore, 6)} → ${formatUnits(ownerAfter, 6)}, Nusantara ${formatUnits(nusBefore, 6)} → ${formatUnits(nusAfter, 6)}`,
+      "GET /api/v1/actions/:id returns the lifecycle and the evidence locator",
+      receipt.status === 200 && receipt.json?.status === "CONFIRMED" && receipt.json?.receipt?.transferTxHash === ok.json.transfer.txHash && receipt.json?.receipt?.logIndex === ok.json.transfer.logIndex && receipt.json?.receipt?.mode === "live",
+      `status ${receipt.json?.status} tx ${short(receipt.json?.receipt?.transferTxHash)} log #${receipt.json?.receipt?.logIndex} chain ${receipt.json?.receipt?.chainId}`,
     );
   }
 
   // 2. blocked: frozen and unverified recipients, and no Transfer event
   for (const [label, to, sub] of [
-    ["Frozen wallet", demoAddress("frozen"), "CVI_FROZEN"],
+    ["Frozen wallet", frozen, "CVI_FROZEN"],
     ["Unverified wallet", demoAddress("unverified"), "CVI_NOT_FOUND"],
   ]) {
-    const r = await api("POST", `/api/agents/${encodeURIComponent(pay.id)}/actions`, { action: "transfer", amountUsdc: 10, to, asset: "aUSDC" });
+    const r = await pay$({ action: "transfer", amountUsdc: 10, to, asset: "aUSDC" });
     check(`${label} is BLOCKED with R8 ${sub}`, r.status === 403 && r.json?.ruleId === "R8" && r.json?.subCode === sub, `status ${r.status} ${r.json?.ruleId} ${r.json?.subCode}`);
     let transfers = -1;
     if (r.json?.receipt?.txHash && r.json.receipt.mode === "live") {
@@ -416,22 +422,38 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
     check(`${label}: decision anchored, no Transfer event`, transfers === 0 && !r.json?.transfer, fmtReceipt(r.json?.receipt));
   }
 
-  // 3. an over-cap attestation sent straight to the guard
+  // 3. idempotency: the same key twice executes once
+  const idem = { action: "transfer", amountUsdc: 10, to: nus, asset: "aUSDC" };
+  const key = `smoke-${Date.now()}`;
+  const i1 = await pay$(idem, { "idempotency-key": key });
+  const i2 = await pay$(idem, { "idempotency-key": key });
+  if (i1.json?.status === "CONFIRMED") moved += parseUnits("10", 6);
+  check(
+    "a repeated Idempotency-Key replays the result instead of paying twice",
+    i1.json?.status === "CONFIRMED" && i2.json?.id === i1.json?.id && i2.json?.replayed === true,
+    `first ${i1.json?.status} ${short(i1.json?.transfer?.txHash)}, second replayed=${i2.json?.replayed} same id=${i2.json?.id === i1.json?.id}`,
+  );
+
+  // 4. direct attestations against the owner's on-chain bounds
   const signerKey = process.env.FUKU_COMPLIANCE_SIGNER_KEY?.trim();
   if (!check("FUKU_COMPLIANCE_SIGNER_KEY available for direct attestations", Boolean(signerKey), signerKey ? "" : "set it to the guard's compliance signer")) return;
   const signer = privateKeyToAccount(signerKey.startsWith("0x") ? signerKey : `0x${signerKey}`);
-  const attest = async (amount) => {
-    const [policyHash] = await read(addresses.permissions, permAbi, "policies", [agentKey]);
+  const attest = async (amount, to = nus) => {
+    const [[policyHash], mandate] = await Promise.all([
+      read(addresses.permissions, permAbi, "policies", [agentKey]),
+      read(cv.guard, guardAbi, "mandates", [agentKey, owner]),
+    ]);
     const t = {
       agentId: agentKey,
       from: owner,
-      to: nus,
+      to,
       token: cv.atoken,
       amount,
       policyHash,
-      actionHash: keccak256(stringToHex(`smoke:${Date.now()}:${amount}`)),
+      actionHash: keccak256(stringToHex(`smoke:${Date.now()}:${amount}:${Math.random()}`)),
       proofHash: keccak256(stringToHex("smoke-proof")),
       complianceRef: keccak256(stringToHex("smoke-compliance")),
+      mandateVersion: mandate[5],
       nonce: BigInt(toHex(randomBytes(32))),
       deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
     };
@@ -451,12 +473,60 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
       return revertName(err);
     }
   };
+  const perTx = await simulate(await attest(maxPerTx + 1n));
+  check("an attestation over the per-transfer limit reverts with PerTxLimitExceeded", perTx === "PerTxLimitExceeded", `${formatUnits(maxPerTx + 1n, 6)} → ${perTx}`);
+  const wrongPayee = await simulate(await attest(parseUnits("1", 6), frozen));
+  check("an attestation to a payee the owner did not approve reverts with PayeeNotApproved", wrongPayee === "PayeeNotApproved", wrongPayee);
+
+  // spend down so the daily cap binds before the per-transfer limit
+  const big = await pay$({ action: "transfer", amountUsdc: 440, to: nus, asset: "aUSDC" });
+  if (big.json?.status === "CONFIRMED") moved += parseUnits("440", 6);
+  check("a second transfer (440) inside the limits is CONFIRMED", big.json?.status === "CONFIRMED", `${big.json?.status} ${big.json?.reason ?? big.json?.error ?? ""}`);
   const spent = await read(cv.guard, guardAbi, "spentToday", [agentKey, owner]);
   const remaining = cap > spent ? cap - spent : 0n;
   const overCap = await simulate(await attest(remaining + 1n));
-  check("over-cap attestation reverts with DailyCapExceeded", overCap === "DailyCapExceeded", `remaining ${formatUnits(remaining, 6)} → ${overCap}`);
+  check("an over-cap attestation reverts with DailyCapExceeded", overCap === "DailyCapExceeded", `remaining ${formatUnits(remaining, 6)} → ${overCap}`);
 
-  // 4. a pre-signed attestation, then revoke in the app
+  // 5. two concurrent requests that together exceed the remaining budget: exactly one executes
+  const [p1, p2] = await Promise.all([
+    pay$({ action: "transfer", amountUsdc: 200, to: nus, asset: "aUSDC" }),
+    pay$({ action: "transfer", amountUsdc: 200, to: nus, asset: "aUSDC" }),
+  ]);
+  const winners = [p1, p2].filter((r) => r.json?.status === "CONFIRMED");
+  const loser = [p1, p2].find((r) => r.json?.decision === "BLOCKED");
+  moved += BigInt(winners.length) * parseUnits("200", 6);
+  check("concurrent requests cannot spend the same remainder (one CONFIRMED, one R5)", winners.length === 1 && loser?.json?.ruleId === "R5", `${p1.json?.status}/${p1.json?.ruleId} and ${p2.json?.status}/${p2.json?.ruleId}`);
+
+  const [ownerEnd, nusEnd] = await Promise.all([bal(owner), bal(nus)]);
+  check(
+    "balances moved exactly once per confirmed transfer",
+    ownerStart - ownerEnd === moved && nusEnd - nusStart === moved,
+    `expected ${formatUnits(moved, 6)}; owner −${formatUnits(ownerStart - ownerEnd, 6)}, Nusantara +${formatUnits(nusEnd - nusStart, 6)}`,
+  );
+
+  // 6. crash recovery: the process "died" after broadcasting the 440 transfer, before storing its hash
+  const dbUrl = process.env.DATABASE_URL;
+  if (dbUrl && big.json?.id) {
+    const { PrismaClient } = await import("@prisma/client");
+    const db = new PrismaClient();
+    try {
+      await db.agentAction.update({ where: { id: big.json.id }, data: { status: "SUBMITTED", transferTxHash: null, txHash: null, blockHash: null, logIndex: null } });
+      const out = runReconcile();
+      const row = await db.agentAction.findUnique({ where: { id: big.json.id } });
+      const events = await db.reputationEvent.count({ where: { actionId: big.json.id, kind: "success" } });
+      check(
+        "reconcile recovers a transfer whose hash was never stored (guard actionExecuted + event log), no double credit",
+        row?.status === "CONFIRMED" && row?.transferTxHash === big.json.transfer.txHash && events === 1,
+        `${row?.status} tx ${short(row?.transferTxHash)} success events ${events} · ${out}`,
+      );
+    } finally {
+      await db.$disconnect();
+    }
+  } else {
+    check("reconcile crash-recovery check", false, "DATABASE_URL not set for the smoke (point it at the web instance's database)");
+  }
+
+  // 7. a pre-signed attestation, then revoke in the app
   const pre = await attest(parseUnits("1", 6));
   const before = await simulate(pre);
   check("pre-signed 1 aUSDC attestation is valid before the revoke", before === "ok", before);
@@ -467,16 +537,47 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
     const rc = await publicClient.getTransactionReceipt({ hash: revTx.txHash });
     revoked = eventsFrom(rc, addresses.permissions, permAbi).some((e) => e.eventName === "PolicyRevoked" && e.args.agentId === agentKey);
   }
-  check(
-    "revoking in the app emits PolicyRevoked on-chain",
-    rev.status === 200 && rev.json?.chainSync?.ok && revoked,
-    JSON.stringify(rev.json?.chainSync ?? rev.json).slice(0, 160),
-  );
+  check("revoking in the app emits PolicyRevoked on-chain", rev.status === 200 && rev.json?.chainSync?.ok && revoked, JSON.stringify(rev.json?.chainSync ?? rev.json).slice(0, 160));
   const afterRevoke = await simulate(pre);
   check("the pre-signed attestation now reverts with PolicyNotActive", afterRevoke === "PolicyNotActive", afterRevoke);
+  const blocked = await pay$({ action: "transfer", amountUsdc: 1, to: nus, asset: "aUSDC" });
+  check("after the revoke the app blocks the agent (R0/R1) and nothing moves", blocked.status === 403 && ["R0", "R1"].includes(blocked.json?.ruleId), `${blocked.json?.ruleId}`);
+
+  // 8. reorg: a confirmed transfer that disappears from the chain goes back to PENDING and loses its credit
+  await signIn(true);
+  if (dbUrl) {
+    const snapshot = await publicClient.request({ method: "evm_snapshot", params: [] });
+    const r = await pay$({ action: "transfer", amountUsdc: 5, to: nus, asset: "aUSDC" });
+    await publicClient.request({ method: "evm_revert", params: [snapshot] });
+    const out = runReconcile();
+    const { PrismaClient } = await import("@prisma/client");
+    const db = new PrismaClient();
+    try {
+      const row = r.json?.id ? await db.agentAction.findUnique({ where: { id: r.json.id } }) : null;
+      const events = r.json?.id ? await db.reputationEvent.count({ where: { actionId: r.json.id, kind: "success" } }) : -1;
+      check(
+        "a reorged-out confirmation returns to PENDING and its success no longer counts",
+        r.json?.status === "CONFIRMED" && row?.status === "PENDING" && events === 0,
+        `before ${r.json?.status}, after ${row?.status}, success events ${events} · ${out}`,
+      );
+    } finally {
+      await db.$disconnect();
+    }
+  }
 
   // leave the demo usable for the next run
   await signIn(true);
+}
+
+/** Run the reconciler in its own process (same database and chain env), as a cron would. */
+function runReconcile() {
+  const out = execFileSync(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", "scripts/reconcile.ts", "--limit", "50"], {
+    cwd: path.resolve(here, ".."),
+    env: process.env,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+  });
+  return out.trim().split("\n").pop();
 }
 
 main()

@@ -294,3 +294,24 @@ describe("simVerify", () => {
     assert.equal(simVerify(pass(), RULE, NOW), 4);
   });
 });
+
+describe("owner wallet binding", () => {
+  beforeEach(() => clearOwnerPassCache());
+
+  it("R7 rejects a declared but unverified owner wallet before reading its A-Pass", async () => {
+    let reads = 0;
+    const backend = fixtureBackend(passes);
+    const counting: SimBackend = { ...backend, getPass: async (w) => { reads++; return backend.getPass(w); } };
+    const r = await gatherCompliance({
+      ...base,
+      provider: new SimCleanverseProvider(counting, "monad", () => NOW),
+      ownerWalletVerified: false,
+      counterparty: NUSANTARA,
+    });
+    assert.equal(r.owner.subCode, "CVI_NO_WALLET");
+    assert.match(r.owner.detail, /not verified/);
+    // Only the recipient leg read an A-Pass (via verify); the owner's was never looked up.
+    assert.equal(r.counterparty.ok, true);
+    assert.equal(reads, 1);
+  });
+});

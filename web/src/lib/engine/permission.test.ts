@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, utcDayStart, type EvaluationInput } from "./permission";
+import { evaluate, toMicros, utcDayStart, type EvaluationInput } from "./permission";
 import { policyHashDoc, type PolicyDoc } from "./policy";
 import { fail, pass } from "../cleanverse/codes";
 import type { ComplianceLeg, ComplianceResult } from "../cleanverse/types";
@@ -11,6 +11,8 @@ const trading: PolicyDoc = {
   scopeApps: ["Monad DEX"],
   assets: [],
 };
+
+const NUSANTARA = "0x7ad75ad75a52e8d4ee5290294c498917386f40bb";
 
 const payments: PolicyDoc = {
   allowed: [{ action: "transfer", limitUsdcPerDay: 1000 }, { action: "read_balances" }],
@@ -26,6 +28,7 @@ const base = (over: Partial<EvaluationInput> = {}): EvaluationInput => ({
   action: "swap",
   amountUsdc: 100,
   app: "Monad DEX",
+  ownerVerified: true,
   spentTodayUsdc: 0,
   ...over,
 });
@@ -71,7 +74,7 @@ describe("permission engine: R0-R6 unchanged for passports without A-Tokens", ()
 
 describe("permission engine: A-Token passports", () => {
   const pay = (over: Partial<EvaluationInput> = {}) =>
-    base({ policy: payments, action: "transfer", amountUsdc: 250, app: null, compliance: compliance(), ...over });
+    base({ policy: payments, action: "transfer", amountUsdc: 250, app: null, to: NUSANTARA, compliance: compliance(), ...over });
 
   it("non-value actions on an A-Token passport behave as today (no evidence needed)", () => {
     const r = evaluate(pay({ action: "read_balances", amountUsdc: null, compliance: null }));
@@ -121,5 +124,65 @@ describe("policy hash document", () => {
   it("omits empty assets so passports anchored before A-Tokens keep their hash", () => {
     assert.deepEqual(Object.keys(policyHashDoc(trading)), ["allowed", "blocked", "scopeApps"]);
     assert.deepEqual(Object.keys(policyHashDoc(payments)), ["allowed", "blocked", "scopeApps", "assets"]);
+  });
+});
+
+describe("request completeness and owner verification (R4, R11, R12)", () => {
+  it("R4 blocks a scoped passport when the app is omitted, instead of skipping the check", () => {
+    const r = evaluate(base({ app: null }));
+    assert.deepEqual([r.decision, r.ruleId, r.subCode], ["BLOCKED", "R4", "APP_REQUIRED"]);
+    const unscoped = evaluate(base({ policy: { ...trading, scopeApps: [] }, app: null }));
+    assert.equal(unscoped.ruleId, "R6");
+  });
+
+  it("R11 blocks value actions for an owner without passkey verification; reads are unaffected", () => {
+    const r = evaluate(base({ ownerVerified: false }));
+    assert.deepEqual([r.ruleId, r.subCode], ["R11", "OWNER_UNVERIFIED"]);
+    assert.equal(evaluate(base({ ownerVerified: false, action: "read_balances", amountUsdc: null })).ruleId, "R6");
+    // R2 still wins for a hard-blocked value action, so the demo climax is unchanged.
+    assert.equal(evaluate(base({ ownerVerified: false, action: "withdraw", amountUsdc: 4800 })).ruleId, "R2");
+  });
+
+  it("R12 requires a positive amount with at most 6 decimals", () => {
+    for (const amountUsdc of [null, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const r = evaluate(base({ amountUsdc }));
+      assert.deepEqual([r.ruleId, r.subCode], ["R12", "AMOUNT_REQUIRED"], `amount ${amountUsdc}`);
+    }
+    assert.deepEqual([evaluate(base({ amountUsdc: 1.0000001 })).ruleId, evaluate(base({ amountUsdc: 1.0000001 })).subCode], ["R12", "AMOUNT_PRECISION"]);
+    assert.equal(evaluate(base({ amountUsdc: 1.000001 })).ruleId, "R6");
+  });
+
+  it("R12 requires a valid recipient for transfer and a daily limit on allowed value actions", () => {
+    const pay = (over: Partial<EvaluationInput>) =>
+      evaluate(base({ policy: { ...payments, assets: [] }, action: "transfer", amountUsdc: 10, app: null, ...over }));
+    assert.equal(pay({ to: null }).subCode, "RECIPIENT_REQUIRED");
+    assert.equal(pay({ to: "0x1234" }).subCode, "RECIPIENT_INVALID");
+    assert.equal(pay({ to: NUSANTARA }).ruleId, "R6");
+    const limitless: PolicyDoc = { ...trading, allowed: [{ action: "swap" }] };
+    assert.deepEqual([evaluate(base({ policy: limitless })).ruleId, evaluate(base({ policy: limitless })).subCode], ["R12", "LIMIT_REQUIRED"]);
+  });
+
+  it("denies unknown actions even if a legacy passport lists them", () => {
+    const legacy: PolicyDoc = { ...trading, allowed: [...trading.allowed, { action: "launch_rocket" }] };
+    const r = evaluate(base({ policy: legacy, action: "launch_rocket", amountUsdc: null }));
+    assert.equal(r.ruleId, "R3");
+    assert.match(r.reason, /not an action Fuku knows/);
+  });
+});
+
+describe("R5 in base units", () => {
+  it("is exact at the boundary and prefers the authoritative window", () => {
+    const at = (amountUsdc: number, spentTodayMicros: bigint) => evaluate(base({ amountUsdc, spentTodayMicros })).ruleId;
+    assert.equal(at(0.000001, BigInt(4_999_999_999)), "R6");
+    assert.equal(at(0.000002, BigInt(4_999_999_999)), "R5");
+    assert.equal(at(5000, BigInt(0)), "R6");
+    // 0.1 + 0.2 style float drift does not leak into the decision.
+    assert.equal(evaluate(base({ amountUsdc: 0.3, spentTodayUsdc: 4999.7 })).ruleId, "R6");
+  });
+
+  it("toMicros rejects values that are not USDC amounts", () => {
+    assert.equal(toMicros(1.5), BigInt(1_500_000));
+    assert.equal(toMicros(-1), null);
+    assert.equal(toMicros(0.0000001), null);
   });
 });
