@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { Landmark } from "lucide-react";
 import { Card, CardTitle, Mono, Pill } from "@/components/bits";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,7 +12,15 @@ interface MandateResponse {
   wallet: string | null;
   reason: "mock-chain" | "guard-not-configured" | "no-wallet" | "read-failed" | null;
   error?: string;
+  guard: `0x${string}` | null;
+  token: `0x${string}` | null;
+  chainId: number;
+  agentKey: `0x${string}`;
+  walletVerifiedBy: string | null;
 }
+
+const DynamicMandate = dynamic(() => import("@/components/dynamic/dynamic-mandate"), { ssr: false });
+const DYNAMIC_ENABLED = Boolean(process.env.NEXT_PUBLIC_DYNAMIC_ENV_ID);
 
 const REASON_TEXT: Record<NonNullable<MandateResponse["reason"]>, string> = {
   "mock-chain": "The chain is mocked, so there is no on-chain mandate. Transfers return mock receipts.",
@@ -25,7 +34,7 @@ const REASON_TEXT: Record<NonNullable<MandateResponse["reason"]>, string> = {
  * the daily cap and what it spent this UTC day, read straight from the contract.
  */
 export function MandatePanel({ agentId }: { agentId: string }) {
-  const { data, loading } = useJson<MandateResponse>(`/api/agents/${encodeURIComponent(agentId)}/mandate`);
+  const { data, loading, refetch } = useJson<MandateResponse>(`/api/agents/${encodeURIComponent(agentId)}/mandate`);
   const m = data?.mandate;
   const pct = m && m.dailyCapUsdc > 0 ? Math.min(100, (m.spentTodayUsdc / m.dailyCapUsdc) * 100) : 0;
 
@@ -80,6 +89,16 @@ export function MandatePanel({ agentId }: { agentId: string }) {
             </div>
           </div>
         </div>
+      )}
+      {DYNAMIC_ENABLED && data?.walletVerifiedBy === "dynamic" && data.wallet && data.guard && data.token && data.reason !== "mock-chain" && (
+        <DynamicMandate
+          owner={data.wallet}
+          guard={data.guard}
+          token={data.token}
+          chainId={data.chainId}
+          agentKey={data.agentKey}
+          onDone={() => refetch({ silent: true })}
+        />
       )}
     </Card>
   );
