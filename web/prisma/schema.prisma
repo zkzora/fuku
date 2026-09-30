@@ -137,7 +137,8 @@ model AgentAction {
   compliance     String?              // JSON: Cleanverse legs + evidence
   complianceRef  String?              // keccak256 of the canonical evidence JSON
   transferTxHash String?              // FukuSpendGuard.execute transaction
-  travelRuleRef  String?              // hash of the Travel Rule record
+  travelRuleRef  String?              // keccak256 of the canonical Travel Rule record
+  travelRule     String?              // JSON: the Travel Rule record (Cleanverse's, or the simulator's)
   // Execution lifecycle, separate from the policy decision (see docs/SECURITY.md, section 5):
   // RECEIVED -> DENIED | AUTHORIZED; AUTHORIZED -> SUBMITTED -> CONFIRMED | FAILED | PENDING;
   // AUTHORIZED -> SIMULATED (mock chain) | FAILED (not sent). Null on rows written before it existed.

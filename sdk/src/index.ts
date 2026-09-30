@@ -239,6 +239,8 @@ export interface ActionResult {
     logIndex: number | null;
   } | null;
   compliance?: Compliance | null;
+  /** keccak256 of the Travel Rule record for a guarded transfer; fetch it with getTravelRule(). */
+  travelRuleRef?: string | null;
   idempotencyKey?: string | null;
   /** True when this is the stored result of an earlier request with the same idempotency key. */
   replayed?: boolean;
@@ -267,6 +269,7 @@ export interface ActionReceipt {
   status: ExecutionStatus;
   proofHash: string;
   complianceRef: string | null;
+  travelRuleRef: string | null;
   /** keccak256(action id): the id the registries and the guard use for this action. */
   actionHash: string;
   policyVersion: number | null;
@@ -438,6 +441,14 @@ export class Fuku {
   /** One action's lifecycle status and evidence; pending transfers are reconciled first. */
   getAction(actionId: string) {
     return this.request<ActionReceipt>("GET", `/actions/${encodeURIComponent(actionId)}`);
+  }
+
+  /**
+   * The Travel Rule record of a guarded transfer: Cleanverse's in live mode, the simulator's
+   * (`source: "simulated"`) otherwise. Its canonical-JSON keccak256 equals `travelRuleRef`.
+   */
+  getTravelRule(actionId: string) {
+    return this.request<Record<string, unknown>>("GET", `/actions/${encodeURIComponent(actionId)}/travel-rule`);
   }
 
   /** The owner's on-chain mandate for this agent (null with a `reason` in mock mode or without a guard). */

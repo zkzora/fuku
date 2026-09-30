@@ -22,7 +22,7 @@ import { hashJson, hashString } from "../ids";
 import { refreshScore, SCORED_EVENTS, scoreFor } from "./agents";
 import { canActFor } from "./authz";
 import { releaseBudget, reserveBudget, spentMicros } from "./budget";
-import { apassEligibleFor, complianceFor } from "./cleanverse";
+import { apassEligibleFor, complianceFor, travelRuleFor } from "./cleanverse";
 
 export interface WorkflowStep {
   step: string;
@@ -82,6 +82,8 @@ export interface ActionResult {
     logIndex: number | null;
   } | null;
   compliance: ComplianceView | null;
+  /** keccak256 of the Travel Rule record for a guarded transfer (download it from the action). */
+  travelRuleRef: Hex | null;
   idempotencyKey: string | null;
   /** True when this response is a replay of an earlier request with the same idempotency key. */
   replayed: boolean;
@@ -333,6 +335,7 @@ export async function executeAction(
   let status: ExecutionStatus = evaluation.decision === "ALLOWED" ? "AUTHORIZED" : "DENIED";
   let receipt: ChainReceipt | null = null;
   let transfer: ActionResult["transfer"] = null;
+  let travelRuleRef: Hex | null = null;
 
   if (evaluation.decision === "ALLOWED" && compliance && amountMicros !== null) {
     let outcome;
@@ -388,6 +391,26 @@ export async function executeAction(
         `${input.amountUsdc} ${compliance.evidence.atoken.symbol} → ${short(input.to!)} via FukuSpendGuard · ${receipt.mode === "live" ? "tx" : "mock tx, nothing moved"} ${receipt.txHash?.slice(0, 10)}…`,
       );
       mark("Proof anchored on Monad", "ok", receipt.mode === "live" ? `Recorded by FukuSpendGuard in the same tx (R6) · block ${receipt.block?.toLocaleString("en-US")}` : "Mock receipt (mock chain)");
+      // Travel Rule record (Cleanverse's in live mode, the simulator's otherwise); best effort.
+      try {
+        const tr = await travelRuleFor({
+          txHash: receipt.txHash ?? "",
+          chainId: receipt.chainId,
+          asset: { symbol: compliance.evidence.atoken.symbol, address: compliance.evidence.atoken.address ?? "" },
+          amountBaseUnits: amountMicros,
+          from: agent.identity.walletAddress ?? "",
+          to: input.to ?? "",
+          ownerCvRecordId: compliance.evidence.owner.cvRecordId,
+          complianceRef: compliance.complianceRef,
+        });
+        if (tr) {
+          travelRuleRef = tr.ref;
+          await setStatus({ travelRule: JSON.stringify(tr.record), travelRuleRef: tr.ref });
+          mark("Travel Rule record", "ok", `${tr.source === "simulated" ? "Cleanverse simulator" : "Cleanverse"} · ref ${tr.ref.slice(0, 10)}…`);
+        }
+      } catch (err) {
+        mark("Travel Rule record", "skipped", `not available: ${(err as Error).message.slice(0, 120)}`);
+      }
     } else if (outcome.status === "pending") {
       receipt = outcome.receipt;
       status = "PENDING";
@@ -510,6 +533,7 @@ export async function executeAction(
     receipt,
     transfer,
     compliance: complianceView(compliance),
+    travelRuleRef,
     idempotencyKey,
     replayed: false,
     scoreBefore,
@@ -545,6 +569,7 @@ export async function getActionReceipt(caller: Identity, actionId: string) {
     status: (row.status ?? (row.decision === "ALLOWED" ? "AUTHORIZED" : "DENIED")) as ExecutionStatus,
     proofHash: row.proofHash,
     complianceRef: row.complianceRef,
+    travelRuleRef: row.travelRuleRef,
     actionHash: hashActionId(row.id),
     policyVersion: row.policyVersion,
     receipt: {
@@ -566,4 +591,13 @@ export async function getActionReceipt(caller: Identity, actionId: string) {
 /** keccak256 of the action id, the same actionHash the registries and the guard use. */
 function hashActionId(id: string): Hex {
   return hashString(id);
+}
+
+/** The stored Travel Rule record of an action, for callers who may execute for its agent. */
+export async function getTravelRule(caller: Identity, actionId: string) {
+  const row = await db.agentAction.findUnique({ where: { id: actionId }, select: { identityId: true, travelRule: true, travelRuleRef: true } });
+  if (!row || !row.travelRule) throw new Error("Travel Rule record not found");
+  const actor = await canActFor(caller.id, row.identityId, "agents:execute");
+  if (!actor.ok) throw new ForbiddenError("Not authorized to read this record.");
+  return { record: JSON.parse(row.travelRule) as unknown, ref: row.travelRuleRef };
 }

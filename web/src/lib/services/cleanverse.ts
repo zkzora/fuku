@@ -7,6 +7,7 @@ import { SIM_FIXTURE_ATOKEN } from "../cleanverse/demo";
 import { cleanverseChain, resolveCleanverse, type Env } from "../cleanverse/mode";
 import { LiveCleanverseProvider, SimCleanverseProvider, type CleanverseProvider, type SimBackend } from "../cleanverse/provider";
 import { SimChainBackend } from "../cleanverse/sim-chain";
+import { simulatedTravelRule, travelRuleRefOf } from "../cleanverse/travel-rule";
 import type { APassRecord, ATokenRule, AssetInfo, CleanverseBackend, CleanverseMode, ComplianceResult } from "../cleanverse/types";
 
 /**
@@ -258,4 +259,41 @@ export async function apassEligibleFor(identity: { walletAddress: string | null;
   if (!identity.walletAddress || !identity.walletVerifiedBy) return false;
   const v = await storedAPass(identity.walletAddress);
   return Boolean(v.found && v.pass && v.pass.status === 1 && !v.pass.expired);
+}
+
+// --- Travel Rule ---------------------------------------------------------------------------------
+
+/**
+ * The Travel Rule record for a guarded transfer: from Cleanverse in live mode, built by the
+ * simulator otherwise (labelled simulated). Null when Cleanverse is off.
+ */
+export async function travelRuleFor(input: {
+  txHash: string;
+  chainId: number;
+  asset: { symbol: string; address: string };
+  amountBaseUnits: bigint;
+  from: string;
+  to: string;
+  ownerCvRecordId: string | null;
+  complianceRef: string;
+}): Promise<{ record: unknown; ref: `0x${string}`; source: "cleanverse" | "simulated" } | null> {
+  const rt = cleanverseRuntime();
+  if (!rt.provider) return null;
+  if (rt.backend === "api" && rt.provider.travelRule) {
+    const { record } = await rt.provider.travelRule(input.txHash);
+    return { record, ref: travelRuleRefOf(record), source: "cleanverse" };
+  }
+  const beneficiary = await rt.provider.getAPass(input.to).catch(() => ({ pass: null }));
+  const record = simulatedTravelRule({
+    chain: rt.chain,
+    chainId: input.chainId,
+    txHash: input.txHash,
+    asset: { symbol: input.asset.symbol, address: input.asset.address.toLowerCase(), decimals: 6 },
+    amount: input.amountBaseUnits.toString(),
+    originator: { wallet: input.from.toLowerCase(), cvRecordId: input.ownerCvRecordId },
+    beneficiary: { wallet: input.to.toLowerCase(), cvRecordId: beneficiary.pass?.cvRecordId ?? null },
+    complianceRef: input.complianceRef,
+    createdAt: new Date().toISOString(),
+  });
+  return { record, ref: travelRuleRefOf(record), source: "simulated" };
 }

@@ -229,6 +229,15 @@ describe("execution: idempotency, lifecycle and reputation", () => {
     });
     assert.deepEqual([r.decision, r.status, r.transfer?.mode, r.trustDelta], ["ALLOWED", "SIMULATED", "mock", 0]);
     assert.equal(r.amountBaseUnits, "25000000");
+    // Travel Rule record from the simulator, bound to its reference.
+    const { record, ref } = await m.actions.getTravelRule(owner, r.id);
+    const tr = record as { source: string; amount: string; beneficiary: { wallet: string; cvRecordId: string | null } };
+    assert.equal(tr.source, "simulated");
+    assert.equal(tr.amount, "25000000");
+    assert.equal(tr.beneficiary.cvRecordId, "cv-sim-nusantara");
+    assert.equal(ref, r.travelRuleRef);
+    const { travelRuleRefOf } = await import("../cleanverse/travel-rule");
+    assert.equal(travelRuleRefOf(record), ref);
   });
 });
 

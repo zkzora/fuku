@@ -142,6 +142,19 @@ export function ActionResultDialog({
                     </div>
                   </div>
                 )}
+                {result.travelRuleRef && (
+                  <div>
+                    <div className="text-[12px] text-ink-3">
+                      Travel Rule record{result.compliance?.mode === "simulated" ? " (simulator)" : ""}
+                    </div>
+                    <a
+                      href={`/api/actions/${encodeURIComponent(result.id)}/travel-rule`}
+                      className="mono text-[12.5px] text-violet hover:underline"
+                    >
+                      Download · ref {shortHex(result.travelRuleRef, 8, 6)}
+                    </a>
+                  </div>
+                )}
                 {result.receipt.note && <p className="text-[11.5px] leading-snug text-ink-3">{result.receipt.note}</p>}
               </div>
             </div>

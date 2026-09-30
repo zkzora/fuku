@@ -399,6 +399,13 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
       rc.status === "success" && executed.length === 1 && bound && tokenTransfers.length === 1 && decisions.length === 1,
       `actionHash bound ${bound}, transfers ${tokenTransfers.length}, decisions ${decisions.length}, log #${ok.json.transfer.logIndex}`,
     );
+    const tr = await api("GET", `/api/actions/${encodeURIComponent(ok.json.id)}/travel-rule`);
+    const trRef = keccak256(stringToHex(canonicalJson(tr.json)));
+    check(
+      "Travel Rule record is stored and matches its reference",
+      tr.status === 200 && tr.json?.source === "simulated" && tr.json?.txHash === ok.json.transfer.txHash && trRef === ok.json.travelRuleRef,
+      `source ${tr.json?.source} beneficiary ${tr.json?.beneficiary?.cvRecordId} ref ${short(ok.json.travelRuleRef)}`,
+    );
     const receipt = await api("GET", `/api/v1/actions/${encodeURIComponent(ok.json.id)}`);
     check(
       "GET /api/v1/actions/:id returns the lifecycle and the evidence locator",
@@ -569,6 +576,17 @@ async function cleanverseSmoke(publicClient, addresses, cv) {
 
   // leave the demo usable for the next run
   await signIn(true);
+}
+
+/** Sorted-key JSON, the same canonical form Fuku hashes (web/src/lib/cleanverse/evidence.ts). */
+function canonicalJson(v) {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(v)
+    .filter((k) => v[k] !== undefined)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`)
+    .join(",")}}`;
 }
 
 /** Run the reconciler in its own process (same database and chain env), as a cron would. */
