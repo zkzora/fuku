@@ -444,3 +444,69 @@ describe("verify score from chain", () => {
     await assert.rejects(() => verifyScoreFromChain(agent.id), /mocked/);
   });
 });
+
+describe("commit-reveal decision records", () => {
+  const hex = (s: string) => `0x${s.padStart(64, "0")}` as `0x${string}`;
+
+  it("a live decision keeps the exact record whose hash is its proof", async () => {
+    const { recordHash, parseRecord } = await import("../records");
+    const owner = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
+    const r = await m.actions.executeAction({ callerId: owner.id, agentId: m.seed.TRADING_AGENT_ID, action: "withdraw", amountUsdc: 4800, app: "Monad DEX" });
+    const row = await m.db.agentAction.findUniqueOrThrow({ where: { id: r.id } });
+    const kept = await m.db.decisionRecord.findUniqueOrThrow({ where: { actionId: r.id } });
+    assert.equal(kept.proofHash, row.proofHash);
+    assert.equal(recordHash(kept.record), row.proofHash);
+    const record = parseRecord(kept.record)!;
+    assert.deepEqual([record.actionId, record.agentId, record.decision, record.ruleId, record.at !== null], [r.id, m.seed.TRADING_AGENT_ID, "BLOCKED", "R2", true]);
+  });
+
+  it("the seeded history is deterministic: a reset rebuilds the same records under the same ids, and kept records survive it", async () => {
+    const before = await m.db.decisionRecord.findMany({ where: { actionId: { startsWith: "seed-v2-" } }, orderBy: { actionId: "asc" } });
+    const live = await m.db.decisionRecord.count({ where: { agentId: m.seed.TRADING_AGENT_ID, NOT: { actionId: { startsWith: "seed-v2-" } } } });
+    await m.seed.seedDemo(m.db);
+    const after = await m.db.decisionRecord.findMany({ where: { actionId: { startsWith: "seed-v2-" } }, orderBy: { actionId: "asc" } });
+    assert.equal(before.length, 25);
+    assert.deepEqual(after.map((r) => [r.actionId, r.proofHash]), before.map((r) => [r.actionId, r.proofHash]));
+    assert.ok(live >= 1, "a live record from before the reset");
+    assert.equal(await m.db.decisionRecord.count({ where: { agentId: m.seed.TRADING_AGENT_ID, NOT: { actionId: { startsWith: "seed-v2-" } } } }), live, "kept across the reset");
+    const rows = await m.db.agentAction.findMany({ where: { agentId: m.seed.TRADING_AGENT_ID } });
+    assert.ok(rows.every((row) => row.anchorStatus === "seeded" && row.txHash === null));
+  });
+
+  it("assesses revealed records against on-chain proofs, and counts what the records do not explain", async () => {
+    const { assessEvidence } = await import("./verify-score");
+    const { recordHash, recordJson } = await import("../records");
+    const { hashString } = await import("../ids");
+    const agentId = "fuku:agent:0x00000000000000000000000000000000000000aa";
+    const rec = (actionId: string, decision: "ALLOWED" | "BLOCKED", ruleId: string, extra: Partial<Parameters<typeof recordJson>[0]> = {}) =>
+      recordJson({ actionId, agentId, action: "swap", amountUsdc: 1, app: null, decision, ruleId, subCode: null, guardReason: null, policyHash: null, complianceRef: null, at: null, seeded: null, outcome: null, ...extra });
+    const legacy = rec("a1", "ALLOWED", "R6", { outcome: "legacy-success" });
+    const blocked = rec("a2", "BLOCKED", "R2");
+    const transfer = rec("a3", "ALLOWED", "R6");
+    const neutral = rec("a4", "BLOCKED", "R10", { subCode: "GUARD_REJECTED", guardReason: "NoMandate(0x, 0x)" });
+    const tampered = rec("a5", "BLOCKED", "R2");
+    const pending = rec("a6", "ALLOWED", "R6");
+    const d = (id: string, json: string, allowed: boolean, ruleId: string) => ({ actionHash: hashString(id).toLowerCase() as `0x${string}`, proofHash: recordHash(json).toLowerCase() as `0x${string}`, allowed, ruleId, txHash: hex("1"), timestamp: 1 });
+    const result = assessEvidence({
+      agentId,
+      records: [legacy, blocked, transfer, neutral, tampered, pending].map((json, i) => ({ actionId: `a${i + 1}`, record: json })),
+      decisions: [
+        d("a1", legacy, true, "R6"),
+        d("a2", blocked, false, "R2"),
+        d("a3", transfer, true, "R6"),
+        d("a4", neutral, false, "R10"),
+        d("a5", rec("a5", "BLOCKED", "R3"), false, "R3"), // the chain holds another proof for a5
+        d("hidden-1", blocked, false, "R2"), // no record revealed
+        d("hidden-2", blocked, false, "R10"), // no record revealed, reason unknown
+      ],
+      executions: [{ actionHash: hashString("a3").toLowerCase() as `0x${string}`, proofHash: recordHash(transfer).toLowerCase() as `0x${string}`, txHash: hex("2") }],
+    });
+    assert.equal(result.verified, 4);
+    assert.deepEqual(result.mismatched.map((m) => m.actionId), ["a5"]);
+    assert.deepEqual(result.unanchored, ["a6"]);
+    assert.equal(result.unrevealed.length, 3, "a5 (mismatched) and two hidden decisions");
+    assert.deepEqual(result.successes, { transfers: 1, legacy: 1 });
+    // a2 (R2) + a5 counted from the chain (R3) + hidden R2 + hidden R10; a4's committed reason clears it
+    assert.equal(result.violations, 4);
+  });
+});

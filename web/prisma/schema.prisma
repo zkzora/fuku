@@ -188,6 +188,20 @@ model AgentAction {
   @@index([status])
 }
 
+/// Preimages of anchored decision proofs (commit-reveal, lib/records.ts): proofHash = keccak256(record)
+/// at actionHash = keccak256(actionId). No relation on purpose: records survive agent deletion and
+/// demo resets, so everything Fuku anchored can still be revealed.
+model DecisionRecord {
+  actionId  String   @id
+  agentId   String
+  proofHash String
+  record    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([agentId])
+}
+
 /// Authoritative off-chain spend per agent, action and UTC day, reserved atomically before an
 /// allowed value action and released when execution fails. Key: agentId:action:YYYY-MM-DD.
 model BudgetWindow {

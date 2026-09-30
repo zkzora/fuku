@@ -13,16 +13,24 @@ import { DEMO_RECIPIENTS, demoOwnerKey, demoOwnerWallet } from "./cleanverse/dem
 import { signWalletBinding } from "./wallet-binding";
 import { cleanverseChain } from "./cleanverse/mode";
 import { DEMO_API_KEY, DEMO_IDENTITY_ID } from "./demo-mode";
+import { recordHash, recordJson } from "./records";
 
 export { DEMO_IDENTITY_ID };
 export { DEMO_API_KEY };
 
-const TRADING = "fuku:agent:0x7a3f19c0b4d2e6f8a1c3e5b7d9f0a2c4e6b89c21";
-const RESEARCH = "fuku:agent:0x2b8e4c6d1f3a5b7c9d0e2f4a6b8c0d1e3f5a41d0";
-const OPS = "fuku:agent:0x9d17e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b303ee";
-const REBALANCER = "fuku:agent:0xf10b2c4d6e8f0a1b3c5d7e9f1a3b5c7d9e1f77a2";
+/**
+ * Seeded agent ids, v2. The v1 ids carry rehearsal decisions on Monad testnet whose records were lost
+ * to demo resets, so no record could ever reveal them; the v2 agents start with a clean on-chain
+ * history that `npm run reconcile -- --anchor-seeded` fills with exactly the seeded records.
+ */
+const demoAgentId = (label: string) => `fuku:agent:${keccak256(stringToHex(`fuku:demo-agent:${label}:v2`)).slice(0, 42)}`;
+const TRADING = demoAgentId("trading");
+const RESEARCH = demoAgentId("research");
+const OPS = demoAgentId("ops");
+const REBALANCER = demoAgentId("rebalancer");
 /** Moves Cleanverse A-Tokens (aUSDC) under an A-Token passport. */
-export const PAYMENTS_AGENT_ID = "fuku:agent:0x9a7e3c1d5b8f2a4c6e0d1b3f5a7c9e1d3b5f7a92";
+export const PAYMENTS_AGENT_ID = demoAgentId("payments");
+export const TRADING_AGENT_ID = TRADING;
 
 const h = (s: string) => keccak256(stringToHex(s));
 const daysAgo = (d: number, hour = 10, minute = 0) => {
@@ -285,6 +293,7 @@ export async function seedDemo(db: PrismaClient) {
 
   // ---- Ledger: actions + reputation events ----
   type Act = {
+    id: string;
     agentId: string;
     action: string;
     amountUsdc?: number;
@@ -292,12 +301,17 @@ export async function seedDemo(db: PrismaClient) {
     decision: "ALLOWED" | "BLOCKED";
     ruleId: string;
     reason: string;
-    at: Date;
+    daysBack: number;
+    hour: number;
+    minute: number;
   };
   const acts: Act[] = [];
+  const seq: Record<string, number> = {};
+  const seedId = (label: string) => `seed-v2-${label}-${String((seq[label] = (seq[label] ?? -1) + 1)).padStart(2, "0")}`;
   // Trading Assistant: 14 allowed swaps/reads over the week, one blocked withdraw this morning.
   for (let i = 0; i < 12; i++) {
     acts.push({
+      id: seedId("trading"),
       agentId: TRADING,
       action: i % 3 === 0 ? "read_balances" : "swap",
       amountUsdc: i % 3 === 0 ? undefined : 400 + i * 90,
@@ -305,33 +319,68 @@ export async function seedDemo(db: PrismaClient) {
       decision: "ALLOWED",
       ruleId: "R6",
       reason: i % 3 === 0 ? "Read balances is an allowed capability for Monad DEX." : "Swap assets within the daily limit.",
-      at: daysAgo(6 - Math.floor(i / 2), 9 + (i % 2) * 3, 15 + i),
+      daysBack: 6 - Math.floor(i / 2),
+      hour: 9 + (i % 2) * 3,
+      minute: 15 + i,
     });
   }
-  acts.push({ agentId: TRADING, action: "price_feeds", app: "Monad DEX", decision: "ALLOWED", ruleId: "R6", reason: "Price feeds is an allowed capability for Monad DEX.", at: todayAt(9, 20) });
-  acts.push({ agentId: TRADING, action: "swap", amountUsdc: 1200, app: "Monad DEX", decision: "ALLOWED", ruleId: "R6", reason: "Swap assets of 1,200 USDC is within the daily limit (3,800 USDC remaining today).", at: todayAt(9, 38) });
-  acts.push({ agentId: TRADING, action: "withdraw", amountUsdc: 4800, app: "Monad DEX", decision: "BLOCKED", ruleId: "R2", reason: "Withdraw funds is on the hard block list of this agent's passport.", at: todayAt(9, 41) });
+  acts.push({ id: seedId("trading"), agentId: TRADING, action: "price_feeds", app: "Monad DEX", decision: "ALLOWED", ruleId: "R6", reason: "Price feeds is an allowed capability for Monad DEX.", daysBack: 0, hour: 9, minute: 20 });
+  acts.push({ id: seedId("trading"), agentId: TRADING, action: "swap", amountUsdc: 1200, app: "Monad DEX", decision: "ALLOWED", ruleId: "R6", reason: "Swap assets of 1,200 USDC is within the daily limit (3,800 USDC remaining today).", daysBack: 0, hour: 9, minute: 38 });
+  acts.push({ id: seedId("trading"), agentId: TRADING, action: "withdraw", amountUsdc: 4800, app: "Monad DEX", decision: "BLOCKED", ruleId: "R2", reason: "Withdraw funds is on the hard block list of this agent's passport.", daysBack: 0, hour: 9, minute: 41 });
   // Research Agent: 10 allowed reads.
   for (let i = 0; i < 10; i++) {
     acts.push({
+      id: seedId("research"),
       agentId: RESEARCH,
       action: ["read_vault", "web_search", "summarize"][i % 3],
       app: "Notion",
       decision: "ALLOWED",
       ruleId: "R6",
       reason: "Allowed capability for Notion.",
-      at: daysAgo(5 - Math.floor(i / 2), 8 + (i % 2) * 4, 12 + i),
+      daysBack: 5 - Math.floor(i / 2),
+      hour: 8 + (i % 2) * 4,
+      minute: 12 + i,
     });
   }
+  const seededPolicyHash: Record<string, string> = {
+    [TRADING]: policyAnchorHash(tradingPolicy, 2),
+    [RESEARCH]: policyAnchorHash(researchPolicy, 1),
+  };
 
   for (const a of acts) {
-    const proofHash = keccak256(stringToHex(JSON.stringify({ ...a, at: a.at.toISOString() })));
+    // The record commits to the day offset and time of day, not to when this seed ran, so every demo
+    // reset rebuilds the same records under the same ids: anchored once, they stay verifiable.
+    const record = recordJson({
+      actionId: a.id,
+      agentId: a.agentId,
+      action: a.action,
+      amountUsdc: a.amountUsdc ?? null,
+      app: a.app ?? null,
+      decision: a.decision,
+      ruleId: a.ruleId,
+      subCode: null,
+      guardReason: null,
+      policyHash: seededPolicyHash[a.agentId] ?? null,
+      complianceRef: null,
+      at: null,
+      seeded: { day: -a.daysBack, time: `${String(a.hour).padStart(2, "0")}:${String(a.minute).padStart(2, "0")}` },
+      // fuku-score/1 counted an allowed decision as a completed action; the record says so.
+      outcome: a.decision === "ALLOWED" ? "legacy-success" : null,
+    });
+    const proofHash = recordHash(record);
+    await db.decisionRecord.upsert({
+      where: { actionId: a.id },
+      create: { actionId: a.id, agentId: a.agentId, proofHash, record },
+      update: { agentId: a.agentId, proofHash, record },
+    });
     const row = await db.agentAction.create({
       data: {
-        // Historical decisions: none of these actions was executed by Fuku, and the hashes are placeholders.
+        id: a.id,
+        // Seeded history: none of these actions was executed by Fuku. Not on-chain until
+        // `npm run reconcile -- --anchor-seeded` anchors the records.
         status: a.decision === "ALLOWED" ? "AUTHORIZED" : "DENIED",
         receiptMode: "mock",
-        anchorStatus: "mock",
+        anchorStatus: "seeded",
         amountMicros: a.amountUsdc !== undefined ? BigInt(Math.round(a.amountUsdc * 1e6)) : null,
         policyVersion: 1,
         agentId: a.agentId,
@@ -343,13 +392,13 @@ export async function seedDemo(db: PrismaClient) {
         reason: a.reason,
         ruleId: a.ruleId,
         proofHash,
-        txHash: h("tx:" + proofHash),
+        txHash: null,
         trustDelta: a.decision === "ALLOWED" ? 1 : -4,
         explanation:
           a.decision === "BLOCKED"
             ? "Trading Assistant tried to withdraw 4,800 USDC, which its permission passport hard-blocks (rule R2). Fuku stopped the action before execution and anchored a proof, so nothing left Ava Chen's control. Trust score moved from 100 to 96 (−4)."
             : null,
-        createdAt: a.at,
+        createdAt: daysAgo(a.daysBack, a.hour, a.minute),
       },
     });
     await db.reputationEvent.create({
@@ -361,7 +410,7 @@ export async function seedDemo(db: PrismaClient) {
         kind: a.decision === "ALLOWED" ? "success" : "violation",
         delta: a.decision === "ALLOWED" ? 1 : -4,
         note: a.decision === "ALLOWED" ? `Allowed: ${labelFor(a.action)}` : `Blocked: ${labelFor(a.action)} (${a.ruleId})`,
-        createdAt: a.at,
+        createdAt: daysAgo(a.daysBack, a.hour, a.minute),
       },
     });
   }

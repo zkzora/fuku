@@ -382,6 +382,24 @@ export class RevertedOnChainError extends Error {
  * right after the broadcast, before waiting, so callers can persist the hash first: a crash or a
  * timeout after that point can be reconciled from the stored hash instead of being retried blind.
  */
+/** A relayer transaction that was mined successfully. */
+export interface ChainWrite {
+  label: string;
+  hash: Hex;
+  block: bigint;
+  to: Address;
+}
+const writeListeners = new Set<(w: ChainWrite) => void>();
+
+/**
+ * Observe every relayer transaction as it is mined (scripts that must record each transaction they
+ * cause subscribe here). Returns the unsubscribe function.
+ */
+export function onChainWrite(listener: (w: ChainWrite) => void): () => void {
+  writeListeners.add(listener);
+  return () => writeListeners.delete(listener);
+}
+
 async function write(ctx: LiveCtx, label: string, call: Call, onSubmitted?: (hash: Hex) => Promise<void> | void): Promise<Mined> {
   const { request } = await ctx.publicClient.simulateContract({ ...call, account: ctx.account, chain: ctx.chain });
   const hash = await ctx.walletClient.writeContract(request);
@@ -394,6 +412,7 @@ async function write(ctx: LiveCtx, label: string, call: Call, onSubmitted?: (has
   }
   if (receipt.status !== "success") throw new RevertedOnChainError(label, hash, receipt.blockNumber);
   console.log(`[fuku-chain] ${label} mined: tx ${hash} block ${receipt.blockNumber}`);
+  for (const listener of writeListeners) listener({ label, hash, block: receipt.blockNumber, to: call.address });
   return { hash, block: receipt.blockNumber, blockHash: receipt.blockHash, logs: receipt.logs };
 }
 
@@ -781,6 +800,17 @@ export function setAgentStatusOnChain(agent: AgentRef, status: "active" | "pause
     if (Number(record[5]) === code) return null;
     if (agent.identity.custody === "owner") throw new OwnerSignatureRequired("setStatus", agent.id);
     return write(ctx, "setStatus", { address: ctx.addresses.agents, abi: AgentRegistryAbi, functionName: "setStatus", args: [key, code] });
+  });
+}
+
+/**
+ * Register the agent (and its identity) and anchor the database's current passport where the chain
+ * lacks them. Null: the transactions (if any) are reported through onChainWrite.
+ */
+export function syncAgentOnChain(agent: AgentRef) {
+  return sendStrict("syncAgent", { agentId: agent.id }, async (ctx) => {
+    await ensureAgentOnChain(ctx, agent, { syncPolicy: true });
+    return null;
   });
 }
 
@@ -1260,24 +1290,4 @@ export async function readMandate(agentId: string, wallet: string): Promise<Mand
     spentTodayUsdc: Number(spent) / 1e6,
     active,
   };
-}
-
-/**
- * Content hash of a decision record — this is what gets anchored and what an auditor recomputes.
- * `complianceRef` is appended only when Cleanverse evidence exists, so every other action keeps
- * the original hash format.
- */
-export function decisionProofHash(record: {
-  agentId: string;
-  action: string;
-  amountUsdc?: number | null;
-  app?: string | null;
-  decision: string;
-  ruleId: string;
-  policyHash: Hex | null;
-  at: string;
-  complianceRef?: Hex | null;
-}): Hex {
-  const { complianceRef, ...base } = record;
-  return hashJson(complianceRef ? { ...base, complianceRef } : base);
 }

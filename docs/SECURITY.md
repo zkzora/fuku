@@ -149,8 +149,20 @@ Rules that follow from the lifecycle:
      - the funding wallet can send one for its own funds.
 3. **The guard's owner** can rotate the compliance signer. The simulator contracts' owner issues simulator A-Passes and mints `aUSDC-SIM`; they are not Cleanverse.
 4. **The engine and database.** The passport's allowed actions, app scope and off-chain limits, and the reputation ledger, live in Fuku's database and are enforced by Fuku's server. On-chain commitments prove the integrity of a recorded decision, not that an AUTHORIZED action was executed or executed correctly.
-   - The score cannot be recomputed from the chain alone. Several inputs are off-chain: an A-Pass read through the Cleanverse API, the reason behind an R10 denial, security events, and ledger events that were never anchored (the seeded demo history).
-   - `npm run verify-score`, and **Recompute from chain** on the agent page, recompute it from the chain anyway. They use the passkey flag, the passport state, `GuardedTransferExecuted`, `ActionDecision` rule ids and the simulator A-Pass. They compare the result with the anchored score and the ledger, and name each input the chain does not hold.
+   - **Commit-reveal.** Every anchored decision proof is `keccak256` of a decision record: the action, amount, app, decision, rule, sub-code, R10 guard reason, passport hash and time (`web/src/lib/records.ts`).
+     - Fuku keeps each record in `DecisionRecord`, across agent deletions and demo resets, and reveals them through `GET /api/v1/agents/:id/records`.
+     - `npm run verify-score` and **Recompute from chain** check each record's hash against the `proofHash` anchored at `keccak256(actionId)`.
+     - They recompute fuku-score/2 from checked records and on-chain state (the passkey flag, the passport, `GuardedTransferExecuted`, the simulator A-Pass), and compare it with `ReputationRegistry` and the ledger.
+     - A record that does not match is reported. An on-chain decision without a revealed record counts from the on-chain data alone; a denial counts against the agent, R10 included.
+     - ✓ means every record checks out, nothing on-chain is unrevealed, and the three scores agree.
+   - **Still not committed on-chain:**
+     - security events;
+     - an A-Pass read through the Cleanverse API (only the simulator's A-Pass is a contract);
+     - the passkey ceremony itself (the flag is Fuku's attestation as registry owner);
+     - the seeded history's completed actions. They are committed as Fuku's own records ("legacy-success", fuku-score/1 rules), not proven by on-chain transfers.
+   - **The demo's seeded history** has deterministic ids and records, and `npm run reconcile -- --anchor-seeded` anchors it once.
+     - A demo reset rebuilds the same records, so they stay verifiable.
+     - A reset cannot rewind the chain. After a live action and a reset, the agent's chain history is ahead of its reseeded ledger, and **Recompute from chain** says so.
 5. **Cleanverse** runs in simulator mode until the API invite lands (`docs/CLEANVERSE.md`). The real A-Token's transfer rules for third-party contracts are unverified.
 6. **Memory vault.** Items are encrypted in the browser with a key derived from the owner's passphrase (PBKDF2-SHA256, 100,000 iterations, salted with the identity id, into AES-256-GCM).
    - Every identity except the seeded demo chooses its own passphrase (at least 10 characters). The server stores ciphertext and one encrypted check value that tells a wrong passphrase from a right one; it never receives the passphrase or the key. The key stays in the tab's memory and is not persisted.
@@ -225,12 +237,12 @@ Local runs on 2026-09-30:
 | Command | Expected |
 | --- | --- |
 | `cd contracts && npm test` | 72 passing (13 of them adversarial) |
-| `npm test` (root: web + sdk) | 79 web tests, 8 SDK tests, all passing |
+| `npm test` (root: web + sdk) | 82 web tests, 8 SDK tests, all passing |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
 | Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `65/65 checks passed` on a fresh node |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
-| `cd web && npm run verify-score` on the local node after a demo reset, one guarded transfer and one blocked action | Agents whose history is on-chain reproduce their anchored score (Payments Agent 68 = 68). The seeded Trading Assistant reports 61 from the chain against 92 anchored: its seeded history is ledger-only |
+| `cd web && npm run reconcile -- --anchor-seeded`, then `npm run verify-score`, on the local node after a demo reset | 40 transactions, then 5/5 demo agents verified (Trading Assistant 96 = 96 = 96, 15/15 records). After the withdraw climax: 92 = 92 = 92, 16/16. After the full smoke (which resets the demo), Trading Assistant still verifies |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 17 steps `ok`, exit 0 |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 
@@ -253,7 +265,8 @@ The production environment needs:
 3. `npm run wire:env`. It writes `FUKU_SPEND_GUARD`, `CLEANVERSE_SIM_*` and the signer key into `web/.env`.
 4. Add a fresh `DEMO_OWNER_PRIVATE_KEY` to `web/.env`, then run `cd web && npm run cleanverse:setup`. That is about 8 transactions: passes, mint, gas top-up, approve, mandate and payee.
 5. Restart the app. Reset the demo so Ava's wallet binding uses the new key.
-6. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… node scripts/live-smoke.mjs`.
+6. `cd web && npm run reconcile -- --anchor-seeded`. It anchors the demo's seeded history: 5 agents, 3 passports, 25 decisions and 5 scores, about 38 transactions (Ava's identity is already on testnet). It prints every transaction. Do not run live actions on the demo agents before the pitch: a reset cannot rewind the chain.
+7. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… node scripts/live-smoke.mjs`.
    - The reorg check is skipped off Hardhat.
    - The owner-custody section needs `SMOKE_OWNER_PRIVATE_KEY`: a separate key with its own MON (about 0.1), since the owner's wallet pays for its five registry writes.
    - The Cleanverse section spends most of Ava's daily cap, so run it once per UTC day.

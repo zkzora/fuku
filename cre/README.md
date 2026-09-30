@@ -34,7 +34,7 @@ From this folder:
 
 ```bash
 cre workflow simulate fuku-guard --target staging-settings --non-interactive --trigger-index 0 \
-  --http-payload '{"agentId":"fuku:agent:0x7a3f19c0b4d2e6f8a1c3e5b7d9f0a2c4e6b89c21","action":"withdraw","amountUsdc":4800,"app":"Monad DEX"}'
+  --http-payload '{"agentId":"fuku:agent:0xb6b1bec4676f0fa730a4a7f9316e33ce604729ac","action":"withdraw","amountUsdc":4800,"app":"Monad DEX"}'
 ```
 
 Expected log lines: `[verify] ... dryRun=BLOCKED R2`, `[execute] BLOCKED rule=R2 ... receipt=live tx=0x...`, `[record] Monad PermissionRegistry.stats ...`. The execute step is real: with Fuku in live mode it spends Monad testnet gas from the Fuku deployer.

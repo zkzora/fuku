@@ -1,8 +1,9 @@
 #!/usr/bin/env tsx
 /**
- * Recompute trust scores from on-chain evidence (read-only; sends nothing). For each agent it prints
- * every score input as the chain shows it and as Fuku's ledger holds it, the score recomputed from
- * the chain, the score Fuku anchored in ReputationRegistry, and what the chain cannot show.
+ * Recompute trust scores from the chain, commit-reveal (read-only; sends nothing). For each agent:
+ * the decision records Fuku reveals are checked against the proofHash anchored for each action, the
+ * score is recomputed from checked records and on-chain state, and compared with the score anchored in
+ * ReputationRegistry and with Fuku's ledger. The v2 inputs the chain does not commit to are listed.
  * Events come from Envio HyperSync when ENVIO_API_TOKEN is set (and the chain is not a local node),
  * otherwise from eth_getLogs.
  *
@@ -10,6 +11,7 @@
  * addresses, DATABASE_URL, optionally FUKU_SPEND_GUARD, CLEANVERSE_SIM_APASS, ENVIO_API_TOKEN.
  *
  * Usage: npx tsx scripts/verify-score.ts [--agent <fuku agent id>]   (default: every agent)
+ * Exit code 0 when every agent checked verifies.
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -25,27 +27,28 @@ async function main() {
   const i = process.argv.indexOf("--agent");
   const only = i >= 0 ? process.argv[i + 1] : null;
   const agents = await db.agent.findMany({ where: only ? { id: only } : {}, orderBy: { createdAt: "asc" }, select: { id: true, name: true } });
-  let mismatches = 0;
+  let failures = 0;
   for (const a of agents) {
     try {
       const r = await verifyScoreFromChain(a.id);
-      const ok = r.matches.anchored || !r.anchored;
-      if (!ok) mismatches++;
-      console.log(`\n${a.name} (${a.id})`);
+      if (!r.verified) failures++;
+      console.log(`\n${r.verified ? "✓" : "✗"} ${a.name} (${a.id})`);
+      console.log(`  from chain ${r.chainScore} · anchored ${r.anchored?.score ?? "none"} · ledger ${r.ledgerScore}`);
       console.log(
-        `  from chain ${r.chainScore} · chain alone ${r.chainOnlyScore} · anchored ${r.anchored?.score ?? "none"} · ledger ${r.ledgerScore}   [${ok ? "anchored score reproduced" : "anchored score NOT reproduced"}]`,
+        `  records: ${r.records.verified}/${r.records.revealed} match their on-chain proofs, ${r.records.mismatched.length} mismatched, ${r.records.unanchored.length} not anchored; ${r.records.unrevealed.length} on-chain decisions without a record`,
       );
-      for (const input of r.inputs) console.log(`  ${input.label.padEnd(24)} chain ${String(input.chain ?? "not on-chain").padEnd(12)} ledger ${input.ledger}`);
+      for (const input of r.inputs) console.log(`  ${input.label.padEnd(24)} chain ${String(input.chain ?? "not on-chain").padEnd(12)} ledger ${String(input.ledger).padEnd(6)}${input.committed ? "" : " (not committed)"}`);
       console.log(`  events via ${r.events.source}: ${r.events.decisions} decisions, ${r.events.executions} transfers, blocks ${r.events.fromBlock}-${r.events.toBlock}${r.events.complete ? "" : " (incomplete)"}`);
+      for (const n of r.notCommitted) console.log(`  not committed: ${n}`);
       for (const n of r.notes) console.log(`  - ${n}`);
     } catch (err) {
-      mismatches++;
-      console.log(`\n${a.name} (${a.id})\n  error: ${(err as Error).message}`);
+      failures++;
+      console.log(`\n✗ ${a.name} (${a.id})\n  error: ${(err as Error).message}`);
     }
   }
   await db.$disconnect();
-  console.log(`\n${agents.length - mismatches}/${agents.length} agents: the anchored score is reproduced from the chain (or none is anchored)`);
-  if (mismatches) process.exitCode = 1;
+  console.log(`\n${agents.length - failures}/${agents.length} agents verified from the chain`);
+  if (failures) process.exitCode = 1;
 }
 
 main().catch((err) => {

@@ -8,7 +8,6 @@ import { explainDecision } from "../engine/explain";
 import {
   anchorStateOf,
   ChainWriteError,
-  decisionProofHash,
   executeGuardedTransfer,
   recordDecisionOnChain,
   toAgentRef,
@@ -19,6 +18,7 @@ import { legText } from "../cleanverse/compliance";
 import type { ComplianceLeg, ComplianceResult } from "../cleanverse/types";
 import { ForbiddenError, RequestError } from "../errors";
 import { hashJson, hashString } from "../ids";
+import { newActionId, recordHash, recordJson } from "../records";
 import { refreshScore, SCORED_EVENTS, scoreFor } from "./agents";
 import { canActFor } from "./authz";
 import { releaseBudget, reserveBudget, spentMicros } from "./budget";
@@ -250,24 +250,47 @@ export async function executeAction(
   const policyHash = (agent.policy?.policyHash as Hex | null) ?? null;
   const isValue = VALUE_ACTIONS.has(input.action);
   const amountMicros = isValue && input.amountUsdc != null ? toMicros(input.amountUsdc) : null;
-  const proofOf = (e: Evaluation) =>
-    decisionProofHash({
+  // The proof commits to a decision record Fuku keeps and can reveal (lib/records.ts); the action
+  // id is part of it, so it is chosen before the row exists.
+  const actionId = newActionId();
+  const proofOf = (e: Evaluation, guardReason: string | null = null): Hex => {
+    const json = recordJson({
+      actionId,
       agentId: agent.id,
       action: input.action,
       amountUsdc: input.amountUsdc ?? null,
       app: input.app ?? null,
-      decision: e.decision,
+      decision: e.decision === "ALLOWED" ? "ALLOWED" : "BLOCKED",
       ruleId: e.ruleId,
+      subCode: e.subCode ?? null,
+      guardReason,
       policyHash,
-      at: createdAt.toISOString(),
       complianceRef: compliance?.complianceRef ?? null,
+      at: createdAt.toISOString(),
+      seeded: null,
+      outcome: null,
     });
+    const hash = recordHash(json);
+    pendingRecord = { json, hash };
+    return hash;
+  };
+  let pendingRecord: { json: string; hash: Hex } | null = null;
+  const keepRecord = async () => {
+    if (!pendingRecord) return;
+    const { json, hash } = pendingRecord;
+    await db.decisionRecord.upsert({
+      where: { actionId },
+      create: { actionId, agentId: agent.id, proofHash: hash, record: json },
+      update: { proofHash: hash, record: json },
+    });
+  };
   let proofHash = proofOf(evaluation);
 
   let actionRow: AgentAction;
   try {
     actionRow = await db.agentAction.create({
       data: {
+        id: actionId,
         agentId: agent.id,
         identityId: agent.identityId,
         action: input.action,
@@ -291,15 +314,20 @@ export async function executeAction(
       },
     });
   } catch (err) {
-    // Two concurrent requests with one idempotency key: the loser replays the winner.
+    // Two concurrent requests with one idempotency key: the loser replays the winner (its record is never kept).
     if (idempotencyKey && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       const existing = await db.agentAction.findUnique({ where: { agentId_idempotencyKey: { agentId: agent.id, idempotencyKey } } });
       if (existing) return replay(existing, requestHash);
     }
     throw err;
   }
+  await keepRecord();
 
-  const setStatus = (data: Prisma.AgentActionUpdateInput) => db.agentAction.update({ where: { id: actionRow.id }, data });
+  const setStatus = async (data: Prisma.AgentActionUpdateInput) => {
+    const row = await db.agentAction.update({ where: { id: actionRow.id }, data });
+    if (data.proofHash) await keepRecord();
+    return row;
+  };
 
   // Reserve today's budget atomically before anything executes. Losing a race is an R5 block.
   let reservedDay: string | null = null;
@@ -441,7 +469,7 @@ export async function executeAction(
             : `GUARD_REJECTED: the on-chain FukuSpendGuard would revert with ${outcome.reason}.`,
       };
       status = "DENIED";
-      proofHash = proofOf(evaluation);
+      proofHash = proofOf(evaluation, outcome.reason);
       await setStatus({ decision: "BLOCKED", status, ruleId: "R10", reason: evaluation.reason, proofHash, errorClass: "guard_revert", errorDetail: outcome.reason });
       mark("Guarded transfer on Monad", "blocked", `R10 ${outcome.reason}`);
     }
