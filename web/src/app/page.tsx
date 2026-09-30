@@ -106,8 +106,8 @@ export default function Landing() {
             {
               icon: <Fingerprint className="size-5 text-violet" />,
               title: "Human Identity",
-              body: "Passkey sign-in with WebAuthn. One verified human, provably behind every agent they own.",
-              foot: <Pill tone="allow" dot>Human verified</Pill>,
+              body: "Passkey sign-in with WebAuthn and user verification. One passkey-verified owner behind every agent, anchored on Monad.",
+              foot: <Pill tone="allow" dot>Passkey verified</Pill>,
             },
             {
               icon: <ShieldCheck className="size-5 text-violet" />,
@@ -160,7 +160,7 @@ export default function Landing() {
               items={["Human Identity Contract", "AI Agent Registry", "Permission Engine", "Reputation System", "Encrypted Data Vault"]}
             />
             <span className="text-ink-3">↓</span>
-            <Layer title="Monad" items={["Settlement", "ERC-8004 compatible agent identity"]} />
+            <Layer title="Monad" items={["Settlement", "ERC-8004-inspired agent identity"]} />
           </Reveal>
         </div>
       </section>
@@ -236,7 +236,7 @@ function PassportVisual() {
     <div className="fuku-card p-6 text-left">
       <div className="flex items-center justify-between">
         <div className="text-[12px] font-semibold uppercase tracking-[0.1em] text-ink-3">Agent Permission Passport</div>
-        <Pill tone="allow" dot>Verified human owner</Pill>
+        <Pill tone="allow" dot>Passkey-verified owner</Pill>
       </div>
       <div className="mt-5 flex items-center gap-4">
         <span className="grid size-12 place-items-center rounded-xl bg-violet-soft text-[18px] font-semibold text-violet">T</span>

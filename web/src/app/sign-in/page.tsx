@@ -52,7 +52,7 @@ function SignIn() {
         method: "POST",
         json: { challengeId, displayName: name.trim(), response, deviceLabel: navigator.platform || "This device" },
       });
-      toast.success("Fuku identity created. Human verified.");
+      toast.success("Fuku identity created. Passkey verified.");
       router.push(next);
       router.refresh();
     } catch (err) {
@@ -105,7 +105,7 @@ function SignIn() {
               <Fingerprint className="size-7 text-violet" />
             </span>
             <h1 className="mt-5 text-[28px] font-semibold leading-tight">Your Fuku identity</h1>
-            <p className="mt-2 text-[15px] text-ink-3">One verified human behind every agent you own. Secured by a passkey, anchored on Monad.</p>
+            <p className="mt-2 text-[15px] text-ink-3">One passkey-verified owner behind every agent you own, anchored on Monad.</p>
           </div>
 
           <div className="fuku-card p-2">

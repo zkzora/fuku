@@ -56,8 +56,24 @@ export function MandatePanel({ agentId }: { agentId: string }) {
             ) : (
               <div className="text-[14px] font-medium text-ink">The owner has not opened a mandate for this agent, so the guard rejects every transfer (NoMandate).</div>
             )}
+            {m.active && (
+              <div className="flex flex-wrap gap-1.5">
+                <Pill tone="neutral" className="normal-case tracking-normal">
+                  {m.maxPerTxUsdc ? `max ${m.maxPerTxUsdc.toLocaleString("en-US")} per transfer` : "no per-transfer limit"}
+                </Pill>
+                <Pill tone={m.restrictPayees ? "allow" : "warn"} className="normal-case tracking-normal">
+                  {m.restrictPayees ? "approved payees only" : "any eligible payee"}
+                </Pill>
+                <Pill tone="neutral" className="normal-case tracking-normal">
+                  {m.validUntil ? `valid to ${new Date(m.validUntil * 1000).toISOString().slice(0, 10)}` : "no expiry"}
+                </Pill>
+                <Pill tone="violet" className="normal-case tracking-normal">
+                  version {m.version}
+                </Pill>
+              </div>
+            )}
             <div className="text-ink-3">
-              From <Mono className="break-all">{m.wallet}</Mono>
+              From <Mono className="break-all">{m.wallet}</Mono> · set by the owner&apos;s own wallet, enforced by the guard
             </div>
             <div className="text-ink-3">
               Token <Mono className="break-all">{m.token}</Mono> · guard <Mono>{m.guard}</Mono>

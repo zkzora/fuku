@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Copy, KeyRound, Play, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardTitle, Mono, PageHeader, Pill } from "@/components/bits";
+import { DelegationsCard } from "@/components/app/delegations-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, useJson } from "@/lib/client";
 import type { IntegrationStatus } from "@/lib/integrations";
@@ -47,6 +48,7 @@ export default function DevelopersPage() {
   const keys = useJson<Keys>("/api/dev/keys");
   const integrations = useJson<Integrations>("/api/integrations");
   const agents = useJson<{ agents: AgentView[] }>("/api/agents");
+  const me = useJson<{ identity: { id: string } }>("/api/auth/me");
   const [newKey, setNewKey] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -128,6 +130,8 @@ export default function DevelopersPage() {
         <Sandbox agents={agents.data?.agents ?? []} />
       </div>
 
+      <DelegationsCard selfId={me.data?.identity?.id ?? null} />
+
       <Card>
         <CardTitle
           action={
@@ -147,9 +151,13 @@ export default function DevelopersPage() {
           <Endpoint method="PUT" path="/api/v1/agents/:id/permissions" fn="requestPermission()" />
           <Endpoint method="POST" path="/api/v1/agents/:id/check" fn="checkPermission()" />
           <Endpoint method="POST" path="/api/v1/agents/:id/execute" fn="executeAction()" />
+          <Endpoint method="GET" path="/api/v1/actions/:id" fn="getAction()" />
+          <Endpoint method="GET" path="/api/v1/agents/:id/mandate" fn="getMandate()" />
         </div>
         <p className="mt-3 text-[12.5px] text-ink-3">
-          Authenticate with <Mono>Authorization: Bearer fk_live_…</Mono>. The SDK source lives in <Mono>/sdk</Mono>.
+          Authenticate with <Mono>Authorization: Bearer fk_live_…</Mono> (a wrong key is 401, never a fallback). Send{" "}
+          <Mono>Idempotency-Key</Mono> on execute to make retries safe. The SDK source lives in <Mono>/sdk</Mono>; a consumer example in{" "}
+          <Mono>/examples/sdk-consumer</Mono>.
         </p>
       </Card>
 

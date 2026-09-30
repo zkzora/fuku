@@ -3,5 +3,6 @@ import { getCurrentIdentity } from "@/lib/session";
 
 export const GET = withErrors(async () => {
   const identity = await getCurrentIdentity();
-  return json({ identity });
+  // The wallet binding proof stays server-side.
+  return json({ identity: identity ? { ...identity, walletProof: undefined } : null });
 });
