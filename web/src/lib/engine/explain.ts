@@ -38,10 +38,24 @@ function providers(): Provider[] {
   return list;
 }
 
+export interface ProviderHealth {
+  ok: boolean;
+  at: string;
+  error?: string;
+}
+const aiHealth = globalThis as unknown as { __fukuAiHealth?: Record<string, ProviderHealth> };
+function noteAi(name: string, ok: boolean, error?: string) {
+  aiHealth.__fukuAiHealth = { ...(aiHealth.__fukuAiHealth ?? {}), [name]: { ok, at: new Date().toISOString(), ...(error ? { error } : {}) } };
+}
+
+/** Key configured, and the outcome of the last real call in this process (null before the first one). */
 export function aiProviderStatus() {
+  const h = aiHealth.__fukuAiHealth ?? {};
   return {
     kimi: Boolean(process.env.KIMI_API_KEY),
     qwen: Boolean(process.env.QWEN_API_KEY),
+    kimiHealth: h.kimi ?? null,
+    qwenHealth: h.qwen ?? null,
   };
 }
 
@@ -81,8 +95,10 @@ async function withProviders(
   for (const p of providers()) {
     try {
       const text = await chat(p, system, user);
+      noteAi(p.name, true);
       return { text, provider: p.name };
     } catch (err) {
+      noteAi(p.name, false, (err as Error).message.slice(0, 160));
       console.warn(`[fuku-ai] ${p.name} failed:`, (err as Error).message);
     }
   }
@@ -161,12 +177,15 @@ export function explainScore(ctx: ScoreContext) {
 function ruleBasedScore(ctx: ScoreContext): string {
   const b = Object.fromEntries(ctx.result.breakdown.map((l) => [l.key, l]));
   const positives: string[] = [];
-  if (b.human.points > 0) positives.push("a verified human owner");
-  if (b.policy.points > 0) positives.push("an active permission passport");
-  if (b.success.points > 0) positives.push(`${b.success.detail.split(" ")[0]} successful actions`);
+  const pts = (key: string) => b[key]?.points ?? 0;
+  const count = (key: string) => b[key]?.detail.split(" ")[0] ?? "0";
+  if (pts("passkey") > 0) positives.push("a passkey-verified owner");
+  if (pts("apass") > 0) positives.push("an owner with an eligible Cleanverse A-Pass");
+  if (pts("policy") > 0) positives.push("an active permission passport");
+  if (pts("success") > 0) positives.push(`${count("success")} completed actions`);
   const negatives: string[] = [];
-  if (b.violations.points < 0) negatives.push(`${b.violations.detail.split(" ")[0]} blocked attempts`);
-  if (b.security.points < 0) negatives.push(`${b.security.detail.split(" ")[0]} security events`);
+  if (pts("violations") < 0) negatives.push(`${count("violations")} blocked attempts`);
+  if (pts("security") < 0) negatives.push(`${count("security")} security events`);
   const pos = positives.length ? `It earns points for ${positives.join(", ")}.` : "It has not yet earned bonus points.";
   const neg = negatives.length
     ? ` It loses points for ${negatives.join(" and ")}, which is why it is not at 100.`
