@@ -53,6 +53,23 @@ A few rules for reading results:
 - In live mode a write that failed says `status: "failed"`. It is never presented as a mock success.
 - Retrying with the same `idempotencyKey` replays the stored result (`replayed: true`). The same key with a different body is rejected with `idempotency_mismatch`.
 
+## Agent-signed execution
+
+An agent can hold its own key: you generate it, keep it, and give Fuku only its address with `setErc8004AgentKey()` (it becomes the agent's ERC-8004 `agentWallet`). Fuku then executes that agent over the API only when the request is signed with that key:
+
+```ts
+import { privateKeyToAccount } from "viem/accounts";
+
+const agentKey = privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as `0x${string}`);
+const pay = await fuku.executeAction(agentId, { action: "transfer", amountUsdc: 30, asset: "aUSDC", to: supplier }, { signer: agentKey });
+pay.agentSignature; // { signer: "0x…" }: Fuku checked the signature against the agent's key
+```
+
+- The signature (EIP-191) covers the exact request body, the idempotency key and the issue time (`agentRequestMessage()` builds the message). Fuku accepts it for 5 minutes.
+- Without a signature, an execution for such an agent is refused with `401 agent_signature_required`. A signature from another key is refused with `agent_signature_invalid`.
+- Agents whose key Fuku holds (the seeded demo agents) and agents without a key are executed as before.
+- Any object with `signMessage({ message })` works as a signer; the SDK itself has no crypto dependency.
+
 ## Authorization
 
 A key acts for its own identity, and for identities it created with `createIdentity()` (recorded as managed by it). To act for any other owner, that owner must grant it a delegation in the Developer Console, with scopes `agents:register`, `agents:manage` or `agents:execute`.
@@ -65,6 +82,7 @@ Blocked actions resolve with the result (HTTP 403). Everything else that fails t
 
 - `unauthorized`, `forbidden`, `rate_limited`, `invalid_request`, `not_found`
 - `idempotency_mismatch`, `idempotency_in_progress`, `idempotency_failed`
+- `agent_signature_required`, `agent_signature_invalid`, `agent_signature_expired` (401: see "Agent-signed execution")
 - `chain_write_failed` (502: the guarded transfer was not sent, nothing moved)
 
 | Method | Endpoint |
@@ -78,6 +96,7 @@ Blocked actions resolve with the result (HTTP 403). Everything else that fails t
 | `executeAction()` | `POST /api/v1/agents/:id/execute` |
 | `getAction()` | `GET /api/v1/actions/:id` |
 | `getMandate()` | `GET /api/v1/agents/:id/mandate` |
+| `verifyScore()` | `GET /api/v1/agents/:id/verify-score` |
 
 Get an API key from the Developer Console in the Fuku app. The seeded demo key is `fk_live_demo_ava_chen_2026`; it only works while the demo is enabled (development, or `FUKU_DEMO_ENABLED=true`).
 
@@ -86,6 +105,12 @@ Get an API key from the Developer Console in the Fuku app. The seeded demo key i
 - A complete consumer lives in [`examples/sdk-consumer`](../examples/sdk-consumer). It previews, pays, retries, verifies on-chain, revokes and shows the next attempt fail.
 
 ## Changes
+
+### 0.4.0
+
+- `executeAction(…, { signer })` signs the request with the agent's own key. Fuku requires it for agents that hold their own key: unsigned executions for them are refused with 401 (breaking for such agents).
+- `verifyScore()`: recompute the trust score from the chain (commit-reveal), with the ✓ as `verified`.
+- `verifyAgent()` adds `agent.agentKey`, `agent.erc8004` and `owner.custody`; `getMandate()` adds `payees` and `payeesSource`; `ActionResult.agentSignature` is new.
 
 ### 0.3.0 (breaking)
 

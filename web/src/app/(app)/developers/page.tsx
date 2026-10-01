@@ -153,6 +153,7 @@ export default function DevelopersPage() {
           <Endpoint method="POST" path="/api/v1/agents/:id/execute" fn="executeAction()" />
           <Endpoint method="GET" path="/api/v1/actions/:id" fn="getAction()" />
           <Endpoint method="GET" path="/api/v1/agents/:id/mandate" fn="getMandate()" />
+          <Endpoint method="GET" path="/api/v1/agents/:id/verify-score" fn="verifyScore()" />
         </div>
         <p className="mt-3 text-[12.5px] text-ink-3">
           Authenticate with <Mono>Authorization: Bearer fk_live_…</Mono> (a wrong key is 401, never a fallback). Send{" "}

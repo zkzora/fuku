@@ -21,6 +21,7 @@ import { hashJson, hashString } from "../ids";
 import { newActionId, recordHash, recordJson } from "../records";
 import { refreshScore, SCORED_EVENTS, scoreFor } from "./agents";
 import { canActFor } from "./authz";
+import { verifyAgentRequest, type PresentedSignature } from "../agent-signature";
 import { releaseBudget, reserveBudget, spentMicros } from "./budget";
 import { apassEligibleFor, complianceFor, travelRuleFor } from "./cleanverse";
 
@@ -87,6 +88,8 @@ export interface ActionResult {
   idempotencyKey: string | null;
   /** True when this response is a replay of an earlier request with the same idempotency key. */
   replayed: boolean;
+  /** Set when the request was signed with the agent's own key (lib/agent-signature.ts). */
+  agentSignature: { signer: string } | null;
   scoreBefore: number;
   scoreAfter: number;
   trustDelta: number;
@@ -197,7 +200,14 @@ function replay(existing: AgentAction, requestHash: string): ActionResult {
  * decision itself. Allowed actions Fuku does not execute are recorded as AUTHORIZED.
  */
 export async function executeAction(
-  input: ActionInput & { callerId: string; agentId: string; params?: Record<string, unknown>; idempotencyKey?: string | null },
+  input: ActionInput & {
+    callerId: string;
+    agentId: string;
+    params?: Record<string, unknown>;
+    idempotencyKey?: string | null;
+    /** v1 API only: the raw body and the agent-signature headers, checked against the agent's key. */
+    agentRequest?: PresentedSignature;
+  },
 ): Promise<ActionResult> {
   const trace: WorkflowStep[] = [];
   const t0 = Date.now();
@@ -214,6 +224,9 @@ export async function executeAction(
   if (!actor.ok) throw new ForbiddenError("Not authorized to execute actions for this agent. The owner must grant an agents:execute delegation.");
 
   const idempotencyKey = input.idempotencyKey?.trim() || null;
+  // Over the API, an agent that holds its own key acts only with that key's signature. The owner's
+  // own session in the app is not an API call and needs none.
+  const signed = input.agentRequest ? await verifyAgentRequest(agent, input.agentRequest, idempotencyKey) : null;
   const requestHash = requestHashOf(input);
   if (idempotencyKey) {
     const existing = await db.agentAction.findUnique({ where: { agentId_idempotencyKey: { agentId: agent.id, idempotencyKey } } });
@@ -225,6 +238,7 @@ export async function executeAction(
     "ok",
     `${agent.name} requested ${input.action}${input.amountUsdc ? ` for ${input.amountUsdc} ${input.asset ?? "USDC"}` : ""}${input.to ? ` to ${short(input.to)}` : ""}${actor.via !== "self" ? ` (via ${actor.via})` : ""}`,
   );
+  if (signed) mark("Agent key verified", "ok", `Signed with ${agent.name}'s own key ${short(signed.signer)}, which Fuku never held`);
   mark(
     "Owner verified",
     agent.identity.humanVerified ? "ok" : "blocked",
@@ -569,6 +583,7 @@ export async function executeAction(
     travelRuleRef,
     idempotencyKey,
     replayed: false,
+    agentSignature: signed ? { signer: signed.signer } : null,
     scoreBefore,
     scoreAfter,
     trustDelta,
