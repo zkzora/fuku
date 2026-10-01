@@ -46,10 +46,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.integration
     runs-on: ubuntu-latest
     env:
-      # Hardhat's public test accounts: #0 relayer, #1 compliance signer, #2 Ava. Local node only.
-      DEPLOYER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-      FUKU_COMPLIANCE_SIGNER_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-      DEMO_OWNER_PRIVATE_KEY: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
       FUKU_CHAIN_MODE: live
       FUKU_CHAIN_ID: "31337"
       FUKU_CHAIN_NAME: Hardhat Local
@@ -73,6 +69,18 @@ jobs:
       - run: npm ci
       - working-directory: contracts
         run: npm ci
+      - name: Hardhat's public test accounts (#0 relayer, #1 compliance signer, #2 Ava), local node only
+        run: |
+          node --input-type=module -e '
+            import { mnemonicToAccount } from "viem/accounts";
+            import { toHex } from "viem";
+            import { appendFileSync } from "node:fs";
+            import { EOL } from "node:os";
+            // The default Hardhat mnemonic: these accounts are public and only ever funded on a local node.
+            const key = (i) => toHex(mnemonicToAccount("test test test test test test test test test test test junk", { addressIndex: i }).getHdKey().privateKey);
+            const lines = [`DEPLOYER_PRIVATE_KEY=${key(0)}`, `FUKU_COMPLIANCE_SIGNER_KEY=${key(1)}`, `DEMO_OWNER_PRIVATE_KEY=${key(2)}`];
+            appendFileSync(process.env.GITHUB_ENV, lines.join(EOL) + EOL);
+          '
       - name: Local node and a full deploy
         working-directory: contracts
         run: |
