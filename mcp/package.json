@@ -9,8 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "pretest": "npm --prefix ../sdk run build && tsc -p tsconfig.json",
     "test": "tsx --test test/unit.test.ts test/stdio.test.ts",
-    "test:integration": "tsx --test test/integration.test.ts",
-    "setup": "tsx scripts/setup.ts"
+    "test:integration": "tsx --test test/integration.test.ts"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

@@ -11,6 +11,6 @@
     "build": "npm run build -w web",
     "test": "npm test --workspaces --if-present",
     "mcp:build": "npm run build -w sdk && npm run build -w mcp",
-    "mcp:setup": "npm run setup -w mcp --"
+    "mcp:setup": "npm run mcp:setup -w web --"
   }
 }

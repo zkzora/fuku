@@ -36,6 +36,13 @@ describe("configuration", () => {
     assert.equal(loadConfig(good).agentPrivateKey, null, "no key: read-only");
   });
 
+  it("points out a placeholder pasted as a value", () => {
+    assert.throws(
+      () => loadConfig({ ...good, FUKU_AGENT_PRIVATE_KEY: "<from mcp/.env>" }),
+      (err: unknown) => err instanceof ConfigError && /still a placeholder/.test(err.message),
+    );
+  });
+
   it("lists every problem at once, and never echoes a private key", () => {
     assert.throws(
       () => loadConfig({}),

@@ -37,13 +37,15 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   }
   const apiKey = env.FUKU_API_KEY?.trim() ?? "";
   if (!apiKey) problems.push("FUKU_API_KEY is not set (the owner's API key from the Developer Console).");
+  else if (apiKey.startsWith("<")) problems.push("FUKU_API_KEY is still a placeholder: copy the key from mcp/.env, or remove the line.");
   const agentId = env.FUKU_AGENT_ID?.trim() ?? "";
   if (!agentId) problems.push("FUKU_AGENT_ID is not set (the Fuku agent this assistant acts as).");
   else if (!AGENT_ID.test(agentId)) problems.push(`FUKU_AGENT_ID must look like fuku:agent:0x… (40 hex digits), got ${JSON.stringify(agentId)}`);
   const rawKey = env.FUKU_AGENT_PRIVATE_KEY?.trim() ?? "";
   let agentPrivateKey: Config["agentPrivateKey"] = null;
   if (rawKey) {
-    if (!PRIVATE_KEY.test(rawKey)) problems.push("FUKU_AGENT_PRIVATE_KEY must be 32 bytes of hex (0x followed by 64 hex digits). Its value is not shown.");
+    if (rawKey.startsWith("<")) problems.push("FUKU_AGENT_PRIVATE_KEY is still a placeholder: copy the key from mcp/.env, or remove the line (the server reads mcp/.env itself).");
+    else if (!PRIVATE_KEY.test(rawKey)) problems.push("FUKU_AGENT_PRIVATE_KEY must be 32 bytes of hex (0x followed by 64 hex digits). Its value is not shown.");
     else agentPrivateKey = (rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`) as `0x${string}`;
   }
   if (problems.length) throw new ConfigError(problems);

@@ -45,7 +45,8 @@ after(() => new Promise<void>((resolve) => fuku.close(() => resolve())));
 function cleanEnv(extra: Record<string, string>) {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FUKU_")) env[k] = v;
-  return { ...env, ...extra };
+  // Never pick up a developer's mcp/.env: these tests set every variable themselves.
+  return { ...env, FUKU_MCP_ENV_FILE: path.join(here, "no-such.env"), ...extra };
 }
 
 function run(env: Record<string, string>, requests: unknown[], waitForIds: number[]) {

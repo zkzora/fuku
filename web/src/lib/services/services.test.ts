@@ -650,3 +650,27 @@ describe("agent-signed execution over the v1 API", () => {
     assert.deepEqual([plain.status, (await plain.json()).agentSignature], [200, null]);
   });
 });
+
+describe("agents kept across demo resets", () => {
+  it("a reset keeps a marked agent (passport, history, score) under Ava and still removes rehearsal agents", async () => {
+    const ava = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
+    const { agent: mcp } = await m.agents.registerAgent(ava, { name: "MCP Assistant", capabilities: ["swap"] });
+    await m.agents.setAgentPolicy(mcp.id, { allowed: [{ action: "swap", limitUsdcPerDay: 100 }], blocked: ["withdraw"], scopeApps: [] });
+    await m.actions.executeAction({ callerId: ava.id, agentId: mcp.id, action: "withdraw", amountUsdc: 10 });
+    const { agent: rehearsal } = await m.agents.registerAgent(ava, { name: "Support Agent", capabilities: ["swap"] });
+    await m.seed.keepAgentAcrossDemoResets(m.db, mcp.id);
+    const before = await m.db.agent.findUniqueOrThrow({ where: { id: mcp.id }, include: { policy: true } });
+
+    await m.seed.seedDemo(m.db, { quiet: true });
+
+    const after = await m.db.agent.findUniqueOrThrow({ where: { id: mcp.id }, include: { policy: true, actions: true, reputationEvents: true } });
+    assert.equal(after.identityId, m.seed.DEMO_IDENTITY_ID);
+    assert.deepEqual([after.policy?.version, after.policy?.active, after.trustScore], [before.policy?.version, true, before.trustScore]);
+    assert.equal(after.actions.length, 1);
+    assert.equal(after.actions[0].identityId, m.seed.DEMO_IDENTITY_ID);
+    assert.ok(after.reputationEvents.some((e) => e.kind === "violation"));
+    assert.equal(await m.db.agent.count({ where: { id: rehearsal.id } }), 0, "the rehearsal agent is gone");
+    assert.equal(await m.db.identity.count({ where: { id: { startsWith: "fuku:id:demo-reset" } } }), 0, "no holding identity is left");
+    assert.equal(await m.db.agent.count({ where: { identityId: m.seed.DEMO_IDENTITY_ID } }), 6, "five seeded agents plus the kept one");
+  });
+});
