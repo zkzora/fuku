@@ -5,6 +5,7 @@ import { chainConfig, chainMode, readMandate, spendGuardAddress } from "@/lib/ch
 import { idToBytes32 } from "@/lib/ids";
 import { cleanverseRuntime } from "@/lib/services/cleanverse";
 import { authorizedAgent } from "@/lib/services/authz";
+import { mandatePayees } from "@/lib/services/mandate";
 
 type P = { id: string };
 
@@ -26,5 +27,6 @@ export const GET = withApiKey<P>(async (_req, caller, { id }) => {
   if (chainMode() !== "live") return json({ mandate: null, wallet, reason: "mock-chain", ...target });
   if (!guard) return json({ mandate: null, wallet, reason: "guard-not-configured", ...target });
   if (!wallet) return json({ mandate: null, wallet: null, reason: "no-verified-wallet", ...target });
-  return json({ mandate: await readMandate(agent.id, wallet), wallet, reason: null, ...target });
+  const [mandate, payees] = await Promise.all([readMandate(agent.id, wallet), mandatePayees(agent.id, wallet)]);
+  return json({ mandate, wallet, reason: null, ...target, payees: payees?.payees ?? null, payeesSource: payees?.source ?? null });
 });

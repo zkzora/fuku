@@ -94,6 +94,9 @@ export const GET = withApiKey<P>(async (_req, caller, { id }) => {
       capabilities: view.capabilities,
       registeredTx: view.registeredTx,
       createdAt: view.createdAt,
+      // The agent's own key (its ERC-8004 agentWallet): held by Fuku ("fuku") or by the developer ("external").
+      agentKey: agent.agentWallet ? { address: agent.agentWallet, source: agent.agentKey ? "fuku" : "external" } : null,
+      erc8004: agent.erc8004Id ? { agentId: agent.erc8004Id, registry: agent.erc8004Registry, chainId: agent.erc8004ChainId } : null,
     },
     owner: {
       id: agent.identity.id,
@@ -102,6 +105,8 @@ export const GET = withApiKey<P>(async (_req, caller, { id }) => {
       /** Passkey ceremony with user verification. Not a proof of unique personhood. */
       humanVerified: agent.identity.humanVerified,
       authMethod: agent.identity.authMethod,
+      /** Who controls the identity on-chain: "relayer" (custodial, Fuku's key) or "owner" (the bound wallet). */
+      custody: agent.identity.chainCustody ?? null,
       // Last persisted A-Pass read for the owner's verified wallet; `source` says whether Cleanverse or the simulator answered.
       cleanverse: {
         mode: apass.mode,

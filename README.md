@@ -8,8 +8,10 @@ web/        Next.js 16 app: landing, dashboard, identity, agents, permissions, r
 contracts/  Solidity for Monad (Hardhat 3): HumanIdentityRegistry, AgentRegistry,
             PermissionRegistry, ReputationRegistry, FukuSpendGuard (owner-bounded mandates),
             and the Cleanverse simulators CleanverseAPassSim / CleanverseATokenSim — 72 passing tests
-sdk/        @fuku/sdk 0.3.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
-            getTrustScore, checkPermission, executeAction, getAction, getMandate
+sdk/        @fuku/sdk 0.4.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
+            getTrustScore, checkPermission, executeAction (signed with the agent's own key),
+            getAction, getMandate, verifyScore
+mcp/        @fuku/mcp — MCP server: Claude Desktop or Claude Code acts as a Fuku agent (stdio)
 examples/   sdk-consumer: an external program using only the SDK, verifying results on-chain
 docs/       PITCH.md (talk track, status, judge Q&A), CLEANVERSE.md (CVI/CVA integration),
             SECURITY.md (authorization, lifecycle, trust assumptions, runbooks)
@@ -21,7 +23,7 @@ Fuku UI mockups/  Design source (Claude Design exports) and the product specs
 ## Run it
 
 ```bash
-npm install                 # installs web + sdk (npm workspaces)
+npm install                 # installs web, sdk and mcp (npm workspaces)
 cd web
 npx prisma db push          # creates web/prisma/dev.db (SQLite)
 npm run db:seed             # seeds Ava Chen, 5 agents, activity, vault items, demo API key
@@ -71,8 +73,11 @@ Accounts:
 | Payments Agent | `fuku:agent:0x0e0acd52d5c78ee77274a6604717693214c34838` | 1957 | `0x526b436E4c069E3515b0517C26938ece0B93A96D` |
 | Ops Scheduler | `fuku:agent:0x45edacaef93036f9e9a0831b08db4212eacc8e88` | 1958 | `0x8B97339F86bCc34ecB5ECCC6d143c8A10EE5B594` |
 | Portfolio Rebalancer | `fuku:agent:0xc08cd9a25f55692b8476cd0893d669b542f3e969` | 1959 | `0xAfAA1fe0Ad9e85f0939641fAeC82761e78409B07` |
+| MCP Assistant | `fuku:agent:0x367168b5752479508c6851576c6fb2ece23bda90` | 1963 | `0x2d9E18519fF81959CB9b5Ed8AaB73cECC9E2beB8` |
 
-These five are demo cohort `v2`. After a live climax, `npm run demo:cohort` registers a fresh cohort under new ids; this table stays the record of `v2`.
+The first five are demo cohort `v2`. After a live climax, `npm run demo:cohort` registers a fresh cohort under new ids; this table stays the record of `v2`.
+
+The MCP Assistant (registered 2026-10-01) is the agent an AI assistant acts as through the Fuku MCP server. Its key is not held by Fuku: it was generated on the operator's machine and stays in `mcp/.env`. A demo reset keeps it. Its transactions are in [`docs/CLEANVERSE.md`](docs/CLEANVERSE.md#the-mcp-assistant-and-the-signed-execution-checks-on-monad-testnet-2026-10-01).
 
 ## Go live on Monad testnet
 
@@ -139,6 +144,21 @@ npm run wire:env         # timestamped backup of web/.env, then upserts the live
 8. **Reputation**: the score drops (96 → 92) with a breakdown and an explanation. **Activity** shows the proof.
 
 The Developer Console has API keys, the SDK reference, a sandbox that runs the same flow through the public API, and the sponsor integration board (live vs simulated per env var).
+
+## Use Fuku from an AI assistant (MCP)
+
+`mcp/` is an MCP server, and it makes a real AI assistant a Fuku agent. In Claude Desktop or Claude Code, the assistant holds its own agent key and sends every action through Fuku. Its owner's passport then decides:
+- Fuku allows the action, or blocks it with a rule id;
+- or Fuku pays through FukuSpendGuard on Monad, inside the owner's on-chain mandate.
+
+A blocked action comes back to the assistant as a normal result: the rule, the reason and the anchored proof, which it reports to the user. Fuku executes this agent over the API only when the request is signed with its own key, which never leaves your machine.
+
+```bash
+npm run mcp:build    # sdk/dist + mcp/dist
+npm run mcp:setup    # "MCP Assistant" under Ava: key in mcp/.env, passport, mandate; prints the client config
+```
+
+Setup, the Claude Desktop and Claude Code configuration, and troubleshooting are in [`mcp/README.md`](mcp/README.md).
 
 ## How trust is computed
 

@@ -609,3 +609,68 @@ describe("demo resets and cohorts", () => {
     assert.equal(await m.seed.demoCohort(m.db), "v2");
   });
 });
+
+describe("agent-signed execution over the v1 API", () => {
+  it("an agent that holds its own key executes only with that key's signature; keyless agents are unchanged", async () => {
+    const { agentRequestMessage, executePath } = await import("../agent-signature");
+    const { identity, key } = await newIdentity("Agent key owner");
+    const { agent } = await m.agents.registerAgent(identity, { name: "Own-key agent", capabilities: ["swap"] });
+    await m.agents.setAgentPolicy(agent.id, { allowed: [{ action: "swap", limitUsdcPerDay: 100 }], blocked: ["withdraw"], scopeApps: [] });
+    const agentKey = privateKeyToAccount(generatePrivateKey());
+    await m.db.agent.update({ where: { id: agent.id }, data: { agentWallet: agentKey.address, agentKey: null } });
+
+    const action = { action: "swap", amountUsdc: 5 };
+    const body = JSON.stringify(action);
+    const signed = async (idempotencyKey: string, signer = agentKey) => {
+      const issuedAt = Math.floor(Date.now() / 1000);
+      const message = agentRequestMessage({ agentId: agent.id, method: "POST", path: executePath(agent.id), idempotencyKey, issuedAt, body });
+      return { "idempotency-key": idempotencyKey, "x-fuku-agent-signature": await signer.signMessage({ message }), "x-fuku-agent-issued-at": String(issuedAt) };
+    };
+    const post = (headers: Record<string, string>) => m.executeRoute.POST(req(`/api/v1/agents/${agent.id}/execute`, "POST", key, action, headers), ctx({ id: agent.id }));
+
+    const unsigned = await post({ "idempotency-key": "own-key-unsigned-1" });
+    assert.deepEqual([unsigned.status, (await unsigned.json()).code], [401, "agent_signature_required"]);
+
+    const ok = await post(await signed("own-key-signed-1"));
+    const result = await ok.json();
+    assert.equal(ok.status, 200);
+    assert.deepEqual([result.decision, result.status, result.agentSignature?.signer], ["ALLOWED", "AUTHORIZED", agentKey.address]);
+    assert.ok(result.workflow.some((s: { step: string }) => s.step === "Agent key verified"));
+
+    const again = await (await post(await signed("own-key-signed-1"))).json();
+    assert.deepEqual([again.id, again.replayed], [result.id, true]);
+
+    const forged = await post(await signed("own-key-signed-2", privateKeyToAccount(generatePrivateKey())));
+    assert.deepEqual([forged.status, (await forged.json()).code], [401, "agent_signature_invalid"]);
+    assert.equal(await m.db.agentAction.count({ where: { agentId: agent.id } }), 1, "only the signed request executed");
+
+    const { agent: keyless } = await m.agents.registerAgent(identity, { name: "Keyless agent", capabilities: ["swap"] });
+    await m.agents.setAgentPolicy(keyless.id, { allowed: [{ action: "swap", limitUsdcPerDay: 100 }], blocked: [], scopeApps: [] });
+    const plain = await m.executeRoute.POST(req(`/api/v1/agents/${keyless.id}/execute`, "POST", key, action), ctx({ id: keyless.id }));
+    assert.deepEqual([plain.status, (await plain.json()).agentSignature], [200, null]);
+  });
+});
+
+describe("agents kept across demo resets", () => {
+  it("a reset keeps a marked agent (passport, history, score) under Ava and still removes rehearsal agents", async () => {
+    const ava = await m.db.identity.findUniqueOrThrow({ where: { id: m.seed.DEMO_IDENTITY_ID } });
+    const { agent: mcp } = await m.agents.registerAgent(ava, { name: "MCP Assistant", capabilities: ["swap"] });
+    await m.agents.setAgentPolicy(mcp.id, { allowed: [{ action: "swap", limitUsdcPerDay: 100 }], blocked: ["withdraw"], scopeApps: [] });
+    await m.actions.executeAction({ callerId: ava.id, agentId: mcp.id, action: "withdraw", amountUsdc: 10 });
+    const { agent: rehearsal } = await m.agents.registerAgent(ava, { name: "Support Agent", capabilities: ["swap"] });
+    await m.seed.keepAgentAcrossDemoResets(m.db, mcp.id);
+    const before = await m.db.agent.findUniqueOrThrow({ where: { id: mcp.id }, include: { policy: true } });
+
+    await m.seed.seedDemo(m.db, { quiet: true });
+
+    const after = await m.db.agent.findUniqueOrThrow({ where: { id: mcp.id }, include: { policy: true, actions: true, reputationEvents: true } });
+    assert.equal(after.identityId, m.seed.DEMO_IDENTITY_ID);
+    assert.deepEqual([after.policy?.version, after.policy?.active, after.trustScore], [before.policy?.version, true, before.trustScore]);
+    assert.equal(after.actions.length, 1);
+    assert.equal(after.actions[0].identityId, m.seed.DEMO_IDENTITY_ID);
+    assert.ok(after.reputationEvents.some((e) => e.kind === "violation"));
+    assert.equal(await m.db.agent.count({ where: { id: rehearsal.id } }), 0, "the rehearsal agent is gone");
+    assert.equal(await m.db.identity.count({ where: { id: { startsWith: "fuku:id:demo-reset" } } }), 0, "no holding identity is left");
+    assert.equal(await m.db.agent.count({ where: { identityId: m.seed.DEMO_IDENTITY_ID } }), 6, "five seeded agents plus the kept one");
+  });
+});

@@ -60,6 +60,49 @@ export async function activeDemoAgentIds(db: PrismaClient) {
 }
 
 /**
+ * Agents a demo reset keeps, with their passport, history and score (Setting "demo.keepAgents"): the
+ * MCP Assistant (`npm run mcp:setup`) has a key that lives on someone's machine, so the seed could not
+ * re-create it. Every other agent registered under Ava (a rehearsal's "Support Agent", say) is removed
+ * by a reset as before.
+ */
+const KEEP_SETTING = "demo.keepAgents";
+/** Holds the kept agents while the demo identity is deleted and re-created. */
+const HOLDING_IDENTITY_ID = "fuku:id:demo-reset-holding";
+
+export async function keptDemoAgents(db: PrismaClient): Promise<string[]> {
+  const row = await db.setting.findUnique({ where: { key: KEEP_SETTING } });
+  const ids: unknown = row ? JSON.parse(row.value) : [];
+  return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === "string") : [];
+}
+
+export async function keepAgentAcrossDemoResets(db: PrismaClient, agentId: string): Promise<void> {
+  const ids = [...new Set([...(await keptDemoAgents(db)), agentId])];
+  const value = JSON.stringify(ids);
+  await db.setting.upsert({ where: { key: KEEP_SETTING }, create: { key: KEEP_SETTING, value }, update: { value } });
+}
+
+/** Move the kept agents (and their actions) out of the demo identity before it is deleted. */
+async function parkKeptAgents(db: PrismaClient): Promise<string[]> {
+  const wanted = await keptDemoAgents(db);
+  if (!wanted.length) return [];
+  // Also picks up agents a reset interrupted after parking them.
+  const kept = (await db.agent.findMany({ where: { id: { in: wanted }, identityId: { in: [DEMO_IDENTITY_ID, HOLDING_IDENTITY_ID] } }, select: { id: true } })).map((a) => a.id);
+  if (!kept.length) return [];
+  await db.identity.upsert({ where: { id: HOLDING_IDENTITY_ID }, create: { id: HOLDING_IDENTITY_ID, displayName: "Demo reset holding (temporary)" }, update: {} });
+  await db.agent.updateMany({ where: { id: { in: kept } }, data: { identityId: HOLDING_IDENTITY_ID } });
+  await db.agentAction.updateMany({ where: { agentId: { in: kept } }, data: { identityId: HOLDING_IDENTITY_ID } });
+  return kept;
+}
+
+async function unparkKeptAgents(db: PrismaClient, kept: string[]): Promise<void> {
+  if (kept.length) {
+    await db.agent.updateMany({ where: { id: { in: kept } }, data: { identityId: DEMO_IDENTITY_ID } });
+    await db.agentAction.updateMany({ where: { agentId: { in: kept } }, data: { identityId: DEMO_IDENTITY_ID } });
+  }
+  await db.identity.deleteMany({ where: { id: HOLDING_IDENTITY_ID } });
+}
+
+/**
  * Agent columns the testnet setup fills and a demo reset must keep: the agent key (sealed; losing it
  * would orphan the ERC-8004 agentWallet) and the ERC-8004 registration (without it a second
  * registration would mint a duplicate agent NFT).
@@ -147,6 +190,7 @@ export async function seedDemo(db: PrismaClient, opts: { quiet?: boolean } = {})
   const cohortIds = Object.values(ids);
   const log = opts.quiet ? () => undefined : (line: string) => console.log(line);
   await saveDemoCarry(db, cohortIds);
+  const kept = await parkKeptAgents(db);
   await db.identity.deleteMany({ where: { id: DEMO_IDENTITY_ID } });
   // Ava's wallet is the address of DEMO_OWNER_PRIVATE_KEY when set (the Cleanverse demo owner),
   // otherwise of a public demo key. Either way the seed proves control with a signed binding.
@@ -553,6 +597,7 @@ export async function seedDemo(db: PrismaClient, opts: { quiet?: boolean } = {})
   }
 
   await restoreDemoCarry(db, cohortIds);
+  await unparkKeptAgents(db, kept);
   log(`Seeded demo identity ${identity.id} (${identity.displayName}), cohort ${cohort}. Demo API key: ${DEMO_API_KEY}`);
   return { cohort, ids };
 }

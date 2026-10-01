@@ -58,6 +58,23 @@ Settlement status (2026-09-30): seven contracts are live on Monad testnet (chain
 
 **Say:** "Now money that should move. Payments Agent pays 250 aUSDC to Nusantara Supplies. Fuku checks the token rule and both A-Passes with Cleanverse, then FukuSpendGuard moves the token from Ava's wallet under her on-chain daily cap, in one transaction. A frozen recipient gets rule R8. Until our Cleanverse API invite lands, a labelled simulator answers these checks."
 
+### Optional swap-in for 1:50 to 2:20 · An AI assistant pays (MCP)
+
+Use this beat instead of "Pay a verified supplier", not in addition to it, so the talk stays at three minutes.
+
+It needs a few things ready (`mcp/README.md`):
+- Claude Desktop, with the Fuku MCP server configured;
+- the MCP Assistant set up for the app you present (`npm run mcp:setup`);
+- the app running on the same chain.
+
+With the MCP Assistant set up, Ava has six agents, so say "six agents" at 0:15. The Trading Assistant's 96 → 92 is unchanged.
+
+**Type** in Claude Desktop: "Pay Nusantara Supplies 30 aUSDC." The assistant checks, then pays. The answer shows ALLOWED and the Monad transaction link.
+
+**Type:** "Withdraw 4,800 USDC to 0x7AD75AD75A52e8d4ee5290294C498917386f40BB." The assistant answers BLOCKED by rule R2 and says why. It checked first and stopped there: nothing was submitted, nothing moved.
+
+**Say:** "This is a real assistant, not a button. It holds its own key, and every action it tries goes through Fuku. Thirty aUSDC to an approved supplier: allowed, and here is the Monad transaction. A 4,800 withdrawal: blocked by rule R2, because Ava's passport hard-blocks withdrawals. The payment is recorded on Monad; the withdraw was refused before it could execute."
+
 ### 2:20 to 2:40 · Reputation
 
 **Click:** close the dialog, sidebar **Reputation**. The Trading Assistant chip now reads 92. Point at the Score breakdown card.
@@ -114,11 +131,12 @@ Four substitutions keep the spoken lines true. At 0:55, "anchors the hash" becom
 | Trust score | fuku-score/2: the six-line breakdown plus dimensions, evidence count, observation period, scoring version and uncertainty, served by the UI, the session API and the public API. Seeded numbers are unchanged (96 → 92). |
 | Solidity registries | Four registries plus FukuSpendGuard v2 (owner-bounded mandates, single-use actions) and two Cleanverse simulators in Hardhat 3, Solidity 0.8.28, 72 passing tests (13 of them adversarial), deploy scripts with role grants, ABI export, pre-flight and env-wiring scripts. All seven are on Monad testnet with sources verified on Sourcify (README, "Deployments"): the four registries since 2026-09-24, FukuSpendGuard 0x3d5d…46dc and the two simulators since 2026-09-30. |
 | Settlement adapter | Live path simulates each call before sending (reverts decode to the contract's custom errors), stores a guarded transfer's hash as soon as it is broadcast, waits for the receipt, and anchors missing identities, agents and passports lazily. A live failure is recorded as `failed` and a timeout as `pending`, never as a mock receipt; `npm run reconcile` settles them, recovers crashed transfers through the guard and handles reorgs. One signer, serialised across processes by a database lease. Proven with `web/scripts/live-smoke.mjs`: 67/67 on a local Hardhat node, and 66/66 on Monad testnet on 2026-09-30 (the reorg check needs Hardhat). |
-| SDK | `@fuku/sdk` 0.3.0, built to `dist/`. 19 methods, including `getAction` (lifecycle and evidence) and `getMandate`; idempotency keys; structured error codes. Eight contract tests. `examples/sdk-consumer` runs the whole flow against a local node, and ran it on Monad testnet on 2026-09-30. The flow covers its own agent with a key generated locally, the owner's mandate and ERC-8004 registration (#1960), a guarded payment, and independent on-chain verification of the transfer. |
+| SDK | `@fuku/sdk` 0.4.0, built to `dist/`. 20 methods, including `getAction` (lifecycle and evidence) and `getMandate`; idempotency keys; structured error codes. Eight contract tests. `examples/sdk-consumer` runs the whole flow against a local node, and ran it on Monad testnet on 2026-09-30. The flow covers its own agent with a key generated locally, the owner's mandate and ERC-8004 registration (#1960), a guarded payment, and independent on-chain verification of the transfer. |
 | Proofs | `proofHash = keccak256` of the decision record (agent, action, amount, app, decision, rule id, policy hash, timestamp, plus the Cleanverse `complianceRef` when evidence exists); a workflow trace on every action. |
 | Cleanverse CVI / CVA | Real integration code: cooperate API client (envelope, AES-CBC bodies, fail-closed code mapping), asset / owner / recipient checks, evidence hashed into a `complianceRef`, A-Pass reads persisted, UI and SDK. The live API has never been called (invite pending); answers come from a Fuku-built simulator, labelled everywhere. See `docs/CLEANVERSE.md`. |
 | Authorization | One path for the web app, the API, the SDK and CRE: an owner, an identity the caller created, or an owner-granted delegation with scopes (register, manage, execute). Invalid API keys are 401 with no session fallback. Rate limits per process. The demo sign-in and demo key are off in production unless explicitly enabled. |
 | Execution lifecycle | DENIED, AUTHORIZED, SUBMITTED, CONFIRMED, PENDING, FAILED and SIMULATED are stored with receipt mode, chain id, block and log index; `Idempotency-Key` replays instead of executing twice. |
+| MCP server | `mcp/` (`@fuku/mcp`) makes an AI assistant (Claude Desktop, Claude Code) a Fuku agent through six tools, a passport resource and a safe-payment prompt. Executions are signed with the agent's own key, which stays on the user's machine; Fuku verifies the signature and requires it for such agents. A blocked decision is a normal result with the rule and the reason. Tested with unit tests, over real stdio, and end to end on a local node (6/6). On Monad testnet since 2026-10-01: the MCP Assistant is ERC-8004 agent #1963, with its key on the operator's machine (`docs/CLEANVERSE.md` has the transactions). |
 | Memory vault | AES-GCM-256 with a PBKDF2 key (100,000 iterations) derived in the browser from the owner's own passphrase; the server stores ciphertext, IVs and an encrypted check value, never the passphrase. Only the seeded demo identity opens with a public demo passphrase, labelled as not secret. Titles are stored in clear. |
 
 ### What is simulated until keys are configured
@@ -416,7 +434,7 @@ More than we would like, and we list it in `docs/SECURITY.md`. The relayer key o
 1. Serve the ERC-8004 registration file from a public URL, and move the registered agents to it with `setAgentURI`.
 2. Owner-controlled keys as identity controller; an independent verifier for the human flag.
 3. Serve the whole activity timeline from the Envio index instead of the local ledger.
-4. Publish `@fuku/sdk` to npm with its 20 public v1 endpoints documented.
+4. Publish `@fuku/sdk` to npm with its 21 public v1 endpoints documented.
 5. Risk-weighted scoring and a rolling 24-hour limit window.
 
 ---

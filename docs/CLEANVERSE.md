@@ -411,6 +411,82 @@ Collected from Envio HyperSync by sender (the relayer, Ava's wallet and the smok
 
 </details>
 
+## The MCP Assistant and the signed-execution checks on Monad testnet (2026-10-01)
+
+**The MCP Assistant**, the agent Claude Desktop or Claude Code acts as through the Fuku MCP server (`mcp/README.md`):
+- It is `fuku:agent:0x367168b5752479508c6851576c6fb2ece23bda90`, ERC-8004 agent **#1963** on the canonical Identity Registry [`0x8004A818BFB912233c491871b3d84c89A494BD9e`](https://testnet.monadvision.com/address/0x8004A818BFB912233c491871b3d84c89A494BD9e), owned by Ava's wallet.
+- Its `agentWallet` is [`0x2d9E18519fF81959CB9b5Ed8AaB73cECC9E2beB8`](https://testnet.monadvision.com/address/0x2d9E18519fF81959CB9b5Ed8AaB73cECC9E2beB8), the agent's own key. That key was generated on the operator's machine and is kept there in `mcp/.env`; Fuku has only the address.
+- Its passport allows `transfer` up to 100 aUSDC a day and `read_balances`; `withdraw` and `change_owner` are blocked.
+- Ava's mandate allows 100 aUSDC a day and at most 50 per transfer, with Nusantara Supplies as the only payee, valid until 2026-10-31.
+- A demo reset keeps it.
+
+The setup sent 6 transactions for 0.121 MON:
+- the relayer: `registerAgent` [`0xc4738026…ab2f`](https://testnet.monadvision.com/tx/0xc4738026e825c418c5edce1fc8bb48a276db3a7891007a6940bc067bfeafab2f) and `setPolicy` [`0x0f764614…4349`](https://testnet.monadvision.com/tx/0x0f76461456b0e612ed72ac090f6552f0cb7421b7ac415084ae95a8141ff94349);
+- Ava's wallet: ERC-8004 `register` [`0xda18b4e6…b19b`](https://testnet.monadvision.com/tx/0xda18b4e6ef61e83a57920d5b09fae159910fd9fa0153d4583921d9fbd5d7b19b), `setAgentWallet` [`0xa49cd2e9…47c4`](https://testnet.monadvision.com/tx/0xa49cd2e940bc458ba0bf925e75a38af0d56870f1605778476f87d60dde2247c4), `openMandate` [`0x4d70cdcb…a121`](https://testnet.monadvision.com/tx/0x4d70cdcb0d3bcb8bf7ac8d48f8bafe4c7c457b4965145bdb7c83dffce5cba121) and `setPayee` [`0x70399119…b8e5`](https://testnet.monadvision.com/tx/0x7039911951530a81bf24bf7355603288b88e1a46ced806fa097970bd4efcb8e5).
+
+Its first run stopped at the mandate. The development server on port 3001 answered `GET /api/v1/agents/:id/mandate` with a 404 page after that file changed; a restart fixed it, and a second run completed only the missing steps.
+
+**Executions now have to be signed.** An agent that holds its own key is executed over the API only when the request is signed with that key.
+- `examples/sdk-consumer` ran again against testnet: all 19 steps passed in 12 transactions (0.188 MON).
+- It created `fuku:agent:0x5e9b5246581f73094ff095b173c155b7c61c854b` (ERC-8004 #1964) with a key generated in the process.
+- It paid 25 aUSDC-SIM through the guard with a request signed by that key ([`0xc807c96e…0747`](https://testnet.monadvision.com/tx/0xc807c96e70598892ba1ca97bfbb536d88d9378914302383bff91ae6dbb1d0747)); the result names the signer.
+- The agent of the earlier run, #1960, can no longer execute: its key existed only inside that process, which is what the non-custodial path means.
+
+**Chainlink CRE.** `cre workflow simulate fuku-guard` passed against `fuku:agent:0x5b9edae71e4aaf11320b21236cf3df02efb9194f`, a keyless agent made for the run, so the demo agents were not touched.
+- The workflow verified the agent (human owner, trust 65, dry run BLOCKED R2).
+- It executed the withdraw of 4,800 through the API, and Fuku blocked it with R2: [`0x70ef5ccf…07f1`](https://testnet.monadvision.com/tx/0x70ef5ccfbcd7ab48a2d63b6df2f238421e004936d4329a9e306f6943b6a507f1).
+- It then read `PermissionRegistry.stats` (1 violation) and `ReputationRegistry.getScore` (61) back from Monad.
+- Creating the probe and the simulation cost 0.062 MON over 4 transactions.
+
+<details>
+<summary>All 22 transactions of 2026-10-01 (blocks 67,292,978 to 67,294,684; none reverted; 0.371 MON of gas)</summary>
+
+Collected from Envio HyperSync by sender (the relayer and Ava's wallet) and cross-checked against what each script printed.
+
+**`npm run mcp:setup -- --allow-testnet`: the MCP Assistant.** 6 transactions, 0.1209 MON.
+
+| # | Call | From | Transaction |
+| --- | --- | --- | --- |
+| 1 | AgentRegistry.registerAgent | relayer | [`0xc4738026e825c418c5edce1fc8bb48a276db3a7891007a6940bc067bfeafab2f`](https://testnet.monadvision.com/tx/0xc4738026e825c418c5edce1fc8bb48a276db3a7891007a6940bc067bfeafab2f) |
+| 2 | PermissionRegistry.setPolicy | relayer | [`0x0f76461456b0e612ed72ac090f6552f0cb7421b7ac415084ae95a8141ff94349`](https://testnet.monadvision.com/tx/0x0f76461456b0e612ed72ac090f6552f0cb7421b7ac415084ae95a8141ff94349) |
+| 3 | ERC8004IdentityRegistry.register | Ava's wallet | [`0xda18b4e6ef61e83a57920d5b09fae159910fd9fa0153d4583921d9fbd5d7b19b`](https://testnet.monadvision.com/tx/0xda18b4e6ef61e83a57920d5b09fae159910fd9fa0153d4583921d9fbd5d7b19b) |
+| 4 | ERC8004IdentityRegistry.setAgentWallet | Ava's wallet | [`0xa49cd2e940bc458ba0bf925e75a38af0d56870f1605778476f87d60dde2247c4`](https://testnet.monadvision.com/tx/0xa49cd2e940bc458ba0bf925e75a38af0d56870f1605778476f87d60dde2247c4) |
+| 5 | FukuSpendGuard.openMandate | Ava's wallet | [`0x4d70cdcb0d3bcb8bf7ac8d48f8bafe4c7c457b4965145bdb7c83dffce5cba121`](https://testnet.monadvision.com/tx/0x4d70cdcb0d3bcb8bf7ac8d48f8bafe4c7c457b4965145bdb7c83dffce5cba121) |
+| 6 | FukuSpendGuard.setPayee | Ava's wallet | [`0x7039911951530a81bf24bf7355603288b88e1a46ced806fa097970bd4efcb8e5`](https://testnet.monadvision.com/tx/0x7039911951530a81bf24bf7355603288b88e1a46ced806fa097970bd4efcb8e5) |
+
+**`examples/sdk-consumer` again, its executions now signed with its local agent key (ERC-8004 #1964).** 12 transactions, 0.1883 MON.
+
+| # | Call | From | Transaction |
+| --- | --- | --- | --- |
+| 7 | AgentRegistry.registerAgent | relayer | [`0x997600f5e7b9cdab1b7177976fcd917626833c02a4e3104b13a23f64ad04e0f8`](https://testnet.monadvision.com/tx/0x997600f5e7b9cdab1b7177976fcd917626833c02a4e3104b13a23f64ad04e0f8) |
+| 8 | PermissionRegistry.setPolicy | relayer | [`0x28d9fa47d0d672128fa812a47f0d66083ca5dc967000d62266ecedc37ffc4ded`](https://testnet.monadvision.com/tx/0x28d9fa47d0d672128fa812a47f0d66083ca5dc967000d62266ecedc37ffc4ded) |
+| 9 | FukuSpendGuard.openMandate | Ava's wallet | [`0x404395e1fe195fcfff69a631a4c75875ba429f5c761441f10b06e0cbf0ca160f`](https://testnet.monadvision.com/tx/0x404395e1fe195fcfff69a631a4c75875ba429f5c761441f10b06e0cbf0ca160f) |
+| 10 | FukuSpendGuard.setPayee | Ava's wallet | [`0x5b4dfd8e322b81f8559a91e7c37988fd383cfeadf97339ecee6df0c3685df018`](https://testnet.monadvision.com/tx/0x5b4dfd8e322b81f8559a91e7c37988fd383cfeadf97339ecee6df0c3685df018) |
+| 11 | ERC8004IdentityRegistry.register | Ava's wallet | [`0x5aea53844bfa70d46f5aab4bd44b004b89988878f23dbc5547796a4a653ccef2`](https://testnet.monadvision.com/tx/0x5aea53844bfa70d46f5aab4bd44b004b89988878f23dbc5547796a4a653ccef2) |
+| 12 | ERC8004IdentityRegistry.setAgentWallet | Ava's wallet | [`0x9d52b6c230968d27babb965c62fb0aeba1e7dec26e54b056f558b79b8251bc3e`](https://testnet.monadvision.com/tx/0x9d52b6c230968d27babb965c62fb0aeba1e7dec26e54b056f558b79b8251bc3e) |
+| 13 | FukuSpendGuard.execute | relayer | [`0xc807c96e70598892ba1ca97bfbb536d88d9378914302383bff91ae6dbb1d0747`](https://testnet.monadvision.com/tx/0xc807c96e70598892ba1ca97bfbb536d88d9378914302383bff91ae6dbb1d0747) |
+| 14 | ReputationRegistry.updateScore | relayer | [`0x6b8a08ea3eb35ef5cef1d411da3851dccc92199edf143bd28aedb43f5f879337`](https://testnet.monadvision.com/tx/0x6b8a08ea3eb35ef5cef1d411da3851dccc92199edf143bd28aedb43f5f879337) |
+| 15 | FukuSpendGuard.bumpValidAfter | relayer | [`0xf97d32288dbc13d526ca4d817048bdb340ded8a06297173dc52b16969d30ec7f`](https://testnet.monadvision.com/tx/0xf97d32288dbc13d526ca4d817048bdb340ded8a06297173dc52b16969d30ec7f) |
+| 16 | PermissionRegistry.revokePolicy | relayer | [`0xeaef523fdfbb3846ccc33312bdc26337879b7903470b548af88bf0caff7d248e`](https://testnet.monadvision.com/tx/0xeaef523fdfbb3846ccc33312bdc26337879b7903470b548af88bf0caff7d248e) |
+| 17 | PermissionRegistry.recordDecision | relayer | [`0xc78f830c469d2a935a6e6f84e2d53d3f57c7ed33e913d27c22629de578c03658`](https://testnet.monadvision.com/tx/0xc78f830c469d2a935a6e6f84e2d53d3f57c7ed33e913d27c22629de578c03658) |
+| 18 | ReputationRegistry.updateScore | relayer | [`0x775636653b2aca0f924f574158e17325c41feb1657f33103fda69fd7d5df37ee`](https://testnet.monadvision.com/tx/0x775636653b2aca0f924f574158e17325c41feb1657f33103fda69fd7d5df37ee) |
+
+**The keyless "CRE probe" agent for the CRE simulation.** 2 transactions, 0.0452 MON.
+
+| # | Call | From | Transaction |
+| --- | --- | --- | --- |
+| 19 | AgentRegistry.registerAgent | relayer | [`0x9b399b636557e08b8de50c58f550123c30306492aa4f7250875345759e4b8e1a`](https://testnet.monadvision.com/tx/0x9b399b636557e08b8de50c58f550123c30306492aa4f7250875345759e4b8e1a) |
+| 20 | PermissionRegistry.setPolicy | relayer | [`0x1576512d1b3fdad933b3612b15b1e7363eb15a6ca274fa05aabbee7c6287ca66`](https://testnet.monadvision.com/tx/0x1576512d1b3fdad933b3612b15b1e7363eb15a6ca274fa05aabbee7c6287ca66) |
+
+**`cre workflow simulate fuku-guard` against the probe: withdraw 4,800 blocked (R2).** 2 transactions, 0.0170 MON.
+
+| # | Call | From | Transaction |
+| --- | --- | --- | --- |
+| 21 | PermissionRegistry.recordDecision | relayer | [`0x70ef5ccfbcd7ab48a2d63b6df2f238421e004936d4329a9e306f6943b6a507f1`](https://testnet.monadvision.com/tx/0x70ef5ccfbcd7ab48a2d63b6df2f238421e004936d4329a9e306f6943b6a507f1) |
+| 22 | ReputationRegistry.updateScore | relayer | [`0xa71e799dc7bc0e36df2db716b5bda2707f5351cdaa538c53182be0d9055b682a`](https://testnet.monadvision.com/tx/0xa71e799dc7bc0e36df2db716b5bda2707f5351cdaa538c53182be0d9055b682a) |
+
+</details>
+
 ## Flip-to-live checklist (when the invite lands)
 
 1. Put `CLEANVERSE_API_ID` and `CLEANVERSE_API_KEY` in `web/.env` (never commit them). Keep `CLEANVERSE_BASE_URL` on UAT until Cleanverse says otherwise.

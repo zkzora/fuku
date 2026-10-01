@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      integration:
+        description: "Also run the MCP integration test (local Hardhat node + production build of the app)"
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    name: Typecheck, lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            contracts/package-lock.json
+      - run: npm ci
+      - name: Prisma client
+        working-directory: web
+        run: npx prisma generate
+      - name: Typecheck and lint (web)
+        working-directory: web
+        run: |
+          npx tsc --noEmit
+          npm run lint
+      - name: Unit tests (web, sdk, mcp; mcp builds sdk and itself first)
+        run: npm test
+      - name: Contracts
+        working-directory: contracts
+        run: |
+          npm ci
+          npm test
+
+  mcp-integration:
+    name: MCP integration (opt-in)
+    if: github.event_name == 'workflow_dispatch' && inputs.integration
+    runs-on: ubuntu-latest
+    env:
+      FUKU_CHAIN_MODE: live
+      FUKU_CHAIN_ID: "31337"
+      FUKU_CHAIN_NAME: Hardhat Local
+      MONAD_RPC_URL: http://127.0.0.1:8545
+      FUKU_EXPLORER_URL: http://localhost/explorer
+      FUKU_AGENT_KEY_SECRET: ci-only-agent-key-secret-0123456789abcdef
+      FUKU_SESSION_SECRET: ci-only-session-secret-0123456789abcdef0123
+      FUKU_DEMO_ENABLED: "true"
+      NEXT_PUBLIC_APP_URL: http://localhost:3002
+      FUKU_BASE_URL: http://localhost:3002
+      DATABASE_URL: file:/tmp/fuku-ci.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            contracts/package-lock.json
+      - run: npm ci
+      - working-directory: contracts
+        run: npm ci
+      - name: Hardhat's public test accounts (#0 relayer, #1 compliance signer, #2 Ava), local node only
+        run: |
+          node --input-type=module -e '
+            import { mnemonicToAccount } from "viem/accounts";
+            import { toHex } from "viem";
+            import { appendFileSync } from "node:fs";
+            import { EOL } from "node:os";
+            // The default Hardhat mnemonic: these accounts are public and only ever funded on a local node.
+            const key = (i) => toHex(mnemonicToAccount("test test test test test test test test test test test junk", { addressIndex: i }).getHdKey().privateKey);
+            const lines = [`DEPLOYER_PRIVATE_KEY=${key(0)}`, `FUKU_COMPLIANCE_SIGNER_KEY=${key(1)}`, `DEMO_OWNER_PRIVATE_KEY=${key(2)}`];
+            appendFileSync(process.env.GITHUB_ENV, lines.join(EOL) + EOL);
+          '
+      - name: Local node and a full deploy
+        working-directory: contracts
+        run: |
+          npx hardhat node > /tmp/hardhat.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' http://127.0.0.1:8545 && break; sleep 1; done
+          COMPLIANCE_SIGNER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 npx hardhat run scripts/deploy.ts --network localhost
+          node -e '
+            const d = require("./deployments/localhost.json").contracts;
+            const env = {
+              FUKU_IDENTITY_REGISTRY: d.HumanIdentityRegistry, FUKU_AGENT_REGISTRY: d.AgentRegistry,
+              FUKU_PERMISSION_REGISTRY: d.PermissionRegistry, FUKU_REPUTATION_REGISTRY: d.ReputationRegistry,
+              CLEANVERSE_SIM_APASS: d.CleanverseAPassSim, CLEANVERSE_SIM_ATOKEN: d.CleanverseATokenSim, FUKU_SPEND_GUARD: d.FukuSpendGuard,
+            };
+            require("fs").appendFileSync(process.env.GITHUB_ENV, Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n");
+          '
+      - name: Database, demo seed and Cleanverse simulator setup
+        working-directory: web
+        run: |
+          npx prisma generate
+          npx prisma db push --skip-generate
+          npx tsx prisma/seed.ts
+          npx tsx scripts/setup-cleanverse-demo.ts
+      - name: Production build of the app on port 3002
+        working-directory: web
+        run: |
+          npx next build
+          npx next start -p 3002 > /tmp/web.log 2>&1 &
+          for i in $(seq 1 90); do curl -sf http://localhost:3002/api/integrations > /dev/null && break; sleep 1; done
+      - name: MCP agent (npm run mcp:setup)
+        run: npm run mcp:setup -- --mcp-env mcp/.env.ci
+      - name: MCP integration test
+        run: |
+          npm run mcp:build
+          FUKU_MCP_INTEGRATION=1 FUKU_MCP_ENV_FILE="$PWD/mcp/.env.ci" npm run test:integration -w mcp
+      - name: Logs
+        if: failure()
+        run: tail -n 100 /tmp/web.log /tmp/hardhat.log || true

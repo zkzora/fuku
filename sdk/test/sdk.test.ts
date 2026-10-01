@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Fuku, FukuError } from "../src/index";
+import { Fuku, FukuError, agentRequestMessage } from "../src/index";
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
@@ -83,5 +83,41 @@ describe("@fuku/sdk 0.3.0 surfaces", () => {
     const a = Fuku.newIdempotencyKey();
     assert.ok(a.length >= 16);
     assert.notEqual(a, Fuku.newIdempotencyKey());
+  });
+});
+
+describe("@fuku/sdk 0.4.0: agent-signed execution", () => {
+  it("signs the exact body, idempotency key and issue time with the agent's key", async () => {
+    const seen: { url: string; headers: Record<string, string>; body: string }[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string>, body: String(init?.body) });
+      return new Response(JSON.stringify({ id: "a1", decision: "ALLOWED", agentSignature: { signer: "0xabc" } }), { status: 200 });
+    }) as typeof fetch;
+    const signed: string[] = [];
+    const signer = { signMessage: async ({ message }: { message: string }) => (signed.push(message), "0xsig") };
+    const fuku = new Fuku({ apiKey: "fk_test", baseUrl: "http://fuku.test", fetch: fetchImpl });
+    const action = { action: "transfer", amountUsdc: 30, to: "0x7ad7", asset: "aUSDC" };
+    const r = await fuku.executeAction("fuku:agent:0x1", action, { idempotencyKey: "key-12345678", signer });
+    assert.equal(r.agentSignature?.signer, "0xabc");
+    const sent = seen[0];
+    assert.equal(sent.body, JSON.stringify(action));
+    assert.equal(sent.headers["idempotency-key"], "key-12345678");
+    assert.equal(sent.headers["x-fuku-agent-signature"], "0xsig");
+    const issuedAt = Number(sent.headers["x-fuku-agent-issued-at"]);
+    assert.ok(Math.abs(issuedAt - Date.now() / 1000) < 5);
+    assert.equal(
+      signed[0],
+      agentRequestMessage({ agentId: "fuku:agent:0x1", method: "POST", path: "/api/v1/agents/fuku:agent:0x1/execute", idempotencyKey: "key-12345678", issuedAt, body: sent.body }),
+    );
+  });
+
+  it("always sends an idempotency key with a signed call, and reads verifyScore", async () => {
+    const calls: Call[] = [];
+    const fuku = new Fuku({ apiKey: "fk_test", fetch: fakeFetch(200, { verified: true, chainScore: 96 }, calls) });
+    await fuku.executeAction("a", { action: "withdraw", amountUsdc: 4800 }, { signer: { signMessage: async () => "0xsig" } });
+    assert.ok((calls[0].headers["idempotency-key"] ?? "").length >= 8);
+    const v = await fuku.verifyScore("fuku:agent:0x2");
+    assert.equal(v.verified, true);
+    assert.equal(calls[1].url, "http://localhost:3001/api/v1/agents/fuku%3Aagent%3A0x2/verify-score");
   });
 });

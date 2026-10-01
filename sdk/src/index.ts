@@ -6,11 +6,10 @@
  * Actions:
  *   checkPermission() (preview: nothing recorded, reserved or signed) · executeAction() (full workflow)
  *   getAction() (lifecycle and evidence) · getMandate() (the owner's on-chain mandate)
+ *   verifyScore() (recompute the trust score from the chain, commit-reveal)
  *
- * 0.3.0: execution lifecycle and evidence. `executeAction` takes an idempotency key and returns a
- * lifecycle `status`; receipts say whether they are live, pending, failed or simulated (never a
- * mock in live mode); `verifyAgent` reports a check per claim; errors carry a machine `code`.
- * See README.md for the breaking changes from 0.2.0.
+ * 0.4.0: agent-signed execution. An agent that holds its own key signs each executeAction with it
+ * (`{ signer }`); Fuku refuses unsigned API executions for such agents. See README.md.
  *
  * Works in Node 18+, browsers and edge runtimes (uses global fetch).
  */
@@ -47,6 +46,29 @@ export interface Identity {
   /** How control of walletAddress was proven: "dynamic", "signature", or null (declared only). */
   walletVerifiedBy?: string | null;
   proofTxHash?: string | null;
+}
+
+/**
+ * Signs agent requests with the agent's own key. A viem LocalAccount (privateKeyToAccount) works as
+ * is; the SDK itself has no crypto dependency.
+ */
+export interface AgentSigner {
+  signMessage(args: { message: string }): Promise<string>;
+}
+
+/**
+ * The message an agent key signs for a request (EIP-191 personal_sign). It carries the exact body, so
+ * the signature covers the action, amount, recipient and asset, plus the idempotency key and time.
+ */
+export function agentRequestMessage(r: { agentId: string; method: string; path: string; idempotencyKey: string; issuedAt: number; body: string }): string {
+  return [
+    "Fuku agent request",
+    `Agent: ${r.agentId}`,
+    `Request: ${r.method} ${r.path}`,
+    `Idempotency-Key: ${r.idempotencyKey}`,
+    `Issued-At: ${r.issuedAt}`,
+    `Body: ${r.body}`,
+  ].join("\n");
 }
 
 export interface Agent {
@@ -108,6 +130,10 @@ export interface Verification {
     status: string;
     capabilities: string[];
     registeredTx: string | null;
+    /** The agent's own key (its ERC-8004 agentWallet): held by Fuku, or by the developer ("external"). */
+    agentKey?: { address: string; source: "fuku" | "external" } | null;
+    /** Its ERC-8004 registration on the canonical Identity Registry, when there is one. */
+    erc8004?: { agentId: string; registry: string | null; chainId: number | null } | null;
   };
   owner?: {
     id: string;
@@ -115,6 +141,8 @@ export interface Verification {
     displayName: string;
     humanVerified: boolean;
     authMethod: string;
+    /** Who controls the identity on-chain: "relayer" (custodial) or "owner" (the bound wallet); null until decided. */
+    custody?: "relayer" | "owner" | null;
     /** Last persisted A-Pass read for the owner's verified wallet. `source: "simulated"` means Fuku's simulator answered. */
     cleanverse?: CleanverseOwner;
   };
@@ -246,6 +274,8 @@ export interface ActionResult {
   idempotencyKey?: string | null;
   /** True when this is the stored result of an earlier request with the same idempotency key. */
   replayed?: boolean;
+  /** Set when the request was signed with the agent's own key (executeAction with `signer`). */
+  agentSignature?: { signer: string } | null;
   scoreBefore: number;
   scoreAfter: number;
   trustDelta: number;
@@ -302,6 +332,38 @@ export interface Mandate {
   version: number;
   spentTodayUsdc: number;
   active: boolean;
+}
+
+export interface MandatePayee {
+  address: string;
+  /** The demo recipient's name when Fuku knows the address. */
+  label: string | null;
+}
+
+/** Recompute-from-chain (commit-reveal) result, as returned by verifyScore(). */
+export interface ScoreVerification {
+  agentId: string;
+  scoringVersion: string;
+  chainId: number;
+  events: { source: "rpc" | "envio-hypersync"; fromBlock: number; toBlock: number; complete: boolean; decisions: number; executions: number };
+  records: {
+    revealed: number;
+    verified: number;
+    mismatched: { actionId: string; reason: string }[];
+    unanchored: string[];
+    unrevealed: { actionHash: string; allowed: boolean; ruleId: string; txHash: string }[];
+    successes: { transfers: number; legacy: number };
+    violations: number;
+    firstEvidenceAt: number | null;
+  };
+  inputs: { key: string; label: string; chain: number | boolean | null; ledger: number | boolean; committed: boolean }[];
+  chainScore: number;
+  anchored: { score: number; updatedAt: string } | null;
+  ledgerScore: number;
+  /** ✓: every record checks out, nothing on-chain is unrevealed, and chain, anchored and ledger scores agree. */
+  verified: boolean;
+  notCommitted: string[];
+  notes: string[];
 }
 
 export interface OwnerAction {
@@ -420,15 +482,20 @@ export class Fuku {
     return c?.randomUUID ? c.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, allowStatus: number[] = [], headers: Record<string, string> = {}): Promise<T> {
+  private request<T>(method: string, path: string, body?: unknown, allowStatus: number[] = [], headers: Record<string, string> = {}): Promise<T> {
+    return this.send<T>(method, path, body !== undefined ? JSON.stringify(body) : undefined, allowStatus, headers);
+  }
+
+  /** `bodyText` is sent byte for byte (an agent signature covers it). */
+  private async send<T>(method: string, path: string, bodyText: string | undefined, allowStatus: number[], headers: Record<string, string>): Promise<T> {
     const res = await this.fetchImpl(`${this.baseUrl}/api/v1${path}`, {
       method,
       headers: {
         authorization: `Bearer ${this.apiKey}`,
-        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        ...(bodyText !== undefined ? { "content-type": "application/json" } : {}),
         ...headers,
       },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: bodyText,
     });
     const text = await res.text();
     let json: { error?: string; code?: string } | null = null;
@@ -551,10 +618,27 @@ export class Fuku {
    * Full workflow: authorize → evaluate → execute or block → anchor → score → explain. Blocked
    * actions resolve (HTTP 403) rather than throw; a pending transfer resolves with status PENDING
    * (HTTP 202). Pass the same `idempotencyKey` when retrying: the stored result is replayed.
+   *
+   * `signer`: the agent's own key. Required by Fuku for an agent that holds its own key (set with
+   * setErc8004AgentKey); the request is signed over its exact body, idempotency key and issue time.
+   * A signed call always carries an idempotency key (a fresh one when you pass none).
    */
-  executeAction(agentId: string, action: ActionRequest, opts: { idempotencyKey?: string } = {}) {
-    const headers: Record<string, string> = opts.idempotencyKey ? { "idempotency-key": opts.idempotencyKey } : {};
-    return this.request<ActionResult>("POST", `/agents/${encodeURIComponent(agentId)}/execute`, action, [403], headers);
+  async executeAction(agentId: string, action: ActionRequest, opts: { idempotencyKey?: string; signer?: AgentSigner } = {}) {
+    const path = `/agents/${encodeURIComponent(agentId)}/execute`;
+    if (!opts.signer) {
+      const headers: Record<string, string> = opts.idempotencyKey ? { "idempotency-key": opts.idempotencyKey } : {};
+      return this.request<ActionResult>("POST", path, action, [403], headers);
+    }
+    const idempotencyKey = opts.idempotencyKey ?? Fuku.newIdempotencyKey();
+    const body = JSON.stringify(action);
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const message = agentRequestMessage({ agentId, method: "POST", path: `/api/v1/agents/${agentId}/execute`, idempotencyKey, issuedAt, body });
+    const signature = await opts.signer.signMessage({ message });
+    return this.send<ActionResult>("POST", path, body, [403], {
+      "idempotency-key": idempotencyKey,
+      "x-fuku-agent-signature": signature,
+      "x-fuku-agent-issued-at": String(issuedAt),
+    });
   }
 
   /** One action's lifecycle status and evidence; pending transfers are reconciled first. */
@@ -581,7 +665,20 @@ export class Fuku {
       token: string | null;
       chainId: number;
       agentKey: string;
+      /** Payees the owner's wallet approved (confirmed with isPayee); null without a mandate. */
+      payees?: MandatePayee[] | null;
+      /** events: from the guard's PayeeSet events; known-addresses: only addresses Fuku knows were checked. */
+      payeesSource?: "events" | "known-addresses" | null;
     }>("GET", `/agents/${encodeURIComponent(agentId)}/mandate`);
+  }
+
+  /**
+   * "Recompute from chain": each decision record Fuku reveals is checked against the proof anchored
+   * for it, and fuku-score/2 is recomputed from what checks out. `verified` is the ✓. Needs the live
+   * chain (409 `mock_chain` otherwise).
+   */
+  verifyScore(agentId: string) {
+    return this.request<ScoreVerification>("GET", `/agents/${encodeURIComponent(agentId)}/verify-score`);
   }
 }
 

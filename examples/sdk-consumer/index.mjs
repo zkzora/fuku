@@ -9,7 +9,7 @@
  *   3. ERC-8004: the owner's wallet registers the agent, the agent key proves   setErc8004AgentKey, getErc8004,
  *      itself, and the chain says who holds what                                prepareErc8004AgentWallet, confirmErc8004
  *   4. preview an A-Token payment                                                checkPermission
- *   5. submit it (with an idempotency key), retry once                           executeAction
+ *   5. submit it signed by the agent key (with an idempotency key), retry once   executeAction({ signer })
  *   6. read the receipt and verify it on-chain                                   getAction + viem
  *   7. revoke access, and prove the next attempt fails                          revokePermission, executeAction
  *
@@ -120,11 +120,12 @@ step(4, "Preview a 25 aUSDC payment to the supplier (nothing recorded, reserved 
 const preview = await fuku.checkPermission(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" });
 expect(preview.preview === true && preview.allowed, `preview ${preview.decision} ${preview.ruleId}`, preview.reason);
 
-step(5, "Submit it with an idempotency key, then retry with the same key");
+step(5, "Submit it signed with the agent key and an idempotency key, then retry with the same key");
 const key = Fuku.newIdempotencyKey();
-const first = await fuku.executeAction(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" }, { idempotencyKey: key });
-expect(first.status === "CONFIRMED", `executed: ${first.status}`, `tx ${first.transfer?.txHash}`);
-const retry = await fuku.executeAction(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" }, { idempotencyKey: key });
+// The agent holds its own key, so Fuku accepts its executions only signed with it.
+const first = await fuku.executeAction(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" }, { idempotencyKey: key, signer: agentKey });
+expect(first.status === "CONFIRMED" && first.agentSignature?.signer === agentKey.address, `executed: ${first.status}, signed by the agent key`, `tx ${first.transfer?.txHash}`);
+const retry = await fuku.executeAction(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" }, { idempotencyKey: key, signer: agentKey });
 expect(retry.replayed === true && retry.id === first.id, "the retry replays the same result instead of paying again");
 
 step(6, "Read the receipt, then verify it on-chain without trusting Fuku");
@@ -140,7 +141,7 @@ expect(executed?.args.complianceRef === first.compliance?.complianceRef, "and ca
 step(7, "Revoke access; the next attempt fails");
 const revoked = await fuku.revokePermission(agentId);
 expect(revoked.chainSync.ok, "passport revoked in Fuku and on-chain", revoked.chainSync.receipts.map((r) => `${r.op} ${r.status}`).join(", "));
-const after = await fuku.executeAction(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" }, { idempotencyKey: Fuku.newIdempotencyKey() });
+const after = await fuku.executeAction(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" }, { signer: agentKey });
 expect(after.decision === "BLOCKED" && after.status === "DENIED", `executeAction: ${after.decision} ${after.ruleId}`, after.reason);
 const previewAfter = await fuku.checkPermission(agentId, { action: "transfer", amountUsdc: 25, to: supplier, asset: "aUSDC" });
 expect(!previewAfter.allowed, `checkPermission: ${previewAfter.decision} ${previewAfter.ruleId}`);

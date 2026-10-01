@@ -245,6 +245,8 @@ Local runs on 2026-09-30:
 | Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `67/67 checks passed` on a fresh node, and again on the same node; 66/66 on Monad testnet (2026-09-30), where the reorg check cannot run |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
 | `cd web && npm run reconcile -- --anchor-seeded`, then `npm run verify-score`, on the local node after a demo reset | 40 transactions, then 5/5 demo agents verified (Trading Assistant 96 = 96 = 96, 15/15 records). After the withdraw climax: 92 = 92 = 92, 16/16. After the full smoke (which resets the demo), Trading Assistant still verifies |
+| `npm test -w mcp` | 14 passing: the tools over the MCP in-memory transport with a fake SDK client, the built server over real stdio (only JSON-RPC on stdout), configuration errors |
+| `FUKU_MCP_INTEGRATION=1 … npm run test:integration -w mcp` after `npm run mcp:setup`, on a local node and a production build of the app | 6/6. The checks: whoami; three dry runs (allowed, R8, R2); a 30 aUSDC transfer seen on-chain; withdraw BLOCKED R2 with `isError: false`; a 60 transfer blocked by the guard's per-transfer limit (R10), or by R5 once the day's budget is low; an idempotent replay |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 16 steps `ok`, exit 0 (the 3 ERC-8004 steps are skipped on a local node); 19/19 on Monad testnet (2026-09-30) |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 
@@ -297,3 +299,30 @@ The costs below are what the run on Monad testnet on 2026-09-30 paid: gas limit 
     - **Recompute from chain** shows ✓ for it (`npm run verify-score -- --demo` checks all five).
 
 Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON it sent to Ava and the smoke owner. `examples/sdk-consumer` against testnet is optional: 12 transactions, 0.19 MON (0.12 from the relayer, 0.07 from the owner's wallet).
+
+## 11. AI assistants over MCP: the agent's own key
+
+`mcp/` lets an AI assistant (Claude Desktop, Claude Code) act as a Fuku agent from the user's machine.
+
+**What the path is.**
+- `npm run mcp:setup` generates the agent's key on that machine, writes it only to `mcp/.env` (gitignored, checked first), and registers its address with Fuku as the agent's key. On Monad testnet the address is also the agent's ERC-8004 `agentWallet`.
+- Fuku stores the address and never sees the key. This is the non-custodial agent-key path. The seeded demo agents still have keys that Fuku holds, labelled as such.
+
+**What Fuku enforces.**
+- For an agent that holds its own key, every execution over the v1 API must be signed with that key: EIP-191 over the exact body, the idempotency key and the issue time, accepted for 5 minutes (`web/src/lib/agent-signature.ts`).
+- An unsigned request is refused with `401 agent_signature_required`, and a request signed with another key with `agent_signature_invalid`. The check runs after authorization and before an idempotent replay.
+- The result records the signer (`agentSignature`), and the workflow shows "Agent key verified".
+
+**What it protects.**
+- A leaked owner API key alone cannot execute as this agent over the API.
+- Fuku cannot act as the agent over the API either, because it never held the key.
+- Every action the assistant takes is bound to the key on the user's machine.
+- What the assistant can do is bounded by its passport (enforced by Fuku) and its owner's mandate (enforced on-chain by FukuSpendGuard): for the MCP Assistant, 100 aUSDC a day, at most 50 per transfer, to Nusantara Supplies only. A prompt-injected model, or a stolen agent key, can move no more than that, and only to that payee.
+- Rules are evaluated by Fuku's engine on every request, never by the model. The tool descriptions ask the model to check first and not to work around a block, but that is guidance. The engine's decision is what counts, and it is anchored on Monad.
+
+**What it does not protect.**
+- The agent key and the owner's API key sit on the same machine, in `mcp/.env` or the MCP client's configuration. Whoever controls that machine controls both. Fuku's API keys carry their identity's full rights; there are no per-key scopes.
+- The owner's own session in the Fuku app is not an API call. The owner can act for the agent there without the agent key.
+- The signature is checked by Fuku's API, not on-chain. FukuSpendGuard checks the compliance signer's attestation and the owner's mandate. Fuku's server still decides and anchors, with the trust assumptions in sections 6 and 7.
+- A signed request that someone captures can be replayed within its 5 minutes. A replay returns the stored result of the same idempotency key and never executes twice.
+- To cut an assistant off, revoke the agent's passport (the kill switch, section 6). Or give the agent a new key with `setErc8004AgentKey`; the old key is then refused.

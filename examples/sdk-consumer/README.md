@@ -13,7 +13,8 @@ the process. The seeded demo agents keep keys that Fuku holds for them (the app 
    - The program reads `ownerOf` and `getAgentWallet` itself.
 3. **Payment.**
    - It previews a 25 aUSDC payment.
-   - It submits the payment with an idempotency key, then retries with the same key. The retry replays and pays nothing.
+   - It submits the payment signed with its local agent key, with an idempotency key, then retries with the same key. The retry replays and pays nothing.
+   - Fuku accepts executions for this agent only when signed with that key, because the agent holds its own key.
    - It verifies the `GuardedTransferExecuted` event on-chain: action hash, recipient, amount and complianceRef.
 4. **Revocation.** It revokes access and shows that the next attempt fails.
 

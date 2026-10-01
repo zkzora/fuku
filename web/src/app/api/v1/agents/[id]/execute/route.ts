@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { json, withApiKey } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
+import { RequestError } from "@/lib/errors";
+import { AGENT_ISSUED_AT_HEADER, AGENT_SIGNATURE_HEADER } from "@/lib/agent-signature";
 import { executeAction, httpStatusOf } from "@/lib/services/actions";
 
 type P = { id: string };
@@ -20,12 +22,29 @@ const body = z.object({
  * agents:execute), evaluate the passport, execute or block, anchor the proof on Monad, update
  * reputation and explain the outcome. Send an Idempotency-Key header to make retries safe: the same
  * key replays the stored result instead of executing again.
- * 200 allowed (AUTHORIZED / CONFIRMED / SIMULATED), 202 broadcast but pending, 403 blocked.
+ *
+ * An agent that holds its own key (the developer's, set with setErc8004AgentKey) is executed over the
+ * API only with that key's signature (X-Fuku-Agent-Signature over the exact body, lib/agent-signature.ts).
+ * 200 allowed (AUTHORIZED / CONFIRMED / SIMULATED), 202 broadcast but pending, 403 blocked,
+ * 401 agent signature missing or wrong.
  */
 export const POST = withApiKey<P>(async (req, identity, { id }) => {
   rateLimit("execute", identity.id);
-  const input = body.parse(await req.json());
+  const raw = await req.text();
+  let parsed: unknown;
+  try {
+    parsed = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new RequestError("The request body is not JSON.", 400, "invalid_request");
+  }
+  const input = body.parse(parsed);
   const idempotencyKey = req.headers.get("idempotency-key") ?? input.idempotencyKey ?? null;
-  const result = await executeAction({ ...input, callerId: identity.id, agentId: id, idempotencyKey });
+  const result = await executeAction({
+    ...input,
+    callerId: identity.id,
+    agentId: id,
+    idempotencyKey,
+    agentRequest: { body: raw, signature: req.headers.get(AGENT_SIGNATURE_HEADER), issuedAt: req.headers.get(AGENT_ISSUED_AT_HEADER) },
+  });
   return json(result, { status: httpStatusOf(result) });
 });
