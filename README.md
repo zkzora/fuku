@@ -8,8 +8,10 @@ web/        Next.js 16 app: landing, dashboard, identity, agents, permissions, r
 contracts/  Solidity for Monad (Hardhat 3): HumanIdentityRegistry, AgentRegistry,
             PermissionRegistry, ReputationRegistry, FukuSpendGuard (owner-bounded mandates),
             and the Cleanverse simulators CleanverseAPassSim / CleanverseATokenSim — 72 passing tests
-sdk/        @fuku/sdk 0.3.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
-            getTrustScore, checkPermission, executeAction, getAction, getMandate
+sdk/        @fuku/sdk 0.4.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
+            getTrustScore, checkPermission, executeAction (signed with the agent's own key),
+            getAction, getMandate, verifyScore
+mcp/        @fuku/mcp — MCP server: Claude Desktop or Claude Code acts as a Fuku agent (stdio)
 examples/   sdk-consumer: an external program using only the SDK, verifying results on-chain
 docs/       PITCH.md (talk track, status, judge Q&A), CLEANVERSE.md (CVI/CVA integration),
             SECURITY.md (authorization, lifecycle, trust assumptions, runbooks)
@@ -21,7 +23,7 @@ Fuku UI mockups/  Design source (Claude Design exports) and the product specs
 ## Run it
 
 ```bash
-npm install                 # installs web + sdk (npm workspaces)
+npm install                 # installs web, sdk and mcp (npm workspaces)
 cd web
 npx prisma db push          # creates web/prisma/dev.db (SQLite)
 npm run db:seed             # seeds Ava Chen, 5 agents, activity, vault items, demo API key
@@ -139,6 +141,21 @@ npm run wire:env         # timestamped backup of web/.env, then upserts the live
 8. **Reputation**: the score drops (96 → 92) with a breakdown and an explanation. **Activity** shows the proof.
 
 The Developer Console has API keys, the SDK reference, a sandbox that runs the same flow through the public API, and the sponsor integration board (live vs simulated per env var).
+
+## Use Fuku from an AI assistant (MCP)
+
+`mcp/` is an MCP server, and it makes a real AI assistant a Fuku agent. In Claude Desktop or Claude Code, the assistant holds its own agent key and sends every action through Fuku. Its owner's passport then decides:
+- Fuku allows the action, or blocks it with a rule id;
+- or Fuku pays through FukuSpendGuard on Monad, inside the owner's on-chain mandate.
+
+A blocked action comes back to the assistant as a normal result: the rule, the reason and the anchored proof, which it reports to the user. Fuku executes this agent over the API only when the request is signed with its own key, which never leaves your machine.
+
+```bash
+npm run mcp:build    # sdk/dist + mcp/dist
+npm run mcp:setup    # "MCP Assistant" under Ava: key in mcp/.env, passport, mandate; prints the client config
+```
+
+Setup, the Claude Desktop and Claude Code configuration, and troubleshooting are in [`mcp/README.md`](mcp/README.md).
 
 ## How trust is computed
 

@@ -306,7 +306,8 @@ async function main() {
       : `This configuration is in ${path.relative(repoRoot, envFile)}: point the server at it with FUKU_MCP_ENV_FILE=${envFile}, or copy the values.`,
   );
   out("\nClaude Code:");
-  out(`  claude mcp add fuku --env FUKU_BASE_URL=${baseUrl} --env FUKU_AGENT_ID=${agentId} -- node "${entry}"`);
+  // Options go before the server name; `--` separates the command (Claude Code docs, mcp).
+  out(`  claude mcp add --env FUKU_BASE_URL=${baseUrl} --env FUKU_AGENT_ID=${agentId} fuku -- node "${entry}"`);
   out("Build the server first: npm run mcp:build (from the repository root).");
   await db.$disconnect();
 }

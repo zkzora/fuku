@@ -160,6 +160,13 @@ export default function DevelopersPage() {
           <Mono>Idempotency-Key</Mono> on execute to make retries safe. The SDK source lives in <Mono>/sdk</Mono>; a consumer example in{" "}
           <Mono>/examples/sdk-consumer</Mono>.
         </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-[12.5px] text-ink-3">
+          <Pill className="normal-case tracking-normal">MCP server: available (local)</Pill>
+          <span>
+            An AI assistant (Claude Desktop or Claude Code) can act as a Fuku agent through <Mono>/mcp</Mono>. It runs on your machine and holds
+            the agent&apos;s own key, and every action goes through Fuku. See <Mono>mcp/README.md</Mono>.
+          </span>
+        </div>
       </Card>
 
       <Card>
