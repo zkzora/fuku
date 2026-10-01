@@ -42,7 +42,7 @@ A BLOCKED decision is a normal result (`isError: false`). `isError: true` is res
 
    Running it again only fills in what is missing. `-- --fresh` registers a brand-new agent and keeps the old `mcp/.env` as a backup.
 
-   The script refuses any RPC except a local node unless you pass `-- --allow-testnet`. On Monad testnet the setup sends six transactions, about 0.11 MON:
+   The script refuses any RPC except a local node unless you pass `-- --allow-testnet`. On Monad testnet the setup sends six transactions, 0.121 MON on 2026-10-01:
    - from the relayer, `registerAgent` and `setPolicy`;
    - from Ava's wallet, `openMandate`, `setPayee`, and the ERC-8004 `register` and `setAgentWallet`.
 4. Point your MCP client at `mcp/dist/index.js` (see below). The script prints the configuration, with the private key only as a placeholder.

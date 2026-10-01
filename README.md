@@ -73,8 +73,11 @@ Accounts:
 | Payments Agent | `fuku:agent:0x0e0acd52d5c78ee77274a6604717693214c34838` | 1957 | `0x526b436E4c069E3515b0517C26938ece0B93A96D` |
 | Ops Scheduler | `fuku:agent:0x45edacaef93036f9e9a0831b08db4212eacc8e88` | 1958 | `0x8B97339F86bCc34ecB5ECCC6d143c8A10EE5B594` |
 | Portfolio Rebalancer | `fuku:agent:0xc08cd9a25f55692b8476cd0893d669b542f3e969` | 1959 | `0xAfAA1fe0Ad9e85f0939641fAeC82761e78409B07` |
+| MCP Assistant | `fuku:agent:0x367168b5752479508c6851576c6fb2ece23bda90` | 1963 | `0x2d9E18519fF81959CB9b5Ed8AaB73cECC9E2beB8` |
 
-These five are demo cohort `v2`. After a live climax, `npm run demo:cohort` registers a fresh cohort under new ids; this table stays the record of `v2`.
+The first five are demo cohort `v2`. After a live climax, `npm run demo:cohort` registers a fresh cohort under new ids; this table stays the record of `v2`.
+
+The MCP Assistant (registered 2026-10-01) is the agent an AI assistant acts as through the Fuku MCP server. Its key is not held by Fuku: it was generated on the operator's machine and stays in `mcp/.env`. A demo reset keeps it. Its transactions are in [`docs/CLEANVERSE.md`](docs/CLEANVERSE.md#the-mcp-assistant-and-the-signed-execution-checks-on-monad-testnet-2026-10-01).
 
 ## Go live on Monad testnet
 
