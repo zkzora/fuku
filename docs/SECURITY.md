@@ -245,7 +245,7 @@ Local runs on 2026-09-30:
 | Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `67/67 checks passed` on a fresh node, and again on the same node; 66/66 on Monad testnet (2026-09-30), where the reorg check cannot run |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
 | `cd web && npm run reconcile -- --anchor-seeded`, then `npm run verify-score`, on the local node after a demo reset | 40 transactions, then 5/5 demo agents verified (Trading Assistant 96 = 96 = 96, 15/15 records). After the withdraw climax: 92 = 92 = 92, 16/16. After the full smoke (which resets the demo), Trading Assistant still verifies |
-| `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 17 steps `ok`, exit 0 |
+| `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 16 steps `ok`, exit 0 (the 3 ERC-8004 steps are skipped on a local node); 19/19 on Monad testnet (2026-09-30) |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 
 ## 9. Production configuration
@@ -262,16 +262,13 @@ The production environment needs:
 
 ## 10. Testnet runbook (executed on 2026-09-30)
 
-Costs below are gas limit × 102 gwei (Monad charges the limit). They were measured on a local fork of Monad testnet that ran this exact sequence on 2026-09-30.
-
-The sequence then ran on Monad testnet the same day:
-- 116 transactions, none reverted, 1.83 MON of gas.
-- The anchoring cost 0.40 MON and the smoke 0.51 MON, both more than the fork predicted.
-- Every hash is in `docs/CLEANVERSE.md`, "On Monad testnet".
+The costs below are what the run on Monad testnet on 2026-09-30 paid: gas limit × price (about 102 gwei), which is what Monad charges.
+- 116 transactions, none reverted, 1.83 MON of gas. Every hash is in `docs/CLEANVERSE.md`, "On Monad testnet".
+- A local fork rehearsal of the same sequence predicted less for the anchoring (0.32 MON) and the smoke (about 0.33 MON).
 - A newly funded wallet's first transaction can be refused for a few minutes ("Signer had insufficient balance"), so fund wallets ahead of their first transaction.
 
 1. `contracts/.env`: set `COMPLIANCE_SIGNER_ADDRESS` to a fresh key's address and `FUKU_COMPLIANCE_SIGNER_KEY` to that key.
-2. `cd contracts && npm run deploy:cleanverse:monad`. It sends two simulators, the guard and one enforcer grant, about 0.39 MON. The four registries are untouched.
+2. `cd contracts && npm run deploy:cleanverse:monad`. It sends two simulators, the guard and one enforcer grant: 4 transactions, 0.40 MON. The four registries are untouched.
 3. `npm run wire:env`. It writes `FUKU_SPEND_GUARD`, `CLEANVERSE_SIM_*` and the signer key into `web/.env`.
    - It first copies the file to a new timestamped backup.
    - It refuses to replace a different key already there unless given `--replace-keys`.
@@ -281,16 +278,16 @@ The sequence then ran on Monad testnet the same day:
    - set `FUKU_PUBLIC_URL` only if the app is served publicly over https;
    - then run `cd web && SETUP_OWNER_MIN_MON=0.35 SETUP_OWNER_TOPUP_MON=0.4 npm run cleanverse:setup`.
 
-   The setup costs about 0.06 MON and tops Ava's wallet up with 0.4 MON. She pays her own ERC-8004 registrations and the smoke's approvals, about 0.25 MON.
+   The setup cost 0.07 MON (0.04 from the relayer, 0.03 from Ava's wallet) and topped her wallet up with 0.4 MON. Her ERC-8004 registrations and her part of the smoke then cost her 0.28 MON.
 5. Restart the app. Reset the demo so Ava's wallet binding uses the new key.
 6. `npm run reconcile -- --anchor-seeded`.
-   - It anchors the seeded history: 5 agents, 3 passports, 25 decisions and 5 scores, about 38 transactions and 0.32 MON (Ava's identity is already on testnet). It prints every transaction.
+   - It anchors the seeded history: 5 agents, 3 passports, 25 decisions and 5 scores: 38 transactions, 0.40 MON (Ava's identity is already on testnet). It prints every transaction.
    - Do not run live actions on the demo agents before the pitch: a reset cannot rewind the chain.
-   - To present again after live actions, `npm run demo:cohort -- --allow-testnet` seeds and anchors a fresh cohort. It also opens its mandate, registers it on ERC-8004 and verifies it. Measured on the fork after a recorded climax: 52 transactions, about 0.59 MON (0.33 from the relayer, 0.26 from Ava's wallet).
+   - To present again after live actions, `npm run demo:cohort -- --allow-testnet` seeds and anchors a fresh cohort. It also opens its mandate, registers it on ERC-8004 and verifies it. After a recorded climax it sends 52 transactions. That cost 0.59 MON on the fork. Priced from the testnet run's own transactions, expect about 0.69 MON: 0.41 from the relayer and 0.28 from Ava's wallet.
 7. `npm run erc8004:register -- --allow-testnet`. It registers the 5 demo agents from Ava's wallet on the canonical Identity Registry, with Fuku-held agent keys as `agentWallet`, and prints each transaction and agent id.
-   - Cost: about 0.24 MON with `data:` URIs, or about 0.13 MON with `FUKU_PUBLIC_URL`, whose registration endpoint is checked to resolve first.
+   - Cost: 0.25 MON with `data:` URIs (10 transactions). With `FUKU_PUBLIC_URL`, whose registration endpoint is checked to resolve first, the fork estimate is about 0.13 MON; that has not been measured on testnet.
 8. Run the smoke against testnet: `FUKU_BASE_URL=… MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json DATABASE_URL=… DEMO_OWNER_PRIVATE_KEY=… SMOKE_OWNER_PRIVATE_KEY=… node scripts/live-smoke.mjs`.
-   - About 0.25 MON from the relayer.
+   - 42 transactions: 0.41 MON from the relayer, 0.03 from Ava's wallet and 0.07 from the smoke owner's.
    - The owner-custody section needs `SMOKE_OWNER_PRIVATE_KEY`: a separate key with about 0.1 MON, since the owner's wallet pays for its registry writes.
    - The Cleanverse checks run on a fresh A-Token agent whose mandate Ava's wallet opens, so the demo agents stay verifiable. The reorg check is skipped off Hardhat.
 9. `cd contracts && npm run verify:monad`. It publishes every contract's source through Sourcify for MonadVision. No transaction.
@@ -299,4 +296,4 @@ The sequence then ran on Monad testnet the same day:
     - Trading Assistant shows 96;
     - **Recompute from chain** shows ✓ for it (`npm run verify-score -- --demo` checks all five).
 
-The relayer spends about 1.2 MON over this sequence, including the funding it sends to Ava and the smoke owner. `examples/sdk-consumer` against testnet is optional, about 0.16 MON.
+Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON it sent to Ava and the smoke owner. `examples/sdk-consumer` against testnet is optional: 12 transactions, 0.19 MON (0.12 from the relayer, 0.07 from the owner's wallet).

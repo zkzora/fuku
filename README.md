@@ -24,7 +24,7 @@ Fuku UI mockups/  Design source (Claude Design exports) and the product specs
 npm install                 # installs web + sdk (npm workspaces)
 cd web
 npx prisma db push          # creates web/prisma/dev.db (SQLite)
-npm run db:seed             # seeds Ava Chen, 4 agents, activity, vault items, demo API key
+npm run db:seed             # seeds Ava Chen, 5 agents, activity, vault items, demo API key
 npm run dev -- -p 3001      # http://localhost:3001
 ```
 
@@ -36,7 +36,7 @@ Contracts (standalone, own `node_modules`):
 cd contracts && npm install && npm test        # 72 passing
 ```
 
-Web tests (`cd web && npm test`, node:test via tsx) cover the permission engine, the Cleanverse module, authorization (cross-owner calls, delegations, invalid keys), atomic budgets, idempotency, reputation farming and wallet binding against a throwaway database. `npm test` at the root also runs the SDK's contract tests. The end-to-end proof on a local chain is `web/scripts/live-smoke.mjs` (45 checks) and `examples/sdk-consumer`.
+Web tests (`cd web && npm test`, node:test via tsx) cover the permission engine, the Cleanverse module, authorization (cross-owner calls, delegations, invalid keys), atomic budgets, idempotency, reputation farming and wallet binding against a throwaway database. `npm test` at the root also runs the SDK's contract tests. The end-to-end proof on a local chain is `web/scripts/live-smoke.mjs` (67 checks; 66 on Monad testnet, where the reorg check cannot run) and `examples/sdk-consumer`.
 
 Without a deployment the web app runs in **mock settlement** mode: every decision is still hashed and gets a deterministic receipt, so the full flow works offline. To anchor real transactions, see the next section.
 
@@ -106,7 +106,7 @@ npm run wire:env         # timestamped backup of web/.env, then upserts the live
 
 - `curl -s http://localhost:3001/api/integrations` shows `"chain": { "mode": "live", ... "signer": "0x<your deployer>" }`, and the Monad card on the Developer Console integration board reads **live** ("Transactions are signed and anchored on Monad testnet") instead of **simulated**.
 - Run an action (Dashboard -> **Run agent action**, or `POST /api/agents/:id/actions`): the receipt shows `"mode": "live"`, a real `txHash` and an explorer link (`testnet.monadexplorer.com` redirects to `testnet.monadvision.com`). `GET /api/v1/agents/:id` with your bearer key includes `"chain": "live"`.
-- If `web/scripts/live-smoke.mjs` is present in your checkout, it runs the whole demo flow through the API and then re-reads the registries on-chain: from `web/`, `FUKU_BASE_URL=http://localhost:3001 MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json node scripts/live-smoke.mjs` (exit 0 = every check passed).
+- If `web/scripts/live-smoke.mjs` is present in your checkout, it runs the whole demo flow through the API and then re-reads the registries on-chain: from `web/`, `FUKU_BASE_URL=http://localhost:3001 MONAD_RPC_URL=https://testnet-rpc.monad.xyz FUKU_DEPLOYMENT_FILE=../contracts/deployments/monadTestnet.json node scripts/live-smoke.mjs` (exit 0 = every check passed; 66/66 against Monad testnet on 2026-09-30).
 
 **Monad testnet facts (verified 2026-09-23)**
 
@@ -120,7 +120,7 @@ npm run wire:env         # timestamped backup of web/.env, then upserts the live
 
 **Troubleshooting**
 
-- **Insufficient funds**: the deployer ran out of MON (a deploy is six transactions). Top up at the faucet; `npm run check:deployer` shows the balance.
+- **Insufficient funds**: the deployer ran out of MON (a full deploy is ten transactions). Top up at the faucet; `npm run check:deployer` shows the balance.
 - **Wrong chain id**: `MONAD_RPC_URL` points at mainnet (143), a local node (31337) or a stale endpoint; `hardhat.config.ts` pins 10143. `check:deployer` reports the id the RPC returns.
 - **RPC rate limits** (HTTP 429, timeouts on the public endpoint): use a dedicated endpoint, set `MONAD_RPC_URL` in `contracts/.env`, re-run `wire:env`, restart. A failed live write is recorded as `failed` (never as a mock receipt) with a `[fuku-chain]` log line, and `npm run reconcile` retries decision anchors and settles pending transfers. Guarded transfers and the on-chain kill switch surface failures directly: HTTP 502 or `chainSync.ok: false`.
 - **`NotIdentityController`**: the signer in `web/.env` is not the controller recorded on-chain for that identity (`AgentRegistry.registerAgent` requires `msg.sender == controllerOf(ownerIdentityId)`). Use the key that anchored the identity, or redeploy fresh registries (`deploy:monad` + `wire:env`) so everything re-anchors with the current key.
