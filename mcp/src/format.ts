@@ -3,6 +3,8 @@ import type { ActionReceipt, ActionResult, Mandate, MandatePayee, PermissionChec
 
 export const short = (s: string) => (s.length > 14 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s);
 const usd = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(2)} USDC`;
+/** Mandate amounts are in the A-Token the mandate names (aUSDC in this deployment). */
+const atok = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(2)} aUSDC`;
 
 /** Explorer link for a hash on Monad testnet; other chains have no public explorer Fuku knows. */
 export function txLink(chainId: number | null | undefined, hash: string | null | undefined): string | null {
@@ -39,7 +41,7 @@ export function mandateLines(m: { mandate: Mandate | null; reason: string | null
       : "any recipient";
   return [
     "Mandate (on-chain, opened by the owner's wallet, enforced by FukuSpendGuard):",
-    `  daily cap ${usd(d.dailyCapUsdc)}, ${d.maxPerTxUsdc !== null ? `at most ${usd(d.maxPerTxUsdc)} per transfer` : "no per-transfer limit"}, spent today ${usd(d.spentTodayUsdc)}`,
+    `  daily cap ${atok(d.dailyCapUsdc)}, ${d.maxPerTxUsdc !== null ? `at most ${atok(d.maxPerTxUsdc)} per transfer` : "no per-transfer limit"}, spent today ${atok(d.spentTodayUsdc)}`,
     `  payees: ${d.restrictPayees ? "only approved payees" : "unrestricted"}${m.payees ? ` (${payees}${m.payeesSource === "known-addresses" ? "; only addresses Fuku knows were checked" : ""})` : ""}`,
     ...(d.validUntil ? [`  valid until ${new Date(d.validUntil * 1000).toISOString()}`] : []),
   ];

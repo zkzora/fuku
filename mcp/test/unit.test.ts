@@ -71,7 +71,7 @@ describe("tools", () => {
     const mcp = await connect(fakeClient(agentKey.address), agentKey);
     assert.ok((await mcp.listTools()).tools.some((t) => t.name === "fuku_execute_action"));
     const text = textOf(await mcp.callTool({ name: "fuku_whoami", arguments: {} }));
-    for (const want of ["MCP Assistant", "ERC-8004 agent #1961", "Ava Chen", "transfer (up to 100 USDC a day)", "blocked: withdraw, change_owner", "at most 50 USDC per transfer", "Nusantara Supplies", "Trust score: 65", "Execute: enabled"]) {
+    for (const want of ["MCP Assistant", "ERC-8004 agent #1961", "Ava Chen", "transfer (up to 100 USDC a day)", "blocked: withdraw, change_owner", "at most 50 aUSDC per transfer", "Nusantara Supplies", "Trust score: 65", "Execute: enabled"]) {
       assert.ok(text.includes(want), `whoami mentions ${want}`);
     }
   });
