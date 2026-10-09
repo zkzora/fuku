@@ -64,7 +64,8 @@ Use this beat instead of "Pay a verified supplier", not in addition to it, so th
 
 It needs a few things ready (`mcp/README.md`):
 - Claude Desktop, with the Fuku MCP server configured;
-- the MCP Assistant set up for the app you present (`npm run mcp:setup`);
+- the MCP Assistant set up for the app you present (`npm run mcp:setup`; on an existing setup, `npm run mcp:setup -- --key-only` once to switch it to an agent key);
+- the checklist in `docs/DEMO-READINESS.md` section 3 run once beforehand;
 - the app running on the same chain.
 
 With the MCP Assistant set up, Ava has six agents, so say "six agents" at 0:15. The Trading Assistant's 96 → 92 is unchanged.
@@ -136,7 +137,7 @@ Four substitutions keep the spoken lines true. At 0:55, "anchors the hash" becom
 | Cleanverse CVI / CVA | Real integration code: cooperate API client (envelope, AES-CBC bodies, fail-closed code mapping), asset / owner / recipient checks, evidence hashed into a `complianceRef`, A-Pass reads persisted, UI and SDK. The live API has never been called (invite pending); answers come from a Fuku-built simulator, labelled everywhere. See `docs/CLEANVERSE.md`. |
 | Authorization | One path for the web app, the API, the SDK and CRE: an owner, an identity the caller created, or an owner-granted delegation with scopes (register, manage, execute). Invalid API keys are 401 with no session fallback. Rate limits per process. The demo sign-in and demo key are off in production unless explicitly enabled. |
 | Execution lifecycle | DENIED, AUTHORIZED, SUBMITTED, CONFIRMED, PENDING, FAILED and SIMULATED are stored with receipt mode, chain id, block and log index; `Idempotency-Key` replays instead of executing twice. |
-| MCP server | `mcp/` (`@fuku/mcp`) makes an AI assistant (Claude Desktop, Claude Code) a Fuku agent through six tools, a passport resource and a safe-payment prompt. Executions are signed with the agent's own key, which stays on the user's machine; Fuku verifies the signature and requires it for such agents. A blocked decision is a normal result with the rule and the reason. Tested with unit tests, over real stdio, and end to end on a local node (6/6). On Monad testnet since 2026-10-01: the MCP Assistant is ERC-8004 agent #1963, with its key on the operator's machine (`docs/CLEANVERSE.md` has the transactions). |
+| MCP server | `mcp/` (`@fuku/mcp`) makes an AI assistant (Claude Desktop, Claude Code) a Fuku agent through six tools, a passport resource and a safe-payment prompt. Executions are signed with the agent's own key, which stays on the user's machine; Fuku verifies the signature and requires it for such agents. A blocked decision is a normal result with the rule and the reason. It runs with an agent key that can act only as its agent (no passport changes, no other agents), never the owner's key. Tested with unit tests, over real stdio, and end to end on a local node (7/7); the Claude Desktop run itself is a checklist in `docs/DEMO-READINESS.md`, not yet run. On Monad testnet since 2026-10-01: the MCP Assistant is ERC-8004 agent #1963, with its key on the operator's machine (`docs/CLEANVERSE.md` has the transactions). |
 | Memory vault | AES-GCM-256 with a PBKDF2 key (100,000 iterations) derived in the browser from the owner's own passphrase; the server stores ciphertext, IVs and an encrypted check value, never the passphrase. Only the seeded demo identity opens with a public demo passphrase, labelled as not secret. Titles are stored in clear. |
 
 ### What is simulated until keys are configured

@@ -13,6 +13,7 @@
     "db:setup": "prisma db push && tsx prisma/seed.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "owner-path:local": "tsx scripts/owner-path-check.ts",
+    "verify:transfer": "tsx scripts/verify-transfer.ts",
     "cleanverse:setup": "tsx scripts/setup-cleanverse-demo.ts",
     "cleanverse:check": "tsx scripts/cleanverse-check.ts",
     "reconcile": "tsx scripts/reconcile.ts",

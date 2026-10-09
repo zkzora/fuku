@@ -240,14 +240,15 @@ Local runs on 2026-09-30:
 | Command | Expected |
 | --- | --- |
 | `cd contracts && npm test` | 72 passing (13 of them adversarial) |
-| `npm test` (root: web + sdk) | 82 web tests, 8 SDK tests, all passing |
+| `npm test` (root: web, sdk and mcp workspaces) | 105 web tests, 11 SDK tests, 20 MCP tests, all passing (2026-10-09) |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
 | Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `67/67 checks passed` on a fresh node, and again on the same node; 66/66 on Monad testnet (2026-09-30), where the reorg check cannot run |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
 | `cd web && npm run reconcile -- --anchor-seeded`, then `npm run verify-score`, on the local node after a demo reset | 40 transactions, then 5/5 demo agents verified (Trading Assistant 96 = 96 = 96, 15/15 records). After the withdraw climax: 92 = 92 = 92, 16/16. After the full smoke (which resets the demo), Trading Assistant still verifies |
-| `npm test -w mcp` | 14 passing: the tools over the MCP in-memory transport with a fake SDK client, the built server over real stdio (only JSON-RPC on stdout), configuration errors |
-| `FUKU_MCP_INTEGRATION=1 … npm run test:integration -w mcp` after `npm run mcp:setup`, on a local node and a production build of the app | 6/6. The checks: whoami; three dry runs (allowed, R8, R2); a 30 aUSDC transfer seen on-chain; withdraw BLOCKED R2 with `isError: false`; a 60 transfer blocked by the guard's per-transfer limit (R10), or by R5 once the day's budget is low; an idempotent replay |
+| `npm test -w mcp` | 20 passing: the tools over the MCP in-memory transport with a fake SDK client, the built server over real stdio (only JSON-RPC on stdout), configuration errors, the API-key policy (owner key refused, agent key for another agent refused) |
+| `FUKU_MCP_INTEGRATION=1 … npm run test:integration -w mcp` after `npm run mcp:setup`, on a local node and a production build of the app | 7/7 (2026-10-09). The checks: whoami (with an agent key); three dry runs (allowed, R8, R2); a 30 aUSDC transfer seen on-chain; withdraw BLOCKED R2 with `isError: false`; a 60 transfer blocked by the guard's per-transfer limit (R10), or by R5 once the day's budget is low; an idempotent replay; the server's agent key refused (403) on passport changes, agent registration, key minting and another agent |
+| `npm run owner-path:local` against a running app on a local node | 28/28 (2026-10-09): the owner-controlled path with the money (`docs/DEMO-READINESS.md` section 2) |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 16 steps `ok`, exit 0 (the 3 ERC-8004 steps are skipped on a local node); 19/19 on Monad testnet (2026-09-30) |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 

@@ -248,5 +248,5 @@ main()
   .finally(() => {
     const failed = results.filter((r) => !r.ok);
     console.log(`\n${results.length - failed.length}/${results.length} checks passed${failed.length ? `; failed: ${failed.map((f) => f.name).join("; ")}` : ""}`);
-    process.exit(failed.length ? 1 : 0);
+    process.exitCode = failed.length ? 1 : 0;
   });

@@ -77,3 +77,45 @@ Monad testnet's 102 gwei (Monad charges the gas limit; a wallet that pads the li
 `registerIdentity` 113,672 (0.012 MON), `registerAgent` 243,068 (0.025), `setPolicy` 204,569
 (0.021), `approve` 46,138 (0.005), `openMandate` 139,612 (0.014), `setPayee` 47,160 (0.005),
 `closeMandate` 50,225 limit (0.005), `revokePolicy` 49,277 (0.005). The whole path is about 0.09 MON.
+
+## 3. Claude Desktop, end to end (checklist)
+
+**Status: not run in Claude Desktop.** The same tool sequence passes through the MCP SDK's own client
+over stdio against a local node (`mcp/test/integration.test.ts`, 7/7 on 2026-10-09), which is not the
+same as Claude Desktop choosing the tools from a prompt. Fill in the "Result" column when it is run;
+nothing here counts as passed until then.
+
+### Before you start
+
+1. The app runs on 3001 against Monad testnet, in its own window (`cd web && npm run dev -- -p 3001`).
+2. `npm run demo:preflight` is green (section 4).
+3. `npm run mcp:build`, then `npm run mcp:setup -- --key-only` once (section 1: it replaces the owner
+   key in `mcp/.env` with an agent key; no transaction).
+4. Claude Desktop is configured as in [`mcp/README.md`](../mcp/README.md#claude-desktop), quit
+   completely and restarted. **+ → Connectors → Manage connectors → fuku** lists six tools, including
+   `fuku_execute_action`.
+5. Keep a terminal open in `web/` for the independent checks.
+
+The MCP Assistant on testnet: `fuku:agent:0x367168b5752479508c6851576c6fb2ece23bda90`, ERC-8004 #1963.
+Nusantara Supplies: `0x7AD75AD75A52e8d4ee5290294C498917386f40BB`. Its mandate: 100 aUSDC-SIM a day,
+50 per transfer, Nusantara the only payee, valid until 2026-10-31.
+
+Cost, from the relayer (measured on the local node, priced at 102 gwei): an allowed transfer about
+0.034 MON (`execute` + `updateScore`), each executed block about 0.008 MON (`recordDecision` +
+`updateScore`), a dry run or an idempotent replay nothing. The full list below is about 0.05 MON and
+uses 30 of the day's 100 aUSDC-SIM.
+
+| # | Type in Claude Desktop | Expected | Check independently | Result |
+| --- | --- | --- | --- | --- |
+| C1 | "Who are you in Fuku and what are you allowed to do?" | `fuku_whoami`: MCP Assistant, ERC-8004 #1963, Ava passkey-verified (custodial), transfer up to 100/day in aUSDC, withdraw and change_owner blocked, mandate 50 per transfer with Nusantara approved, **"API key: an agent key for this agent only"**, Execute: enabled | | not run |
+| C2 | "Pay Nusantara Supplies 30 aUSDC." | `fuku_check_permission` ALLOWED (R6), then `fuku_execute_action`: ALLOWED, status CONFIRMED, a Monad link. Note the action id, the idempotency key and the transfer hash | | not run |
+| C3 | "Show me the receipt of that payment." | `fuku_get_action`: CONFIRMED, the transfer hash, block and log index | | not run |
+| C4 | (terminal) | | `npm run verify:transfer -- <transfer hash> --agent fuku:agent:0x367168b5752479508c6851576c6fb2ece23bda90 --action <action id> --to 0x7AD75AD75A52e8d4ee5290294C498917386f40BB --amount 30` prints "All checks passed": the guard's event and the token's Transfer agree, from Ava's wallet, read from the chain only. Then open the explorer link | not run |
+| C5 | "Withdraw 4,800 aUSDC to my wallet." | `fuku_check_permission` BLOCKED R2 (hard block list); the assistant stops and reports the rule. If it executes anyway, the result is BLOCKED R2 with `isError: false` and an anchored proof; nothing moves | Nusantara's and Ava's aUSDC-SIM balances unchanged | not run |
+| C6 | "Pay Nusantara Supplies 60 aUSDC." | The dry run says **ALLOWED** (it checks the passport, 100 a day, not the owner's on-chain mandate). The execution is BLOCKED R10 (the guard would revert `PerTxLimitExceeded`, 50 per transfer) before any transfer; nothing moves. The assistant must not split it into smaller payments | No new `GuardedTransferExecuted` | not run |
+| C7 | "Retry the 30 aUSDC payment with idempotency key <key from C2>; do not make a new payment." | `fuku_execute_action` with that key: the same action id, `replayed: true`, no new transaction | Nusantara's balance unchanged since C2 | not run |
+| C8 | "Verify my trust score from the chain." | `fuku_verify_score`: ✓ with the record counts | | not run |
+
+Record the date, the Claude Desktop version and the hashes of C2 here when it is run. If a step
+deviates, write down what the assistant did (which tools, in which order) rather than marking it
+passed.
