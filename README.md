@@ -25,7 +25,7 @@ Fuku UI mockups/  Design source (Claude Design exports) and the product specs
 ```bash
 npm install                 # installs web, sdk and mcp (npm workspaces)
 cd web
-npx prisma db push          # creates web/prisma/dev.db (SQLite)
+npx prisma db push          # creates web/prisma/dev.db (SQLite); run it again after pulling schema changes
 npm run db:seed             # seeds Ava Chen, 5 agents, activity, vault items, demo API key
 npm run dev -- -p 3001      # http://localhost:3001
 ```

@@ -23,7 +23,7 @@ cannot do is in [`mcp/README.md`](../mcp/README.md#what-the-servers-api-key-can-
 | MCP server refuses an owner key (unless `FUKU_MCP_ALLOW_OWNER_KEY=1`) and an agent key for another agent | Automated, `mcp/test/unit.test.ts` | 20/20 pass, 2026-10-09 |
 | Against a running app on a local Hardhat node: `mcp:setup` mints the key, MCP integration 7/7 (test 7: passport PUT/DELETE, agent registration, key minting and another agent's check answer 403 over HTTP) | Automated, local stack | pass, 2026-10-09 |
 | Same local app: the agent key gets 401 on the vault, memory, delegations and Developer Console key routes; a revoked key gets 401; `mcp:setup -- --key-only` reissues it | Automated (curl), local stack | pass, 2026-10-09 |
-| The testnet MCP Assistant (#1963) still has the owner key in `mcp/.env` | **Owner action** | run `npm run mcp:setup -- --key-only` with the 3001 app running (no chain access, no transaction), then restart the MCP client |
+| The testnet MCP Assistant (#1963) still has the owner key in `mcp/.env` | **Owner action** | after the schema update (section 4), run `npm run mcp:setup -- --key-only` with the 3001 app running (no chain access, no transaction), then restart the MCP client |
 
 ## 2. The owner-controlled path (no registry redeploy)
 
@@ -119,3 +119,70 @@ uses 30 of the day's 100 aUSDC-SIM.
 Record the date, the Claude Desktop version and the hashes of C2 here when it is run. If a step
 deviates, write down what the assistant did (which tools, in which order) rather than marking it
 passed.
+
+## 4. Preflight (read-only)
+
+`cd web && npm run demo:preflight` (`web/scripts/demo-preflight.ts`) says whether the demo is ready to
+present. It reads the app's database, the chain over `MONAD_RPC_URL` and, if the app is up, its
+`/api/integrations`. It sends no transaction, writes nothing, calls no third-party API and prints no
+key (only addresses derived from them). Exit code 1 on any ✗; warnings (!) are allowed. `-- --json`
+prints the rows as JSON.
+
+| Section | What it checks |
+| --- | --- |
+| Database | the schema is current (the agent-key columns) |
+| RPC and contracts | the RPC answers on `FUKU_CHAIN_ID`, the latest block is recent, the seven contracts have code |
+| Roles | the guard's compliance signer is `FUKU_COMPLIANCE_SIGNER_KEY`'s address; the relayer is enforcer and scorer; the guard is an enforcer |
+| Balances | relayer MON (✗ under 0.2, ! under 1); Ava's MON (! under 0.05; the pitch itself needs none of hers); Ava's aUSDC-SIM and her allowance to the guard against the pitch's 250 + 30 |
+| Each demo agent (the cohort and the MCP Assistant) | registered; on-chain owner; status (Fuku vs AgentRegistry); passport hash and active flag; anchored score = Fuku's score (✗ for the cohort); ERC-8004 owner and agentWallet; no pending or failed actions |
+| The two paying agents | Ava's mandate open for aUSDC-SIM; per-transfer limit and today's remaining mandate budget cover the pitch's amount; expiry (! under 3 days); Nusantara approved; the passport's daily budget left in Fuku |
+| Simulator A-Passes | Ava and Nusantara active, the frozen wallet frozen (Fuku's simulator, labelled) |
+| Ava's identity | bound wallet = `DEMO_OWNER_PRIVATE_KEY`'s; custodial (the relayer is the controller); passkey flag agrees |
+| MCP (`mcp/.env`) | an agent key (not the owner's), for the kept MCP Assistant, known to this database; the agent key's address is the one Fuku has |
+| App | live on the same chain, when it answers |
+
+Monad's public RPC allows 15 requests a second and answers bursts with 429 or error -32011, which viem
+does not retry; the preflight spaces its requests to about 9 a second and retries limited ones.
+
+### Results on 2026-10-09
+
+- **Local stack** (Hardhat node, app on 3002): READY WITH WARNINGS, 77 ok, 1 warning (Ops Scheduler
+  is paused in Fuku and only registered on-chain: Fuku is the stricter of the two).
+- **Monad testnet, this machine's `web/.env`** (read-only, app not running): against `dev.db` as it is,
+  NOT READY at the first check (the schema update below has not been applied). Against a copy of
+  `dev.db` with the schema pushed: NOT READY, 80 ok, 3 warnings, 1 failure. Every cohort agent matches the chain (Trading Assistant 96 = 96, ERC-8004
+  #1955 to #1959 owned by Ava with the recorded agentWallets); Payments Agent and MCP Assistant mandates
+  cover 250 and 30 today, both expiring in 21 days (2026-10-30 and 2026-10-31); relayer 8.03 MON, Ava
+  0.081 MON and 9,050 aUSDC-SIM. The failure: `mcp/.env` still holds the owner key. Warnings: the
+  Ops Scheduler status above, the MCP Assistant has no score anchored yet (its first action anchors
+  one), the app was not running.
+
+### Owner steps before presenting
+
+1. **Schema update (required once).** Agent keys add two nullable columns to `ApiKey`. Until they
+   exist, every API-key request to the app fails (`The column main.ApiKey.agentId does not exist`).
+   Stop the app, back up the database, push the schema, start the app:
+   `cd web && cp prisma/dev.db prisma/dev.db.bak-20261009 && npx prisma db push`.
+   Tried on a copy of `dev.db`: the error before, none after, and the same row counts in every table.
+2. Start the app on 3001 in its own window.
+3. `npm run mcp:setup -- --key-only` (section 1). No transaction.
+4. `npm run demo:preflight` until it prints READY (warnings are fine).
+5. Open `/api/auth/demo?reset=1` once (it removes rehearsal agents such as the CRE probe).
+
+### A demo reset does not reset the chain
+
+`/api/auth/demo?reset=1` reseeds the **database** only. The chain keeps everything: registrations,
+anchored passports, decisions and scores, Ava's mandates and today's spent budget, token balances and
+ERC-8004 registrations. The seed restores the cohort's anchors and ERC-8004 records from carried state,
+so a reset before any live action still matches the chain.
+
+After a live action on a cohort agent (the climax, a payment), the chain holds the new score and a
+reset shows the seeded one again. Reproduced on the local stack on 2026-10-09: the climax took the
+Trading Assistant from 96 to 92 on-chain; after a reset Fuku showed 96 and the chain 92, and the
+preflight failed ("anchored score equals Fuku's: Fuku 96, chain 92"). `npm run demo:cohort` (on
+testnet `-- --allow-testnet`, about 0.69 MON) seeds, anchors and funds a fresh cohort; after it and a
+reset the preflight was READY again. So: rehearse on the MCP Assistant or local stack, run the climax
+once per cohort, and rotate the cohort to present again.
+
+The MCP Assistant is kept across resets with its history, score and agent key. Its daily budget
+(100 aUSDC-SIM in the mandate and in the passport) refills at 00:00 UTC; a reset does not refill it.

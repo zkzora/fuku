@@ -14,6 +14,7 @@
     "test": "tsx --test \"src/**/*.test.ts\"",
     "owner-path:local": "tsx scripts/owner-path-check.ts",
     "verify:transfer": "tsx scripts/verify-transfer.ts",
+    "demo:preflight": "tsx scripts/demo-preflight.ts",
     "cleanverse:setup": "tsx scripts/setup-cleanverse-demo.ts",
     "cleanverse:check": "tsx scripts/cleanverse-check.ts",
     "reconcile": "tsx scripts/reconcile.ts",
