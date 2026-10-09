@@ -1,0 +1,79 @@
+# Demo readiness
+
+What has been verified for the demo, how, and what an owner still has to check by hand. A claim on
+this page links to the test or the run that backs it. Anything not run says so.
+
+Labels used throughout:
+- **Automated**: a test or script, with its last result and date.
+- **Interactive**: needs a person (a passkey prompt, a browser wallet, Claude Desktop). Status is
+  "not run" until someone runs it and records the result here.
+- **Simulated**: Cleanverse (A-Pass, aUSDC-SIM) is Fuku's simulator, Kimi/Qwen explanations fall back
+  to the rule narrator, CRE runs as a simulation. These stay labelled as such everywhere.
+
+## 1. The MCP server's authority: an agent key
+
+The MCP server runs with an **agent key** (`fk_agent_…`), not the owner's API key. What it can and
+cannot do is in [`mcp/README.md`](../mcp/README.md#what-the-servers-api-key-can-do) and
+[`SECURITY.md`](SECURITY.md) section 11.
+
+| Check | Kind | Result |
+| --- | --- | --- |
+| Route-level positive and negative tests (own agent allowed; passport, agent and identity management, ERC-8004, records, key minting, travel-rule, vault, other agents, other owners refused; revoke, owner change, demo reset) | Automated, `web/src/lib/services/api-keys.test.ts` | 11/11 pass, 2026-10-09 |
+| The set of v1 routes that admit agent keys is pinned | Automated, same file | pass, 2026-10-09 |
+| MCP server refuses an owner key (unless `FUKU_MCP_ALLOW_OWNER_KEY=1`) and an agent key for another agent | Automated, `mcp/test/unit.test.ts` | 20/20 pass, 2026-10-09 |
+| Against a running app on a local Hardhat node: `mcp:setup` mints the key, MCP integration 7/7 (test 7: passport PUT/DELETE, agent registration, key minting and another agent's check answer 403 over HTTP) | Automated, local stack | pass, 2026-10-09 |
+| Same local app: the agent key gets 401 on the vault, memory, delegations and Developer Console key routes; a revoked key gets 401; `mcp:setup -- --key-only` reissues it | Automated (curl), local stack | pass, 2026-10-09 |
+| The testnet MCP Assistant (#1963) still has the owner key in `mcp/.env` | **Owner action** | run `npm run mcp:setup -- --key-only` with the 3001 app running (no chain access, no transaction), then restart the MCP client |
+
+## 2. The owner-controlled path (no registry redeploy)
+
+The deployed registries already support owner custody: an identity whose wallet is bound before its
+first on-chain write is controlled by that wallet (`web/src/lib/custody.ts`). Ava, the demo owner, is
+**custodial** (Fuku's relayer is her controller) and stays so; the owner-controlled path is
+exercised with fresh identities.
+
+### Automated
+
+`npm run owner-path:local` (`web/scripts/owner-path-check.ts`) runs the whole path against a running
+app on a local Hardhat node, with a fresh owner wallet, and reads every result back from the chain.
+It refuses any chain but 31337. Last run 2026-10-09: **28/28 checks passed**.
+
+| Step | What is checked |
+| --- | --- |
+| Wallet binding | The owner's wallet signs Fuku's challenge; `walletVerifiedBy = signature` |
+| Owner-signed registry writes | `registerAgent` and `setPolicy` wait for the owner; Fuku lists `registerIdentity`, `registerAgent`, `setPolicy`; the owner's wallet sends each; Fuku confirms from the receipt (sender = owner) |
+| `controllerOf` | `controllerOf(identity)` is the owner's wallet; the relayer is not the agent's controller; a relayer `revokePolicy` reverts `NotAgentOwner`; `verifyAgent` reports `custody: owner` |
+| Passkey gate | A transfer before passkey verification is blocked R11 |
+| Owner-signed mandate | Without a mandate the transfer is blocked (guard would revert `NoMandate`); the owner's wallet approves the guard and opens 100 a day, 50 per transfer, payees only; the mandate is keyed to the owner's wallet |
+| Payee approval | Before `setPayee` the transfer is blocked (`PayeeNotApproved`); after it, allowed |
+| Transfer | 30 aUSDC-SIM is CONFIRMED; `GuardedTransferExecuted` shows from = owner's wallet, to = payee, the exact amount and the owner's mandate version; balances move exactly once; 60 (over 50 per transfer) is blocked and nothing moves |
+| Revoke | Removing the payee blocks; `closeMandate` blocks; re-opening allows again; Fuku's kill switch blocks at once (R0) and asks the owner to sign `revokePolicy`; after the owner's `revokePolicy` the passport is inactive on-chain; nothing moved after the kill switch |
+
+Two things in that run are stand-ins, printed as they happen:
+- **Passkey**: the script sets `Identity.humanVerified` in the local database. The real ceremony is
+  WebAuthn in a browser (interactive, below).
+- **Cleanverse**: the owner's A-Pass and aUSDC-SIM are issued and minted by Fuku's **simulator**
+  contracts.
+
+Also automated: `web/src/lib/custody.test.ts` (custody rule, owner transaction confirmation) and the
+owner-custody section of `web/scripts/live-smoke.mjs` (registry writes, `controllerOf`, the relayer's
+reverts, setPolicy v2, revokePolicy), which also ran on Monad testnet on 2026-09-30 (`docs/CLEANVERSE.md`).
+
+### Interactive (not run)
+
+These need a person with a browser and a wallet. None has been run; record the date and result here.
+
+| # | Step | Where | Status |
+| --- | --- | --- | --- |
+| I1 | Passkey ceremony with user verification for a new owner | App: sign up with a passkey | not run |
+| I2 | Bind a wallet from a browser wallet (injected `personal_sign`) or Dynamic | App: Identity → wallet | not run (Dynamic needs a real inbox for its OTP) |
+| I3 | Send the owner-signed registry writes from the browser wallet | App: Identity → "On-chain control" card | not run |
+| I4 | Open the mandate and approve a payee from the owner's wallet | App: the Dynamic mandate form (Dynamic wallets only); with another wallet, the guard's `openMandate` / `setPayee` from a block explorer or `cast` | not run |
+| I5 | Revoke: kill switch in the app, then `revokePolicy` from the "On-chain control" card | App | not run |
+| I6 | Close the mandate | No button in the app: the owner calls `closeMandate(agentId)` on FukuSpendGuard from their wallet (explorer or `cast`) | not run |
+
+Gas for the owner's wallet, measured on the local run (gas limit = gas used for these), priced at
+Monad testnet's 102 gwei (Monad charges the gas limit; a wallet that pads the limit pays more):
+`registerIdentity` 113,672 (0.012 MON), `registerAgent` 243,068 (0.025), `setPolicy` 204,569
+(0.021), `approve` 46,138 (0.005), `openMandate` 139,612 (0.014), `setPayee` 47,160 (0.005),
+`closeMandate` 50,225 limit (0.005), `revokePolicy` 49,277 (0.005). The whole path is about 0.09 MON.
