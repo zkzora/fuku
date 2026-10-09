@@ -2,21 +2,40 @@ import { NextResponse, type NextRequest } from "next/server";
 import { ZodError } from "zod";
 import type { Identity } from "@prisma/client";
 import { requireIdentity, UnauthorizedError } from "./session";
-import { identityFromApiKey } from "./services/identity";
+import { apiKeyFromRaw } from "./services/identity";
+import { parseAgentKeyScopes, type AgentKeyScope } from "./services/api-keys";
 import { ChainWriteError } from "./chain";
 import { ForbiddenError, RequestError } from "./errors";
 import { RateLimitError } from "./rate-limit";
 
 export type Ctx<P = Record<string, string>> = { params: Promise<P> };
 
-type Handler<P> = (req: NextRequest, identity: Identity, params: P) => Promise<Response>;
+type Handler<P> = (req: NextRequest, identity: Identity, params: P, principal: Principal) => Promise<Response>;
+
+/**
+ * Who is calling a v1 route. `identity` is always the owner the call acts for; an agent key
+ * (services/api-keys.ts) additionally narrows the call to one agent and a few scopes.
+ */
+export type Principal =
+  | { kind: "owner"; keyId: string | null }
+  | { kind: "agent"; keyId: string; agentId: string; scopes: AgentKeyScope[] };
+
+/** How a route admits agent keys. Routes without it refuse them. */
+export interface AgentKeyAccess<P> {
+  /** The scope an agent key needs on this route; null: any agent key (it reads only itself). */
+  scope: AgentKeyScope | null;
+  /** The route param naming the agent: an agent key may only name its own agent. */
+  agentParam?: keyof P & string;
+  /** A scope that lets an agent key name another agent here (public verification only). */
+  otherAgents?: AgentKeyScope;
+}
 
 function handleError(err: unknown) {
   if (err instanceof UnauthorizedError) {
     return NextResponse.json({ error: err.message || "Unauthorized", code: "unauthorized" }, { status: 401 });
   }
   if (err instanceof ForbiddenError) {
-    return NextResponse.json({ error: err.message, code: "forbidden" }, { status: 403 });
+    return NextResponse.json({ error: err.message, code: err.code }, { status: 403 });
   }
   if (err instanceof RateLimitError) {
     return NextResponse.json(
@@ -46,7 +65,7 @@ export function withSession<P = Record<string, string>>(handler: Handler<P>) {
   return async (req: NextRequest, ctx: Ctx<P>) => {
     try {
       const identity = await requireIdentity();
-      return await handler(req, identity, await ctx.params);
+      return await handler(req, identity, await ctx.params, { kind: "owner", keyId: null });
     } catch (err) {
       return handleError(err);
     }
@@ -65,23 +84,48 @@ export function presentedApiKey(req: NextRequest | Request): string | null {
  * is authorised by that key alone: an invalid, revoked or disabled key is rejected with 401 and
  * never falls back to the browser session. Only requests without any key use the session cookie
  * (the in-app Developer Console).
+ *
+ * Agent keys (fk_agent_…) are refused (403) unless the route opts in with `agentKey`, and then only
+ * with the scope it names and only for the agent the key is bound to.
  */
-export function withApiKey<P = Record<string, string>>(handler: Handler<P>) {
+export function withApiKey<P = Record<string, string>>(handler: Handler<P>, opts: { agentKey?: AgentKeyAccess<P> } = {}) {
   return async (req: NextRequest, ctx: Ctx<P>) => {
     try {
       const raw = presentedApiKey(req);
+      const params = await ctx.params;
       let identity: Identity | null;
+      let principal: Principal;
       if (raw) {
-        identity = await identityFromApiKey(raw);
-        if (!identity) throw new UnauthorizedError("Invalid API key");
+        const key = await apiKeyFromRaw(raw);
+        if (!key) throw new UnauthorizedError("Invalid API key");
+        identity = key.identity;
+        principal = key.agentId ? { kind: "agent", keyId: key.id, agentId: key.agentId, scopes: parseAgentKeyScopes(key.scopes) } : { kind: "owner", keyId: key.id };
+        if (principal.kind === "agent") {
+          if (!key.agent || key.agent.identityId !== key.identityId) {
+            throw new ForbiddenError("This agent key's agent no longer belongs to the key's owner.", "agent_key_owner_mismatch");
+          }
+          admitAgentKey(principal, params, opts.agentKey);
+        }
       } else {
         identity = await requireIdentity();
+        principal = { kind: "owner", keyId: null };
       }
-      return await handler(req, identity, await ctx.params);
+      return await handler(req, identity, params, principal);
     } catch (err) {
       return handleError(err);
     }
   };
+}
+
+function admitAgentKey<P>(principal: Extract<Principal, { kind: "agent" }>, params: P, access: AgentKeyAccess<P> | undefined) {
+  const bound = `This key is an agent key for ${principal.agentId}`;
+  if (!access) throw new ForbiddenError(`${bound}: it cannot use this endpoint. Use the owner's key or the Fuku app.`, "agent_key_forbidden");
+  if (access.scope && !principal.scopes.includes(access.scope)) throw new ForbiddenError(`${bound} without the ${access.scope} scope.`, "agent_key_scope");
+  if (!access.agentParam) return;
+  const named = String(params[access.agentParam]);
+  if (named === principal.agentId) return;
+  if (access.otherAgents && principal.scopes.includes(access.otherAgents)) return;
+  throw new ForbiddenError(`${bound}: it cannot act on or read ${named}.`, "agent_key_other_agent");
 }
 
 /** Unauthenticated route with uniform error handling. */

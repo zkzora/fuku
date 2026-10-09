@@ -25,6 +25,7 @@ What is **not** enforced on-chain:
 
 - **Sessions (web app):** HS256 JWT cookie, 7 days, `httpOnly`, `sameSite=lax`, `secure` in production. In production the server refuses to start sessions without a random `FUKU_SESSION_SECRET` of at least 32 characters. Logout deletes the cookie; there is no server-side session revocation yet.
 - **API keys (SDK, CRE):** a request that presents a key is authorised by that key alone. An invalid, revoked or disabled key gets 401 and never falls back to the browser session.
+- **Agent keys** (`fk_agent_…`): an API key bound to one agent, minted only by that agent's owner. It reads, dry-runs and executes for that agent and reads its receipts, on the routes that opt in, and gets 403 everywhere else (passport, agent and identity management, keys, other agents). Section 11 has the details; it is what the MCP server runs with.
 - **Acting for an owner** (`canActFor`) is allowed in three cases:
   - the caller is the owner;
   - the caller created the identity through `POST /api/v1/identities` (`managedById`);
@@ -313,7 +314,13 @@ Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON
 - An unsigned request is refused with `401 agent_signature_required`, and a request signed with another key with `agent_signature_invalid`. The check runs after authorization and before an idempotent replay.
 - The result records the signer (`agentSignature`), and the workflow shows "Agent key verified".
 
+**The server's API key is an agent key** (`web/src/lib/services/api-keys.ts`, `withApiKey` in `web/src/lib/api.ts`).
+- `mcp:setup` mints a key bound to the MCP agent (`fk_agent_…`) and writes it to `mcp/.env`; the owner's key is never written there. The MCP server asks Fuku what its key is before the first call and refuses an owner key unless `FUKU_MCP_ALLOW_OWNER_KEY=1`.
+- An agent key works only on routes that opt in, only with the scopes it carries, and only for its own agent: read itself, dry-run, execute (still signed with the agent's own key), read its own receipts. Passport changes, agent registration and management, identities and wallets, ERC-8004 setup, records, delegations, key minting, travel-rule records, other agents and other owners answer 403 (`agent_key_*`). A test pins the list of routes that admit agent keys.
+- The key is checked against its agent on every request: if the agent changes owner the key stops working, and deleting the agent deletes its keys. The owner revokes it in the Developer Console or with `revokeAgentKey`.
+
 **What it protects.**
+- A stolen `mcp/.env` gives the agent's own authority (bounded by its passport and mandate), not the owner's: it cannot raise a limit, unblock withdraw, or touch another agent.
 - A leaked owner API key alone cannot execute as this agent over the API.
 - Fuku cannot act as the agent over the API either, because it never held the key.
 - Every action the assistant takes is bound to the key on the user's machine.
@@ -321,7 +328,8 @@ Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON
 - Rules are evaluated by Fuku's engine on every request, never by the model. The tool descriptions ask the model to check first and not to work around a block, but that is guidance. The engine's decision is what counts, and it is anchored on Monad.
 
 **What it does not protect.**
-- The agent key and the owner's API key sit on the same machine, in `mcp/.env` or the MCP client's configuration. Whoever controls that machine controls both. Fuku's API keys carry their identity's full rights; there are no per-key scopes.
+- The agent key and the server's API key sit on the same machine, in `mcp/.env` or the MCP client's configuration. Whoever controls that machine can act as the agent, within its passport and mandate, until the owner revokes the key or the passport.
+- Owner keys (`fk_live_…`) still carry their identity's full rights. Only agent keys are scoped; an application acting for many owners uses its own owner key plus delegations (section 2).
 - The owner's own session in the Fuku app is not an API call. The owner can act for the agent there without the agent key.
 - The signature is checked by Fuku's API, not on-chain. FukuSpendGuard checks the compliance signer's attestation and the owner's mandate. Fuku's server still decides and anchors, with the trust assumptions in sections 6 and 7.
 - A signed request that someone captures can be replayed within its 5 minutes. A replay returns the stored result of the same idempotency key and never executes twice.

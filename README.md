@@ -8,9 +8,9 @@ web/        Next.js 16 app: landing, dashboard, identity, agents, permissions, r
 contracts/  Solidity for Monad (Hardhat 3): HumanIdentityRegistry, AgentRegistry,
             PermissionRegistry, ReputationRegistry, FukuSpendGuard (owner-bounded mandates),
             and the Cleanverse simulators CleanverseAPassSim / CleanverseATokenSim — 72 passing tests
-sdk/        @fuku/sdk 0.4.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
+sdk/        @fuku/sdk 0.5.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
             getTrustScore, checkPermission, executeAction (signed with the agent's own key),
-            getAction, getMandate, verifyScore
+            getAction, getMandate, verifyScore, createAgentKey (keys bound to one agent)
 mcp/        @fuku/mcp — MCP server: Claude Desktop or Claude Code acts as a Fuku agent (stdio)
 examples/   sdk-consumer: an external program using only the SDK, verifying results on-chain
 docs/       PITCH.md (talk track, status, judge Q&A), CLEANVERSE.md (CVI/CVA integration),

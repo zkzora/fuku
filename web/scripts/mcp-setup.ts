@@ -11,19 +11,24 @@
  *   3. its passport: transfer up to 100 aUSDC a day (assets: aUSDC), read_balances; withdraw and
  *      change_owner blocked;
  *   4. Ava's mandate: 100 aUSDC a day, 50 per transfer, Nusantara Supplies the only payee;
- *   5. a demo reset keeps it, with its history and score (Setting demo.keepAgents).
- * It prints the ids, every transaction, the MON spent and the MCP client configuration (the private
- * key only as a placeholder).
+ *   5. a demo reset keeps it, with its history and score (Setting demo.keepAgents);
+ *   6. an agent key for the MCP server (fk_agent_…, lib/services/api-keys.ts): it reads, checks and
+ *      executes for this agent only and can never change its passport, manage agents or reach other
+ *      agents. mcp/.env gets that key, never the owner's; earlier "MCP server" keys are revoked.
+ * It prints the ids, every transaction, the MON spent and the MCP client configuration (the keys
+ * only as placeholders).
  *
  * Environment: web/.env, where exported variables take precedence. It needs DATABASE_URL (the app's
  * database), MONAD_RPC_URL, DEMO_OWNER_PRIVATE_KEY (Ava's wallet), and DEPLOYER_PRIVATE_KEY (only to
- * read the relayer's balance). FUKU_BASE_URL defaults to http://localhost:3001 and FUKU_API_KEY to the
- * demo key.
+ * read the relayer's balance). FUKU_BASE_URL defaults to http://localhost:3001 and FUKU_OWNER_API_KEY
+ * (the owner key the setup itself uses; it is not written to mcp/.env) to the demo key.
  * Ava's wallet sends the mandate and ERC-8004 transactions, and the app's relayer anchors the agent
  * and its passport. It refuses any RPC but a local node unless --allow-testnet is given.
  *
- * Usage: npm run mcp:setup -- [--fresh] [--allow-testnet] [--mcp-env <path, default mcp/.env>]
+ * Usage: npm run mcp:setup -- [--fresh] [--allow-testnet] [--key-only] [--mcp-env <path, default mcp/.env>]
  *        --fresh registers a brand-new MCP agent (the old mcp/.env is kept as a timestamped backup).
+ *        --key-only only (re)issues the agent key for the agent mcp/.env names: no chain access, no
+ *        transaction, so no --allow-testnet; the Fuku app must be running.
  */
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -40,6 +45,7 @@ if (existsSync(webEnv)) process.loadEnvFile(webEnv);
 
 const DEMO_API_KEY = "fk_live_demo_ava_chen_2026";
 const NAME = "MCP Assistant";
+const KEY_NAME = "MCP server";
 const DESCRIPTION = "An AI assistant (Claude, through the Fuku MCP server) acting under Ava's passport: pays approved suppliers in aUSDC, never withdraws.";
 const PASSPORT = {
   allowed: [{ action: "transfer", limitUsdcPerDay: 100 }, { action: "read_balances" }],
@@ -93,23 +99,76 @@ function assertIgnored(file: string) {
 
 const stamp = () => new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 
+type FukuClient = InstanceType<(typeof import("../../sdk/src/index"))["Fuku"]>;
+
+/**
+ * The MCP server's API key: the one mcp/.env holds if it is still an agent key for this agent,
+ * otherwise a new one (and earlier "MCP server" keys for the agent are revoked). Never the owner's.
+ */
+async function ensureAgentApiKey(owner: FukuClient, makeClient: (apiKey: string) => FukuClient, agentId: string, saved: string | undefined) {
+  if (saved?.startsWith("fk_agent_")) {
+    const info = await makeClient(saved)
+      .keyInfo()
+      .catch(() => null);
+    if (info?.kind === "agent" && info.agentId === agentId) {
+      out(`  = agent key ${saved.slice(0, 14)}… (${info.scopes?.join(", ")}) from mcp/.env`);
+      return saved;
+    }
+    out("  - the agent key in mcp/.env no longer works (revoked, or another agent): issuing a new one");
+  } else if (saved) {
+    out("  - mcp/.env held an owner key: replacing it with an agent key (the owner key stays valid for the owner)");
+  }
+  const { key, raw } = await owner.createAgentKey(agentId, { name: KEY_NAME });
+  const { keys } = await owner.listAgentKeys(agentId);
+  for (const old of keys.filter((k) => k.name === KEY_NAME && k.id !== key.id)) {
+    await owner.revokeAgentKey(agentId, old.id);
+    out(`  - revoked the earlier MCP server key ${old.prefix}…`);
+  }
+  out(`  + agent key ${key.prefix}… (${key.scopes.join(", ")}), bound to ${agentId}`);
+  return raw;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const fresh = args.includes("--fresh");
   const i = args.indexOf("--mcp-env");
   const envFile = path.resolve(repoRoot, i >= 0 ? args[i + 1] : path.join("mcp", ".env"));
+  const keyOnly = args.includes("--key-only");
   const baseUrl = (process.env.FUKU_BASE_URL?.trim() || "http://localhost:3001").replace(/\/+$/, "");
-  const apiKey = process.env.FUKU_API_KEY?.trim() || DEMO_API_KEY;
+  const apiKey = process.env.FUKU_OWNER_API_KEY?.trim() || DEMO_API_KEY;
+  if (apiKey.startsWith("fk_agent_")) fail("FUKU_OWNER_API_KEY is an agent key: the setup needs the owner's key (it is not written to mcp/.env).");
   const rpc = process.env.MONAD_RPC_URL?.trim() || "https://testnet-rpc.monad.xyz";
+  assertIgnored(envFile);
+  const { Fuku } = await import("../../sdk/src/index");
+  const fuku = new Fuku({ apiKey, baseUrl });
+  const makeClient = (k: string) => new Fuku({ apiKey: k, baseUrl });
+
+  if (keyOnly) {
+    if (fresh) fail("--key-only and --fresh do not mix: --fresh registers a new agent.");
+    if (!existsSync(envFile)) fail(`${path.relative(repoRoot, envFile)} does not exist: run the full setup first.`);
+    const saved = readEnvFile(envFile);
+    const agentId = saved.FUKU_AGENT_ID ?? fail(`${path.relative(repoRoot, envFile)} names no FUKU_AGENT_ID.`);
+    const v = await fuku.verifyAgent(agentId);
+    if (!v.agent) fail(`The Fuku app at ${baseUrl} does not have ${agentId}.`);
+    out(`Agent key for ${v.agent!.name} ${agentId} at ${baseUrl} (no chain access)`);
+    const agentApiKey = await ensureAgentApiKey(fuku, makeClient, agentId, saved.FUKU_API_KEY);
+    if (agentApiKey !== saved.FUKU_API_KEY) {
+      const backup = `${envFile}.bak-${stamp()}`;
+      copyFileSync(envFile, backup);
+      writeEnvFile(envFile, { ...saved, FUKU_API_KEY: agentApiKey }, [`Agent: ${v.agent!.name}; FUKU_API_KEY is an agent key for it only`]);
+      out(`  ${path.relative(repoRoot, envFile)} updated (previous copy: ${path.relative(repoRoot, backup)})`);
+    }
+    out("Restart the MCP client (Claude Desktop / Claude Code) so the server reads the new key.");
+    return;
+  }
+
   const local = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/.test(rpc);
   if (!local && !args.includes("--allow-testnet")) fail(`${rpc} is not a local node; pass --allow-testnet to send transactions there.`);
   const avaKey = key("DEMO_OWNER_PRIVATE_KEY") ?? fail("DEMO_OWNER_PRIVATE_KEY is not set: Ava's wallet opens the mandate and owns the ERC-8004 agent.");
   const ava = privateKeyToAccount(avaKey);
   const relayerKey = key("DEPLOYER_PRIVATE_KEY");
   const relayer = relayerKey ? privateKeyToAccount(relayerKey).address : null;
-  assertIgnored(envFile);
 
-  const { Fuku } = await import("../../sdk/src/index");
   const { db } = await import("../src/lib/db");
   const { DEMO_IDENTITY_ID, keepAgentAcrossDemoResets } = await import("../src/lib/demo-seed");
   const { CleanverseATokenSimAbi, FukuSpendGuardAbi } = await import("../src/lib/chain/abi");
@@ -119,7 +178,6 @@ async function main() {
   const chainId = await pub.getChainId();
   const chain = { id: chainId, name: "fuku", nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 }, rpcUrls: { default: { http: [rpc] } } } as const;
   const avaWallet = createWalletClient({ account: ava, chain, transport: http(rpc) });
-  const fuku = new Fuku({ apiKey, baseUrl });
   const nusantara = DEMO_RECIPIENTS.find((r) => r.label === "nusantara")!;
 
   const balances = async () => ({
@@ -165,7 +223,7 @@ async function main() {
     agentId = agent.id;
     noteReceipt("registerAgent", receipt);
     // Saved before anything else happens, so the key is never lost.
-    writeEnvFile(envFile, { FUKU_BASE_URL: baseUrl, FUKU_API_KEY: apiKey, FUKU_AGENT_ID: agentId, FUKU_AGENT_PRIVATE_KEY: agentPk }, [`Agent: ${NAME}, chain ${chainId}`]);
+    writeEnvFile(envFile, { FUKU_BASE_URL: baseUrl, FUKU_AGENT_ID: agentId, FUKU_AGENT_PRIVATE_KEY: agentPk }, [`Agent: ${NAME}, chain ${chainId}`]);
     out(`  + registered ${NAME} ${agentId}; its key is in ${path.relative(repoRoot, envFile)} only`);
   }
   const agentKey = privateKeyToAccount(agentPk!);
@@ -259,7 +317,11 @@ async function main() {
     }
   }
 
-  // 5. Summary
+  // 5. The MCP server's API key
+  out("\n5. Agent key for the MCP server (an API key for this agent only)");
+  const agentApiKey = await ensureAgentApiKey(fuku, makeClient, agentId!, saved.FUKU_API_KEY);
+
+  // 6. Summary
   const end = await balances();
   const spentAva = start.ava - end.ava;
   const spentRelayer = relayer ? start.relayer - end.relayer : null;
@@ -269,8 +331,8 @@ async function main() {
   const ercId = final.agent?.erc8004?.agentId ?? null;
   writeEnvFile(
     envFile,
-    { FUKU_BASE_URL: baseUrl, FUKU_API_KEY: apiKey, FUKU_AGENT_ID: agentId!, FUKU_AGENT_PRIVATE_KEY: agentPk! },
-    [`Agent: ${NAME}, chain ${chainId}${ercId ? `, ERC-8004 #${ercId}` : ""}; agent key ${agentKey.address}`],
+    { FUKU_BASE_URL: baseUrl, FUKU_API_KEY: agentApiKey, FUKU_AGENT_ID: agentId!, FUKU_AGENT_PRIVATE_KEY: agentPk! },
+    [`Agent: ${NAME}, chain ${chainId}${ercId ? `, ERC-8004 #${ercId}` : ""}; agent key ${agentKey.address}; FUKU_API_KEY is an API key for this agent only`],
   );
 
   out("\nDone.");
@@ -285,7 +347,6 @@ async function main() {
   );
 
   const entry = path.join(repoRoot, "mcp", "dist", "index.js");
-  const shownKey = apiKey === DEMO_API_KEY ? apiKey : "<from mcp/.env>";
   out("\nClaude Desktop (Settings > Developer > Edit Config), inside \"mcpServers\":");
   out(
     JSON.stringify(
@@ -293,7 +354,7 @@ async function main() {
         fuku: {
           command: "node",
           args: [entry],
-          env: { FUKU_BASE_URL: baseUrl, FUKU_API_KEY: shownKey, FUKU_AGENT_ID: agentId, FUKU_AGENT_PRIVATE_KEY: "<from mcp/.env>" },
+          env: { FUKU_BASE_URL: baseUrl, FUKU_API_KEY: "<from mcp/.env>", FUKU_AGENT_ID: agentId, FUKU_AGENT_PRIVATE_KEY: "<from mcp/.env>" },
         },
       },
       null,
@@ -302,7 +363,7 @@ async function main() {
   );
   out(
     envFile === path.join(repoRoot, "mcp", ".env")
-      ? "The server also reads mcp/.env itself, so the FUKU_AGENT_PRIVATE_KEY line can be left out."
+      ? "The server also reads mcp/.env itself, so the FUKU_API_KEY and FUKU_AGENT_PRIVATE_KEY lines can be left out."
       : `This configuration is in ${path.relative(repoRoot, envFile)}: point the server at it with FUKU_MCP_ENV_FILE=${envFile}, or copy the values.`,
   );
   out("\nClaude Code:");

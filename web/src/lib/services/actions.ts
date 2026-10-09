@@ -597,9 +597,10 @@ export async function executeAction(
 }
 
 /** One action with its lifecycle and evidence, for the caller that may execute for its agent. */
-export async function getActionReceipt(caller: Identity, actionId: string) {
+export async function getActionReceipt(caller: Identity, actionId: string, onlyAgentId?: string) {
   const row = await db.agentAction.findUnique({ where: { id: actionId }, include: { agent: { select: { name: true } } } });
   if (!row) throw new Error("Action not found");
+  if (onlyAgentId && row.agentId !== onlyAgentId) throw new ForbiddenError(`This agent key is for ${onlyAgentId}; the action belongs to another agent.`, "agent_key_other_agent");
   const actor = await canActFor(caller.id, row.identityId, "agents:execute");
   if (!actor.ok) throw new ForbiddenError("Not authorized to read this action.");
   return {

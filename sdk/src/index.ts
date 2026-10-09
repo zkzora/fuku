@@ -7,15 +7,19 @@
  *   checkPermission() (preview: nothing recorded, reserved or signed) · executeAction() (full workflow)
  *   getAction() (lifecycle and evidence) · getMandate() (the owner's on-chain mandate)
  *   verifyScore() (recompute the trust score from the chain, commit-reveal)
+ * Keys:
+ *   keyInfo() · createAgentKey() · listAgentKeys() · revokeAgentKey() (API keys bound to one agent)
  *
  * 0.4.0: agent-signed execution. An agent that holds its own key signs each executeAction with it
  * (`{ signer }`); Fuku refuses unsigned API executions for such agents. See README.md.
+ * 0.5.0: agent keys. Software that runs an agent gets a key bound to that agent and a few scopes,
+ * not the owner's key.
  *
  * Works in Node 18+, browsers and edge runtimes (uses global fetch).
  */
 
 export interface FukuOptions {
-  /** API key from the Fuku Developer Console (fk_live_…). */
+  /** API key: an owner key from the Developer Console (fk_live_…) or an agent key (fk_agent_…, createAgentKey). */
   apiKey: string;
   /** Base URL of the Fuku deployment, e.g. https://fuku.dev or http://localhost:3001 */
   baseUrl?: string;
@@ -427,6 +431,31 @@ export interface Erc8004Status {
 }
 
 /** Result of mirroring a kill switch on-chain. `ok: false` means the registries did not follow. */
+/** Scopes an agent key can carry (an owner key is not scoped: it acts as the owner everywhere). */
+export type AgentKeyScope = "agent:read" | "agent:check" | "agent:execute" | "agent:actions" | "agents:verify";
+
+/** An API key bound to one agent. The raw key is returned once, by createAgentKey. */
+export interface AgentKey {
+  id: string;
+  name: string;
+  prefix: string;
+  agentId: string;
+  scopes: AgentKeyScope[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** What the key this client presents may do. */
+export interface KeyInfo {
+  /** owner: acts as the owner on every route; agent: only its agent, only its scopes; session: the web app. */
+  kind: "owner" | "agent" | "session";
+  key: { name: string; prefix: string } | null;
+  owner: { id: string; displayName: string };
+  agentId: string | null;
+  scopes: AgentKeyScope[] | null;
+  knownScopes: AgentKeyScope[];
+}
+
 export interface ChainSync {
   ok: boolean;
   receipts: { op: string; txHash: string | null; mode: "live" | "mock"; status: string }[];
@@ -445,6 +474,10 @@ export type FukuErrorCode =
   | "idempotency_in_progress"
   | "idempotency_failed"
   | "chain_write_failed"
+  | "agent_key_forbidden"
+  | "agent_key_scope"
+  | "agent_key_other_agent"
+  | "agent_key_owner_mismatch"
   | "internal"
   | string;
 
@@ -679,6 +712,31 @@ export class Fuku {
    */
   verifyScore(agentId: string) {
     return this.request<ScoreVerification>("GET", `/agents/${encodeURIComponent(agentId)}/verify-score`);
+  }
+
+  /** What this client's key may do: an owner key, or an agent key with its agent and scopes. */
+  keyInfo() {
+    return this.request<KeyInfo>("GET", "/key");
+  }
+
+  /**
+   * Mint an agent key: an API key that acts only as this agent, only with `scopes` (default
+   * agent:read, agent:check, agent:execute, agent:actions). It can never change the passport, manage
+   * agents or identities, or reach other agents. Give it to the software that runs the agent (the Fuku
+   * MCP server) instead of your own key. Owner only; the raw key is returned once.
+   */
+  createAgentKey(agentId: string, input: { name: string; scopes?: AgentKeyScope[] }) {
+    return this.request<{ key: AgentKey; raw: string }>("POST", `/agents/${encodeURIComponent(agentId)}/keys`, input);
+  }
+
+  /** The agent keys bound to this agent (owner only). */
+  listAgentKeys(agentId: string) {
+    return this.request<{ keys: AgentKey[] }>("GET", `/agents/${encodeURIComponent(agentId)}/keys`);
+  }
+
+  /** Revoke an agent key; it stops working on the next request (owner only). */
+  revokeAgentKey(agentId: string, keyId: string) {
+    return this.request<{ ok: true }>("DELETE", `/agents/${encodeURIComponent(agentId)}/keys/${encodeURIComponent(keyId)}`);
   }
 }
 

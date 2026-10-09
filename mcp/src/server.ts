@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { Fuku, FukuError, type AgentSigner, type Verification } from "@fuku/sdk";
+import { Fuku, FukuError, type AgentSigner, type KeyInfo, type Verification } from "@fuku/sdk";
 import type { Config } from "./config.js";
 import { actionText, checkText, executeText, mandateLines, passportLines, scoreText, verifyText } from "./format.js";
 
@@ -8,7 +8,47 @@ export const SERVER_NAME = "fuku";
 export const SERVER_VERSION = "0.1.0";
 
 /** The @fuku/sdk calls this server makes (a real Fuku client, or a fake in tests). */
-export type FukuClient = Pick<Fuku, "verifyAgent" | "getMandate" | "checkPermission" | "executeAction" | "getAction" | "verifyScore">;
+export type FukuClient = Pick<Fuku, "keyInfo" | "verifyAgent" | "getMandate" | "checkPermission" | "executeAction" | "getAction" | "verifyScore">;
+
+/** The configured API key is not one this server will act with (see keyStatus). */
+export class KeyPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KeyPolicyError";
+  }
+}
+
+export interface KeyStatus {
+  kind: KeyInfo["kind"];
+  scopes: KeyInfo["scopes"];
+  /** Shown by fuku_whoami when the server runs with more authority than it needs. */
+  warning: string | null;
+}
+
+/**
+ * The server acts with an agent key bound to FUKU_AGENT_ID (lib/services/api-keys.ts in the app): it
+ * reads, checks and executes for that agent only, and can never change the passport, manage agents or
+ * reach other owners. A full owner key is refused unless FUKU_MCP_ALLOW_OWNER_KEY=1.
+ */
+export async function keyStatus(config: Config, client: Pick<FukuClient, "keyInfo">): Promise<KeyStatus> {
+  const info = await client.keyInfo();
+  if (info.kind === "agent") {
+    if (info.agentId !== config.agentId) {
+      throw new KeyPolicyError(`FUKU_API_KEY is an agent key for ${info.agentId}, not for FUKU_AGENT_ID ${config.agentId}. Run npm run mcp:setup for this agent.`);
+    }
+    return { kind: "agent", scopes: info.scopes, warning: null };
+  }
+  if (!config.allowOwnerKey) {
+    throw new KeyPolicyError(
+      `FUKU_API_KEY is ${info.owner.displayName}'s full owner key: it could change passports, manage agents and act for every agent of that owner. This server runs with an agent key bound to ${config.agentId} instead: run npm run mcp:setup (it mints one into mcp/.env), or the owner creates one with fuku.createAgentKey(). To accept an owner key anyway, set FUKU_MCP_ALLOW_OWNER_KEY=1.`,
+    );
+  }
+  return {
+    kind: info.kind,
+    scopes: null,
+    warning: `Running with ${info.owner.displayName}'s full owner key (FUKU_MCP_ALLOW_OWNER_KEY=1): more authority than this agent needs. Replace it with an agent key (npm run mcp:setup).`,
+  };
+}
 
 export interface ServerDeps {
   config: Config;
@@ -43,11 +83,17 @@ export function describeError(err: unknown, config: Config): string {
   if (err instanceof FukuError) {
     const hint =
       err.code === "unauthorized"
-        ? "FUKU_API_KEY was refused: create a key in the Fuku Developer Console and put it in the MCP config."
+        ? "FUKU_API_KEY was refused (wrong or revoked): run npm run mcp:setup to mint a new agent key into mcp/.env."
+        : err.code === "agent_key_other_agent"
+          ? `This agent key covers ${config.agentId} only. Verifying other agents needs the agents:verify scope, which the owner grants when minting the key.`
+          : err.code === "agent_key_scope"
+            ? "This agent key lacks the scope for that call: the owner mints a key with it (createAgentKey with scopes)."
+            : String(err.code).startsWith("agent_key")
+              ? "Agent keys cannot use that endpoint: it is for the owner, in the Fuku app."
         : String(err.code).startsWith("agent_signature")
           ? "FUKU_AGENT_PRIVATE_KEY is not the key Fuku has for this agent, or this machine's clock is off by more than 5 minutes."
           : err.code === "forbidden"
-            ? "This API key may not act for the agent: use the owner's key, or have the owner grant an agents:execute delegation."
+            ? "This API key may not act for the agent: the owner mints an agent key for it (npm run mcp:setup)."
             : err.code === "not_found"
               ? `Not found: check FUKU_AGENT_ID (${config.agentId}).`
               : err.code === "rate_limited"
@@ -59,6 +105,7 @@ export function describeError(err: unknown, config: Config): string {
                     : null;
     return `Fuku API error ${err.status} (${err.code}): ${err.message}${hint ? `\n${hint}` : ""}`;
   }
+  if (err instanceof KeyPolicyError) return `Refused to act: ${err.message}`;
   const message = err instanceof Error ? err.message : String(err);
   const cause = err instanceof Error && err.cause instanceof Error ? err.cause.message : "";
   if (/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(`${message} ${cause}`)) {
@@ -117,6 +164,21 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions: INSTRUCTIONS });
   const agentId = config.agentId;
 
+  // The key is checked before the first call that uses it, and again after a failed check.
+  let keyCheck: Promise<KeyStatus> | null = null;
+  const requireKey = () => {
+    keyCheck ??= keyStatus(config, client).catch((err: unknown) => {
+      keyCheck = null;
+      throw err;
+    });
+    return keyCheck;
+  };
+  const tool = (run: () => Promise<ToolResult>) =>
+    guarded(config, async () => {
+      await requireKey();
+      return run();
+    });
+
   const whoamiData = async () => {
     const v = await client.verifyAgent(agentId);
     if (!v.agent) throw new FukuError(404, v.error ?? "Agent not found", v, "not_found");
@@ -133,8 +195,9 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     () =>
-      guarded(config, async () => {
+      tool(async () => {
         const { v, m } = await whoamiData();
+        const key = await requireKey();
         const execute = executeStatus(v, signer);
         const lines = [
           `You are ${v.agent!.name} (${v.agent!.id})${v.agent!.erc8004 ? `, ERC-8004 agent #${v.agent!.erc8004.agentId} (chain ${v.agent!.erc8004.chainId ?? "?"})` : ", not registered on ERC-8004"}. Status: ${v.agent!.status}.`,
@@ -143,6 +206,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
           ...("error" in m ? [`Mandate: could not be read (${m.error}).`] : mandateLines(m)),
           `Trust score: ${v.trust?.score ?? "?"} (${v.trust?.level ?? "?"}).`,
           `Execute: ${execute.enabled ? "enabled" : "disabled"}. ${execute.reason}`,
+          key.kind === "agent" ? `API key: an agent key for this agent only (${key.scopes?.join(", ") || "no scopes"}).` : `API key: ${key.warning}`,
           "Before moving value, call fuku_check_permission. A BLOCKED decision is final: report the rule and the reason.",
         ];
         return ok(lines.join("\n"), {
@@ -153,6 +217,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
           trust: v.trust ?? null,
           verified: v.verified,
           execute,
+          apiKey: key,
           chain: v.chain ?? null,
         });
       }),
@@ -168,7 +233,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     (input) =>
-      guarded(config, async () => {
+      tool(async () => {
         const c = await client.checkPermission(agentId, toRequest(input));
         return ok(checkText(c), { ...c });
       }),
@@ -193,7 +258,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       },
       (input) =>
-        guarded(config, async () => {
+        tool(async () => {
           const idempotencyKey = input.idempotencyKey ?? Fuku.newIdempotencyKey();
           const r = await client.executeAction(agentId, toRequest(input), { idempotencyKey, signer });
           return ok(executeText(r), {
@@ -236,7 +301,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     ({ actionId }) =>
-      guarded(config, async () => {
+      tool(async () => {
         const a = await client.getAction(actionId);
         return ok(actionText(a), { ...a });
       }),
@@ -252,7 +317,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     ({ agentId: other }) =>
-      guarded(config, async () => {
+      tool(async () => {
         const v = await client.verifyAgent(other || agentId);
         if (!v.agent) throw new FukuError(404, v.error ?? "Agent not found", v, "not_found");
         return ok(verifyText(v), { ...v });
@@ -268,7 +333,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     () =>
-      guarded(config, async () => {
+      tool(async () => {
         const s = await client.verifyScore(agentId);
         return ok(scoreText(s), { ...s });
       }),
@@ -279,6 +344,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
     "fuku://agent/passport",
     { title: "This agent's permission passport", description: "The passport the owner approved for this agent, as JSON.", mimeType: "application/json" },
     async (uri) => {
+      await requireKey();
       const v = await client.verifyAgent(agentId);
       const body = { agentId, name: v.agent?.name ?? null, owner: v.owner?.displayName ?? null, passport: v.passport ?? null };
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(body, null, 2) }] };

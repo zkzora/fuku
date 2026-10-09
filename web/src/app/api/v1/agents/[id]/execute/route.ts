@@ -47,4 +47,4 @@ export const POST = withApiKey<P>(async (req, identity, { id }) => {
     agentRequest: { body: raw, signature: req.headers.get(AGENT_SIGNATURE_HEADER), issuedAt: req.headers.get(AGENT_ISSUED_AT_HEADER) },
   });
   return json(result, { status: httpStatusOf(result) });
-});
+}, { agentKey: { scope: "agent:execute", agentParam: "id" } });

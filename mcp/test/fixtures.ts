@@ -1,5 +1,5 @@
 /** Shared fixtures: a fake @fuku/sdk client with the MCP Assistant's data. */
-import type { ActionReceipt, ActionResult, PermissionCheck, ScoreVerification, Verification } from "@fuku/sdk";
+import type { ActionReceipt, ActionResult, KeyInfo, PermissionCheck, ScoreVerification, Verification } from "@fuku/sdk";
 import type { FukuClient } from "../src/server.js";
 
 export const AGENT_ID = "fuku:agent:0x00000000000000000000000000000000000000a1";
@@ -92,6 +92,18 @@ export const scoreVerification: ScoreVerification = {
   notes: [],
 };
 
+/** The key an MCP server should run with: an agent key for AGENT_ID. */
+export const agentKeyInfo = (agentId = AGENT_ID): KeyInfo => ({
+  kind: "agent",
+  key: { name: "MCP server", prefix: "fk_agent_abcde" },
+  owner: { id: "fuku:id:0x1", displayName: "Ava Chen" },
+  agentId,
+  scopes: ["agent:read", "agent:check", "agent:execute", "agent:actions"],
+  knownScopes: ["agent:read", "agent:check", "agent:execute", "agent:actions", "agents:verify"],
+});
+
+export const ownerKeyInfo: KeyInfo = { ...agentKeyInfo(), kind: "owner", key: { name: "Demo key", prefix: "fk_live_demo" }, agentId: null, scopes: null };
+
 export interface Calls {
   execute: { agentId: string; request: unknown; opts: { idempotencyKey?: string; signer?: unknown } }[];
   check: unknown[];
@@ -100,6 +112,7 @@ export interface Calls {
 /** A fake Fuku client; override any method per test. */
 export function fakeClient(agentKey: string | null, over: Partial<FukuClient> = {}, calls: Calls = { execute: [], check: [] }): FukuClient {
   return {
+    keyInfo: async () => agentKeyInfo(),
     verifyAgent: async () => verification(agentKey),
     getMandate: async () => ({
       mandate: { guard: "0xguard", wallet: "0xava", token: "0xatoken", dailyCapUsdc: 100, maxPerTxUsdc: 50, validUntil: null, restrictPayees: true, version: 1, spentTodayUsdc: 30, active: true },

@@ -106,6 +106,11 @@ Get an API key from the Developer Console in the Fuku app. The seeded demo key i
 
 ## Changes
 
+### 0.5.0
+
+- Agent keys: `createAgentKey(agentId, { name, scopes? })`, `listAgentKeys()`, `revokeAgentKey()`. An agent key (`fk_agent_…`) acts only as its agent, only with its scopes (`agent:read`, `agent:check`, `agent:execute`, `agent:actions`; `agents:verify` for other agents' public verification, opt-in). Every other route answers 403 with a `code` starting `agent_key_`. Give it to the software that runs the agent instead of the owner's key.
+- `keyInfo()`: whether the client's key is an owner key or an agent key, and for which agent and scopes.
+
 ### 0.4.0
 
 - `executeAction(…, { signer })` signs the request with the agent's own key. Fuku requires it for agents that hold their own key: unsigned executions for them are refused with 401 (breaking for such agents).

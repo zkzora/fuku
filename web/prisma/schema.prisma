@@ -120,6 +120,7 @@ model Agent {
   actions          AgentAction[]
   reputationEvents ReputationEvent[]
   budgetWindows    BudgetWindow[]
+  apiKeys          ApiKey[]
 }
 
 model Policy {
@@ -299,15 +300,21 @@ model Credential {
   identity   Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
 }
 
+/** An API key. Without `agentId` it acts as its identity (the owner) on every v1 route. With
+ *  `agentId` it is an agent key (lib/services/api-keys.ts): only that agent, only the listed
+ *  `scopes`, only on routes that opt in; never passport, agent, identity or vault management. */
 model ApiKey {
   id         String    @id @default(cuid())
   identityId String
   name       String
   prefix     String
   keyHash    String
+  agentId    String?                    // set: an agent key, bound to this agent of identityId
+  scopes     String?                    // agent keys: JSON AgentKeyScope[]
   createdAt  DateTime  @default(now())
   lastUsedAt DateTime?
   identity   Identity  @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  agent      Agent?    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 }
 
 /** Every A-Pass (CVI) read, from the Cleanverse API or the Fuku simulator. The UI and the trust

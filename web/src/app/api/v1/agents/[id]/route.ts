@@ -132,4 +132,4 @@ export const GET = withApiKey<P>(async (_req, caller, { id }) => {
     trust: { score: score.score, level: score.level, scoringVersion: score.scoringVersion, uncertainty: score.uncertainty },
     chain: live ? "live" : "mock",
   });
-});
+}, { agentKey: { scope: "agent:read", agentParam: "id", otherAgents: "agents:verify" } });

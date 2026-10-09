@@ -38,4 +38,4 @@ export const POST = withApiKey<P>(async (req, caller, { id }) => {
     subCode: evaluation.subCode ?? null,
     compliance: view && !privileged ? { ...view, evidence: null } : view,
   });
-});
+}, { agentKey: { scope: "agent:check", agentParam: "id" } });

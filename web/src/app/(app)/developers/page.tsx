@@ -13,7 +13,7 @@ import { fmtDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface Keys {
-  keys: { id: string; name: string; prefix: string; createdAt: string; lastUsedAt: string | null }[];
+  keys: { id: string; name: string; prefix: string; createdAt: string; lastUsedAt: string | null; agent: { id: string; name: string } | null; scopes: string[] | null }[];
 }
 interface Integrations {
   integrations: IntegrationStatus[];
@@ -112,6 +112,9 @@ export default function DevelopersPage() {
                   <div className="text-[12px] text-ink-3">
                     <Mono>{k.prefix}…</Mono> · created {fmtDate(k.createdAt)}
                     {k.lastUsedAt ? ` · last used ${fmtDate(k.lastUsedAt)}` : " · never used"}
+                  </div>
+                  <div className="text-[12px] text-ink-3">
+                    {k.agent ? `Agent key: ${k.agent.name} only (${k.scopes?.join(", ") || "no scopes"})` : "Owner key: acts as you on every API route"}
                   </div>
                 </div>
                 <button onClick={() => deleteKey(k.id)} className="rounded-lg p-2 text-ink-3 hover:bg-block-soft hover:text-block" aria-label="Revoke">

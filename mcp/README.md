@@ -38,31 +38,45 @@ A BLOCKED decision is a normal result (`isError: false`). `isError: true` is res
    - the agent is registered with that key as its agent key. On Monad testnet it is also registered on the canonical ERC-8004 Identity Registry, with the key as its `agentWallet`;
    - its passport allows `transfer` up to 100 aUSDC a day and `read_balances`. `withdraw` and `change_owner` are blocked;
    - Ava's wallet opens its mandate: 100 a day, at most 50 per transfer, and Nusantara Supplies as the only payee;
-   - a demo reset keeps this agent. It is separate from the demo cohort, so rehearsing with it never changes the pitch agents' scores.
+   - a demo reset keeps this agent. It is separate from the demo cohort, so rehearsing with it never changes the pitch agents' scores;
+   - an **agent key** for the server (`fk_agent_…`): an API key that acts only as this agent. It goes into `mcp/.env` as `FUKU_API_KEY`; the owner's key is never written there.
 
-   Running it again only fills in what is missing. `-- --fresh` registers a brand-new agent and keeps the old `mcp/.env` as a backup.
+   Running it again only fills in what is missing. `-- --fresh` registers a brand-new agent and keeps the old `mcp/.env` as a backup. `-- --key-only` only issues a new agent key for the agent `mcp/.env` names (and revokes the earlier one): no chain access, no transaction.
 
    The script refuses any RPC except a local node unless you pass `-- --allow-testnet`. On Monad testnet the setup sends six transactions, 0.121 MON on 2026-10-01:
    - from the relayer, `registerAgent` and `setPolicy`;
    - from Ava's wallet, `openMandate`, `setPayee`, and the ERC-8004 `register` and `setAgentWallet`.
-4. Point your MCP client at `mcp/dist/index.js` (see below). The script prints the configuration, with the private key only as a placeholder.
+4. Point your MCP client at `mcp/dist/index.js` (see below). The script prints the configuration, with the keys only as placeholders.
 
 ## Configuration
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `FUKU_BASE_URL` | yes | The Fuku app, e.g. `http://localhost:3001` |
-| `FUKU_API_KEY` | yes | The owner's API key (`fk_live_…`). The demo key `fk_live_demo_ava_chen_2026` acts for Ava |
+| `FUKU_API_KEY` | yes | An agent key for `FUKU_AGENT_ID` (`fk_agent_…`), written by `mcp:setup`. An owner key (`fk_live_…`) is refused |
 | `FUKU_AGENT_ID` | yes | The Fuku agent this assistant acts as (`fuku:agent:0x…`) |
 | `FUKU_AGENT_PRIVATE_KEY` | no | The agent's own key, which `mcp:setup` generated. Without it the server is read-only |
 | `FUKU_MCP_ENV_FILE` | no | Read this file instead of `mcp/.env` |
+| `FUKU_MCP_ALLOW_OWNER_KEY` | no | `1` accepts a full owner key anyway; `fuku_whoami` then warns. Off by default |
 
 How the variables are read:
 - The server reads `mcp/.env` itself. Anything set in the client's `env` block takes precedence.
 - The configuration is checked at startup. A bad value stops the server with a message on stderr, and a key is never shown in that message.
 - Without `FUKU_AGENT_PRIVATE_KEY` the server is **read-only**: `fuku_execute_action` is not offered, and `fuku_whoami` says why.
 
-Fuku's API keys carry the full rights of their identity; there are no per-key scopes. A third-party application would use its own key together with an `agents:execute` delegation from the owner (see [`sdk/README.md`](../sdk/README.md)).
+### What the server's API key can do
+
+`FUKU_API_KEY` is an agent key: bound to one agent, with scopes. Before its first call the server asks Fuku what the key is (`GET /api/v1/key`) and refuses to act if it is an owner key, or an agent key for another agent.
+
+| The agent key can | Fuku answers 403 to |
+| --- | --- |
+| read its own agent: verification, trust score, mandate, score check (`agent:read`) | passport changes and revocation |
+| dry-run its own actions (`agent:check`) | registering, listing or managing agents; ERC-8004 setup; records |
+| execute its own actions (`agent:execute`), still signed with the agent's own key | identities, wallet binding, owner actions, delegations |
+| read its own actions' receipts (`agent:actions`) | minting or revoking keys; travel-rule records |
+| | any other agent, of the same owner or another (`agents:verify` adds other agents' public verification; not granted by default) |
+
+The vault and the rest of the web app take a session cookie, never an API key. The owner revokes the key in the Developer Console (it is listed as "Agent key: MCP Assistant only"), with `fuku.revokeAgentKey()`, or by running `npm run mcp:setup -- --key-only` for a new one.
 
 ## Claude Desktop
 
@@ -82,7 +96,7 @@ Windows:
       "args": ["C:\\Fuku\\mcp\\dist\\index.js"],
       "env": {
         "FUKU_BASE_URL": "http://localhost:3001",
-        "FUKU_API_KEY": "fk_live_demo_ava_chen_2026",
+        "FUKU_API_KEY": "<from mcp/.env>",
         "FUKU_AGENT_ID": "fuku:agent:0x…",
         "FUKU_AGENT_PRIVATE_KEY": "<from mcp/.env>"
       }
@@ -101,7 +115,6 @@ macOS:
       "args": ["/Users/you/Fuku/mcp/dist/index.js"],
       "env": {
         "FUKU_BASE_URL": "http://localhost:3001",
-        "FUKU_API_KEY": "fk_live_demo_ava_chen_2026",
         "FUKU_AGENT_ID": "fuku:agent:0x…"
       }
     }
@@ -111,7 +124,7 @@ macOS:
 
 Fill in the values:
 - `FUKU_AGENT_ID` is what `mcp:setup` printed.
-- For `FUKU_AGENT_PRIVATE_KEY`, copy the value from `mcp/.env`, or leave the line out. The macOS example leaves it out, because the server reads it from `mcp/.env`.
+- For `FUKU_API_KEY` and `FUKU_AGENT_PRIVATE_KEY`, copy the values from `mcp/.env`, or leave the lines out. The macOS example leaves them out, because the server reads them from `mcp/.env`.
 
 Then quit Claude Desktop completely and start it again. To check that the server loaded, open the **+** menu ("Add files, connectors, and more") at the bottom left of the message box, go to **Connectors → Manage connectors**, and select **fuku** to see its tools.
 
@@ -173,4 +186,4 @@ claude mcp add --env FUKU_BASE_URL=http://localhost:3001 --env FUKU_AGENT_ID=fuk
 
 The agent key lives on your machine, in `mcp/.env` or the client's configuration. Fuku only ever has its address. For an agent that holds its own key, Fuku accepts an execution over the API only when the request is signed with that key.
 
-The owner's API key sits on the same machine, and the passport and the on-chain mandate are what bound the assistant. [`docs/SECURITY.md`](../docs/SECURITY.md) section 11 says what this does and does not protect.
+The server's API key is an agent key: it cannot change the passport, manage agents or reach other agents, so the passport and the on-chain mandate bound the assistant even if that machine is compromised. The owner's key never needs to be on it. [`docs/SECURITY.md`](../docs/SECURITY.md) section 11 says what this does and does not protect.

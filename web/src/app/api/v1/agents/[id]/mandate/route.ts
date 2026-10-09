@@ -29,4 +29,4 @@ export const GET = withApiKey<P>(async (_req, caller, { id }) => {
   if (!wallet) return json({ mandate: null, wallet: null, reason: "no-verified-wallet", ...target });
   const [mandate, payees] = await Promise.all([readMandate(agent.id, wallet), mandatePayees(agent.id, wallet)]);
   return json({ mandate, wallet, reason: null, ...target, payees: payees?.payees ?? null, payeesSource: payees?.source ?? null });
-});
+}, { agentKey: { scope: "agent:read", agentParam: "id" } });
