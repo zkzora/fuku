@@ -87,7 +87,8 @@ nothing here counts as passed until then.
 
 ### Before you start
 
-1. The app runs on 3001 against Monad testnet, in its own window (`cd web && npm run dev -- -p 3001`).
+1. The app runs on 3001 against Monad testnet, in its own window, bound to this machine only
+   (`cd web && npm run dev -- -p 3001 -H 127.0.0.1`; section 5 says why).
 2. `npm run demo:preflight` is green (section 4).
 3. `npm run mcp:build`, then `npm run mcp:setup -- --key-only` once (section 1: it replaces the owner
    key in `mcp/.env` with an agent key; no transaction).
@@ -164,7 +165,7 @@ does not retry; the preflight spaces its requests to about 9 a second and retrie
    Stop the app, back up the database, push the schema, start the app:
    `cd web && cp prisma/dev.db prisma/dev.db.bak-20261009 && npx prisma db push`.
    Tried on a copy of `dev.db`: the error before, none after, and the same row counts in every table.
-2. Start the app on 3001 in its own window.
+2. Start the app on 3001 in its own window: `cd web && npm run dev -- -p 3001 -H 127.0.0.1`.
 3. `npm run mcp:setup -- --key-only` (section 1). No transaction.
 4. `npm run demo:preflight` until it prints READY (warnings are fine).
 5. Open `/api/auth/demo?reset=1` once (it removes rehearsal agents such as the CRE probe).
@@ -186,3 +187,15 @@ once per cohort, and rotate the cohort to present again.
 
 The MCP Assistant is kept across resets with its history, score and agent key. Its daily budget
 (100 aUSDC-SIM in the mandate and in the passport) refills at 00:00 UTC; a reset does not refill it.
+
+## 5. Dependencies
+
+Triage of `npm audit` by reachability is in [`SECURITY.md`](SECURITY.md) section 12 (2026-10-09:
+root 28 findings, `contracts/` 8 low, CRE none). Nothing was upgraded.
+
+For the demo: the only finding reachable as the demo runs today is the Next.js dev server's MCP
+endpoint (`/_next/mcp`, information disclosure), because `next dev` listens on every interface.
+Start the app with `-H 127.0.0.1`. The critical `next/og` RCE is not reachable (Fuku does not use
+`next/og`). Proposed for approval: `next` 16.3.5 → 16.3.8, and a non-forced `npm audit fix` with a
+Dynamic sign-in retest after the demo. Never `npm audit fix --force` (it downgrades Prisma and the
+lint config across majors).

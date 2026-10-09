@@ -335,3 +335,48 @@ Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON
 - The signature is checked by Fuku's API, not on-chain. FukuSpendGuard checks the compliance signer's attestation and the owner's mandate. Fuku's server still decides and anchors, with the trust assumptions in sections 6 and 7.
 - A signed request that someone captures can be replayed within its 5 minutes. A replay returns the stored result of the same idempotency key and never executes twice.
 - To cut an assistant off, revoke the agent's passport (the kill switch, section 6). Or give the agent a new key with `setErc8004AgentKey`; the old key is then refused.
+
+## 12. Dependency audit triage (2026-10-09)
+
+`npm audit` at the root (web, sdk, mcp): 28 findings, 1 critical, 15 high, 12 moderate. `contracts/`:
+8 low. `cre/fuku-guard` (`bun audit`): none in 37 packages. Each is triaged by whether an attacker can
+reach the vulnerable code in what Fuku runs. Nothing was upgraded: the fixes below wait for approval.
+
+**Runtime, server: the Next.js app (`next` 16.3.5, pinned).** Every advisory is fixed in 16.3.8.
+
+| Advisory | Reachable in Fuku? |
+| --- | --- |
+| RCE in `next/og` `ImageResponse` (critical, GHSA-vcvr-r3jv-pc5j) | No: nothing imports `next/og`, and the only metadata image is a static `icon.png` |
+| Draft Mode content leak through `use cache` (GHSA-3w37-wq28-93x7) | No: no `"use cache"`, no `draftMode` |
+| Metadata image routes, `dynamicParams` bypass (GHSA-f87g-xv8r-7p7x) | No: no dynamic metadata image routes |
+| SSRF in Image Optimization (high, GHSA-cjq9-62q9-8jv4) | The `/_next/image` endpoint exists on every Next server; Fuku configures no remote patterns and uses `next/image` for one local file. Not reachable on a localhost demo; assume reachable if the app is hosted publicly |
+| SSG/ISR cache poisoning (GHSA-4jqv-mc3x-m676, GHSA-mcj8-r9mp-w47p) | The app shell is `force-dynamic`; the landing and sign-in pages are static. Matters only behind a shared cache on a public host |
+| Dev server MCP endpoint information disclosure (low, GHSA-39w2-rjm5-chcv) | **Yes, for the demo as run today.** The demo uses `next dev`, which listens on `0.0.0.0`; `POST /_next/mcp` answered `tools/list` (`get_logs`, `get_routes`, `get_project_metadata`, …) on the local stack. Anyone on the same network can call it. Mitigation now: `npm run dev -- -p 3001 -H 127.0.0.1` |
+
+`sharp` 0.35.4 (high, librsvg CVE-2026-96889) is reached only through Image Optimization, which
+refuses SVG input by default and only sees Fuku's local image: not reachable.
+
+**Runtime, browser: Dynamic sign-in (sandbox).** `axios` (via `@dynamic-labs-wallet/core` and
+`@coinbase/cdp-sdk`), `uuid` and the `@metamask/*` packages above it. Most axios advisories concern
+the Node HTTP adapter, HTTP/2 and proxies, which do not exist in a browser; the prototype-pollution
+gadgets need a separate pollution bug to be useful. `uuid` matters only when a caller passes `buf`.
+`http-cache-semantics` arrives through `ably` → `got`, which is Node-only and unused in the browser
+bundle. Low. The fix is Dynamic's SDK 1.34.1 → 1.39.0 (not a major), which changes the sign-in path that
+has never been run end to end (`docs/DEMO-READINESS.md` section 2, step I2: the Dynamic OTP needs a real inbox).
+
+**Build and developer tooling only:** `source-map-js` (our own CSS through PostCSS/Tailwind), `shadcn`,
+`eslint-config-next` / `@next/eslint-plugin-next`, `fast-glob` / `micromatch` / `braces`, `ts-morph`,
+and the Prisma CLI (`@prisma/config` → `deepmerge-ts`; `@prisma/client` is not affected). Their inputs
+are the repository's own files; not shipped to users. In `contracts/`, `elliptic` under `@ethersproject`
+comes with `hardhat-verify`; Fuku's keys sign with viem (noble), never with elliptic.
+
+**Do not run `npm audit fix --force`.** For prisma, eslint-config-next and shadcn it proposes
+"fixes" that are downgrades across majors (prisma 6.12.0, eslint-config-next 14.2.35, shadcn 1.0.0).
+
+**Proposed, not applied (each needs a go-ahead):**
+1. `next` 16.3.5 → 16.3.8 (a patch; every listed range ends below it), then the full tests, a build,
+   the local stack's MCP integration and owner-path checks, and the preflight.
+2. `npm audit fix` without `--force` (dry run: 48 package changes, among them sharp 0.35.5,
+   source-map-js 1.2.2, http-cache-semantics 4.3.0 and Dynamic's SDK 1.39.0), with a Dynamic sign-in
+   retest, after the demo.
+3. For the demo, with no code change: run the dev server bound to `127.0.0.1`.
