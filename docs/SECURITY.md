@@ -341,7 +341,8 @@ Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON
 
 `npm audit` at the root (web, sdk, mcp): 28 findings, 1 critical, 15 high, 12 moderate. `contracts/`:
 8 low. `cre/fuku-guard` (`bun audit`): none in 37 packages. Each is triaged by whether an attacker can
-reach the vulnerable code in what Fuku runs. Nothing was upgraded: the fixes below wait for approval.
+reach the vulnerable code in what Fuku runs. Update 2026-10-10: `next` was patched to 16.3.8 (item 1
+below; root 27 findings, no critical); the rest still waits for approval.
 
 **Runtime, server: the Next.js app (`next` 16.3.5, pinned).** Every advisory is fixed in 16.3.8.
 
@@ -375,8 +376,8 @@ comes with `hardhat-verify`; Fuku's keys sign with viem (noble), never with elli
 "fixes" that are downgrades across majors (prisma 6.12.0, eslint-config-next 14.2.35, shadcn 1.0.0).
 
 **Proposed, not applied (each needs a go-ahead):**
-1. `next` 16.3.5 → 16.3.8 (a patch; every listed range ends below it), then the full tests, a build,
-   the local stack's MCP integration and owner-path checks, and the preflight.
+1. **Done 2026-10-10:** `next` 16.3.5 → 16.3.8 (a patch; every listed range ends below it). Tests,
+   typecheck, lint, `next build`, a page and API smoke, and the preflight passed on it.
 2. `npm audit fix` without `--force` (dry run: 48 package changes, among them sharp 0.35.5,
    source-map-js 1.2.2, http-cache-semantics 4.3.0 and Dynamic's SDK 1.39.0), with a Dynamic sign-in
    retest, after the demo.

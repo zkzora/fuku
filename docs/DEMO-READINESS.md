@@ -23,7 +23,7 @@ cannot do is in [`mcp/README.md`](../mcp/README.md#what-the-servers-api-key-can-
 | MCP server refuses an owner key (unless `FUKU_MCP_ALLOW_OWNER_KEY=1`) and an agent key for another agent | Automated, `mcp/test/unit.test.ts` | 20/20 pass, 2026-10-09 |
 | Against a running app on a local Hardhat node: `mcp:setup` mints the key, MCP integration 7/7 (test 7: passport PUT/DELETE, agent registration, key minting and another agent's check answer 403 over HTTP) | Automated, local stack | pass, 2026-10-09 |
 | Same local app: the agent key gets 401 on the vault, memory, delegations and Developer Console key routes; a revoked key gets 401; `mcp:setup -- --key-only` reissues it | Automated (curl), local stack | pass, 2026-10-09 |
-| The testnet MCP Assistant (#1963) still has the owner key in `mcp/.env` | **Owner action** | after the schema update (section 4), run `npm run mcp:setup -- --key-only` with the 3001 app running (no chain access, no transaction), then restart the MCP client |
+| The testnet MCP Assistant (#1963) runs with an agent key | Done 2026-10-10, against the 3001 app on Monad testnet (no transaction) | `mcp:setup -- --key-only` minted `fk_agent_1e701…` (the agent had no key before; now exactly one); `mcp/.env` holds no `fk_live_` key. With it, over HTTP: own verification and mandate 200; passport PUT/DELETE, agent registration, key minting, ERC-8004 403 `agent_key_forbidden`; the Trading Assistant's verification, check, execute and an action of it 403 `agent_key_other_agent`; vault 401; `AgentAction` rows unchanged (32). The real MCP server over stdio: whoami reports the agent key, verifying another agent 403. The previous credential was the demo owner key `fk_live_demo…`, which is published in the README and used by the seed and the SDK examples: it is not revoked (that would break the demo); the MCP server refuses it |
 
 ## 2. The owner-controlled path (no registry redeploy)
 
@@ -81,17 +81,19 @@ Monad testnet's 102 gwei (Monad charges the gas limit; a wallet that pads the li
 ## 3. Claude Desktop, end to end (checklist)
 
 **Status: not run in Claude Desktop.** The same tool sequence passes through the MCP SDK's own client
-over stdio against a local node (`mcp/test/integration.test.ts`, 7/7 on 2026-10-09), which is not the
-same as Claude Desktop choosing the tools from a prompt. Fill in the "Result" column when it is run;
-nothing here counts as passed until then.
+over stdio against a local node (`mcp/test/integration.test.ts`, 7/7 on 2026-10-10), which is not the
+same as Claude Desktop choosing the tools from a prompt. On 2026-10-10 the real MCP server with the real
+`mcp/.env` answered, read-only, against testnet: whoami (agent key, execute enabled), dry run 30
+ALLOWED with the mandate read, dry run 60 BLOCKED R10 `PerTxLimitExceeded(50000000)`, another agent 403.
+That is preparation, not C1 to C8. Fill in the "Result" column when it is run; nothing here counts
+as passed until then.
 
 ### Before you start
 
 1. The app runs on 3001 against Monad testnet, in its own window, bound to this machine only
    (`cd web && npm run dev -- -p 3001 -H 127.0.0.1`; section 5 says why).
-2. `npm run demo:preflight` is green (section 4).
-3. `npm run mcp:build`, then `npm run mcp:setup -- --key-only` once (section 1: it replaces the owner
-   key in `mcp/.env` with an agent key; no transaction).
+2. `npm run demo:preflight` is green (section 4). Done 2026-10-10: READY WITH WARNINGS.
+3. `npm run mcp:build`, then `npm run mcp:setup -- --key-only` once (section 1). Done 2026-10-10.
 4. Claude Desktop is configured as in [`mcp/README.md`](../mcp/README.md#claude-desktop), quit
    completely and restarted. **+ → Connectors → Manage connectors → fuku** lists six tools, including
    `fuku_execute_action`.
@@ -145,7 +147,14 @@ prints the rows as JSON.
 Monad's public RPC allows 15 requests a second and answers bursts with 429 or error -32011, which viem
 does not retry; the preflight spaces its requests to about 9 a second and retries limited ones.
 
-### Results on 2026-10-09
+### Results
+
+- **2026-10-10, Monad testnet, the real `dev.db` (schema pushed), `mcp/.env` with the agent key, the
+  app on 127.0.0.1:3001 (Next 16.3.8)**: **READY WITH WARNINGS, 83 ok, 2 warnings, 0 failures.**
+  Warnings: the Ops Scheduler is paused in Fuku and only registered on-chain (Fuku is the stricter);
+  the MCP Assistant has no score anchored yet (its first executed action anchors one).
+
+Earlier, 2026-10-09:
 
 - **Local stack** (Hardhat node, app on 3002): READY WITH WARNINGS, 77 ok, 1 warning (Ops Scheduler
   is paused in Fuku and only registered on-chain: Fuku is the stricter of the two).
@@ -158,17 +167,20 @@ does not retry; the preflight spaces its requests to about 9 a second and retrie
   Ops Scheduler status above, the MCP Assistant has no score anchored yet (its first action anchors
   one), the app was not running.
 
-### Owner steps before presenting
+### Steps before presenting
 
-1. **Schema update (required once).** Agent keys add two nullable columns to `ApiKey`. Until they
-   exist, every API-key request to the app fails (`The column main.ApiKey.agentId does not exist`).
-   Stop the app, back up the database, push the schema, start the app:
-   `cd web && cp prisma/dev.db prisma/dev.backup-20261009.db && npx prisma db push`.
-   Tried on a copy of `dev.db`: the error before, none after, and the same row counts in every table.
+1. **Schema update (required once). Done 2026-10-10.** Agent keys add two nullable columns to
+   `ApiKey`. Until they exist, every API-key request to the app fails (`The column
+   main.ApiKey.agentId does not exist`). With no app running and no journal file: backup
+   `web/prisma/dev.backup-20261009.db` (same SHA-256 as `dev.db`), `npx prisma db push` (no
+   `--accept-data-loss`; it needed none), then the row count of every table (19 tables, plus API keys,
+   sealed agent keys and anchored decisions) compared before and after: identical. API-key requests
+   work again (owner key 200, agent key as in section 1).
 2. Start the app on 3001 in its own window: `cd web && npm run dev -- -p 3001 -H 127.0.0.1`.
-3. `npm run mcp:setup -- --key-only` (section 1). No transaction.
-4. `npm run demo:preflight` until it prints READY (warnings are fine).
-5. Open `/api/auth/demo?reset=1` once (it removes rehearsal agents such as the CRE probe).
+3. `npm run mcp:setup -- --key-only` (section 1). Done 2026-10-10. Restart Claude Desktop afterwards.
+4. `npm run demo:preflight` until it prints READY (warnings are fine). Done 2026-10-10.
+5. Open `/api/auth/demo?reset=1` once (it removes rehearsal agents such as the CRE probe). Not done:
+   it is the owner's call right before presenting.
 
 ### A demo reset does not reset the chain
 
@@ -191,11 +203,14 @@ The MCP Assistant is kept across resets with its history, score and agent key. I
 ## 5. Dependencies
 
 Triage of `npm audit` by reachability is in [`SECURITY.md`](SECURITY.md) section 12 (2026-10-09:
-root 28 findings, `contracts/` 8 low, CRE none). Nothing was upgraded.
+root 28 findings, `contracts/` 8 low, CRE none).
 
-For the demo: the only finding reachable as the demo runs today is the Next.js dev server's MCP
-endpoint (`/_next/mcp`, information disclosure), because `next dev` listens on every interface.
-Start the app with `-H 127.0.0.1`. The critical `next/og` RCE is not reachable (Fuku does not use
-`next/og`). Proposed for approval: `next` 16.3.5 → 16.3.8, and a non-forced `npm audit fix` with a
-Dynamic sign-in retest after the demo. Never `npm audit fix --force` (it downgrades Prisma and the
-lint config across majors).
+`next` was patched 16.3.5 → 16.3.8 on 2026-10-10 (its own commit; the lockfile changed only `next`,
+`@next/env` and the `@next/swc-*` binaries). After it: root 27 findings, no critical. Tests,
+typecheck, lint, `next build` and a page and API smoke on the 3001 app passed. The Dynamic sign-in
+was not exercised (it needs an interactive OTP): it stays **not run** (I2).
+
+Still: start the app with `-H 127.0.0.1` (the dev server's `/_next/mcp` endpoint still answers on
+16.3.8; bound to loopback it is reachable from this machine only). Proposed, not done: a non-forced
+`npm audit fix` with a Dynamic sign-in retest after the demo. Never `npm audit fix --force` (it
+downgrades Prisma and the lint config across majors).
