@@ -163,7 +163,7 @@ does not retry; the preflight spaces its requests to about 9 a second and retrie
 1. **Schema update (required once).** Agent keys add two nullable columns to `ApiKey`. Until they
    exist, every API-key request to the app fails (`The column main.ApiKey.agentId does not exist`).
    Stop the app, back up the database, push the schema, start the app:
-   `cd web && cp prisma/dev.db prisma/dev.db.bak-20261009 && npx prisma db push`.
+   `cd web && cp prisma/dev.db prisma/dev.backup-20261009.db && npx prisma db push`.
    Tried on a copy of `dev.db`: the error before, none after, and the same row counts in every table.
 2. Start the app on 3001 in its own window: `cd web && npm run dev -- -p 3001 -H 127.0.0.1`.
 3. `npm run mcp:setup -- --key-only` (section 1). No transaction.

@@ -4,6 +4,7 @@ node_modules
 .env.local
 *.db
 *.db-journal
+*.db.bak*
 dist
 artifacts
 cache
