@@ -110,6 +110,7 @@ Get an API key from the Developer Console in the Fuku app. The seeded demo key i
 
 - Agent keys: `createAgentKey(agentId, { name, scopes? })`, `listAgentKeys()`, `revokeAgentKey()`. An agent key (`fk_agent_…`) acts only as its agent, only with its scopes (`agent:read`, `agent:check`, `agent:execute`, `agent:actions`; `agents:verify` for other agents' public verification, opt-in). Every other route answers 403 with a `code` starting `agent_key_`. Give it to the software that runs the agent instead of the owner's key.
 - `keyInfo()`: whether the client's key is an owner key or an agent key, and for which agent and scopes.
+- `checkPermission()` checks the owner's on-chain mandate for an A-Token transfer the passport allows, as execution does before signing: a transfer the guard would refuse is BLOCKED R10 (`GUARD_REJECTED`), and an unreadable mandate is `decision: "UNKNOWN"` (`allowed: false`, subCode `MANDATE_UNAVAILABLE`). The new `mandate` field says what was checked; on a mocked chain it is `not_checked`.
 
 ### 0.4.0
 

@@ -81,9 +81,12 @@ describe("MCP server against a live Fuku (local node)", { skip: !enabled && "set
     token = who.mandate.token as Address;
   });
 
-  it("2. fuku_check_permission: 30 to Nusantara allowed, 30 to an unverified wallet R8, withdraw 4,800 R2", async () => {
-    const ok = data<{ decision: string; ruleId: string }>(await call("fuku_check_permission", { action: "transfer", amount: 30, to: NUSANTARA, asset: "aUSDC" }));
-    assert.deepEqual([ok.decision, ok.ruleId], ["ALLOWED", "R6"]);
+  it("2. fuku_check_permission: 30 to Nusantara allowed (mandate checked), 60 refused by the mandate, 30 to an unverified wallet R8, withdraw 4,800 R2", async () => {
+    const ok = data<{ decision: string; ruleId: string; mandate: { status: string } }>(await call("fuku_check_permission", { action: "transfer", amount: 30, to: NUSANTARA, asset: "aUSDC" }));
+    assert.deepEqual([ok.decision, ok.ruleId, ok.mandate.status], ["ALLOWED", "R6", "ok"]);
+    const over = data<{ decision: string; ruleId: string; subCode: string; reason: string }>(await call("fuku_check_permission", { action: "transfer", amount: 60, to: NUSANTARA, asset: "aUSDC" }));
+    assert.deepEqual([over.decision, over.ruleId, over.subCode], ["BLOCKED", "R10", "GUARD_REJECTED"], over.reason);
+    assert.match(over.reason, /PerTxLimitExceeded\(50000000\)/);
     const r8 = await call("fuku_check_permission", { action: "transfer", amount: 30, to: UNVERIFIED, asset: "aUSDC" });
     assert.equal(r8.isError, false);
     assert.deepEqual([data<{ decision: string }>(r8).decision, data<{ ruleId: string }>(r8).ruleId], ["BLOCKED", "R8"]);

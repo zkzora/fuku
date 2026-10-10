@@ -34,6 +34,7 @@ import {
   PermissionRegistryAbi,
   ReputationRegistryAbi,
 } from "./abi";
+import { evaluateMandate, readMandateState } from "./mandate-check";
 
 /**
  * Monad settlement adapter.
@@ -268,6 +269,11 @@ export function spendGuardAddress(): Address | null {
 }
 
 /** The EIP-712 signer the guard trusts (FUKU_COMPLIANCE_SIGNER_KEY). Never the relayer by default. */
+/** Guarded transfers can run: the guard's address and the compliance signer's key are configured. */
+export function guardReady(): boolean {
+  return Boolean(spendGuardAddress() && complianceSigner());
+}
+
 function complianceSigner(): PrivateKeyAccount | null {
   const raw = process.env.FUKU_COMPLIANCE_SIGNER_KEY?.trim();
   if (!raw) return null;
@@ -1060,6 +1066,11 @@ export async function executeGuardedTransfer(input: GuardedTransferInput): Promi
       ]);
       // Attest only to the passport the database authorized, and only once it is the active one on-chain.
       if (!policyActive || !sameHex(onChainHash, auth.passport.hash)) return { status: "rejected", reason: "AUTHORIZATION_CHANGED(on-chain passport differs)" };
+      // The owner's mandate, checked as the guard checks it (mandate-check.ts, shared with the dry run):
+      // nothing is signed for a transfer the guard would refuse.
+      const request = { agentKey: agentId, from: input.from, to: input.to, token: input.token, amount: input.amount };
+      const verdict = evaluateMandate(await readMandateState(ctx.publicClient, guard, request), request);
+      if (!verdict.ok) return { status: "rejected", reason: verdict.reason };
       // Issued at chain time, strictly after the last bump (the guard allows up to 5 s ahead of block time).
       const floor = agentFloor > walletFloor ? agentFloor : walletFloor;
       const issuedAt = latest.timestamp > floor ? latest.timestamp : floor + BigInt(1);

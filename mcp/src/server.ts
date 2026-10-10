@@ -228,7 +228,7 @@ export function createFukuMcpServer({ config, client, signer }: ServerDeps): Mcp
     {
       title: "Check permission (dry run)",
       description:
-        "Dry run: would this action be allowed right now? Returns ALLOWED or BLOCKED with the rule id and the reason, the daily limit left, and the Cleanverse checks for A-Token transfers. Nothing is recorded, reserved or signed. Always call this before fuku_execute_action for anything that moves value (transfer, swap, withdraw, stake). If it says BLOCKED, do not execute: tell the user the rule and the reason.",
+        "Dry run: would this action be allowed right now? Returns ALLOWED, BLOCKED or UNKNOWN with the rule id and the reason, the daily limit left, and for A-Token transfers the Cleanverse checks and the owner's on-chain mandate (per-transfer limit, payees, daily cap, expiry). UNKNOWN means the mandate could not be read: do not execute. Nothing is recorded, reserved or signed. Always call this before fuku_execute_action for anything that moves value (transfer, swap, withdraw, stake). If it says BLOCKED, do not execute: tell the user the rule and the reason.",
       inputSchema: actionInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

@@ -53,9 +53,12 @@ export function checkText(c: PermissionCheck): string {
   const legs = c.compliance
     ? `Cleanverse (${c.compliance.mode}): asset ${c.compliance.asset.ok ? "ok" : c.compliance.asset.subCode}, owner A-Pass ${c.compliance.owner.ok ? "ok" : c.compliance.owner.subCode}, recipient A-Pass ${c.compliance.counterparty.ok ? "ok" : c.compliance.counterparty.subCode}.`
     : null;
-  const tail = c.allowed
-    ? "Preview only: nothing was recorded, reserved or signed. Execute it with fuku_execute_action using the same parameters."
-    : "Preview only: nothing was recorded. This request would be blocked; tell the user the rule and the reason. Do not adjust the parameters to get around it.";
+  const tail =
+    c.decision === "UNKNOWN"
+      ? "Preview only: nothing was recorded. Fuku could not read the owner's on-chain mandate, so it cannot say whether this would go through. Do not execute it now; tell the user, and check again later."
+      : c.allowed
+        ? "Preview only: nothing was recorded, reserved or signed. Execute it with fuku_execute_action using the same parameters."
+        : "Preview only: nothing was recorded. This request would be blocked; tell the user the rule and the reason. Do not adjust the parameters to get around it.";
   return [head, limit, legs, tail].filter(Boolean).join("\n");
 }
 

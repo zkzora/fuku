@@ -11,7 +11,7 @@ The server runs on your machine over stdio and talks to Fuku only through [`@fuk
 | Tool | What it does |
 | --- | --- |
 | `fuku_whoami` | Its name and ids (Fuku and ERC-8004), its owner (custody, passkey-verified), its passport, its owner's on-chain mandate (daily cap, per-transfer limit, payees, spent today), its trust score, and whether it can execute |
-| `fuku_check_permission` | A dry run of an action: the verdict, the rule id and the reason. Nothing is recorded |
+| `fuku_check_permission` | A dry run of an action: ALLOWED, BLOCKED or UNKNOWN, the rule id and the reason. For an A-Token transfer it also checks the owner's on-chain mandate, as execution does; UNKNOWN means the mandate could not be read. Nothing is recorded or signed |
 | `fuku_execute_action` | Executes an action through Fuku, signed with the agent key and sent with an idempotency key. It returns the decision, rule and reason, the proof hash and Monad links, the trust score before and after, and the explanation. For an A-Token transfer it also returns the guarded-transfer link and the Cleanverse checks |
 | `fuku_get_action` | The lifecycle and evidence of an earlier action |
 | `fuku_verify_agent` | Verifies any agent the way a counterparty would |

@@ -173,6 +173,12 @@ async function main() {
   await freshBlock();
   const unapproved = await fuku.executeAction(agent.id, { action: "transfer", amountUsdc: AMOUNT, to: nusantara, asset: "aUSDC" });
   check("before the owner approves the payee the transfer is BLOCKED", unapproved.decision === "BLOCKED", `${unapproved.ruleId} ${unapproved.subCode ?? ""}: ${unapproved.reason}`);
+  const dry = await fuku.checkPermission(agent.id, { action: "transfer", amountUsdc: AMOUNT, to: nusantara, asset: "aUSDC" });
+  check(
+    "the dry run gives the same answer from the same mandate check (BLOCKED, same rule and reason)",
+    dry.decision === "BLOCKED" && dry.ruleId === unapproved.ruleId && dry.reason === unapproved.reason && dry.mandate?.status === "rejected",
+    `${dry.decision} ${dry.ruleId}: ${dry.reason}`,
+  );
   await ownerSends("setPayee Nusantara", { to: a.guard, data: encode(abi.FukuSpendGuardAbi, "setPayee", [agentKey, nusantara, true]) });
 
   // 4. Transfer, checked from the chain

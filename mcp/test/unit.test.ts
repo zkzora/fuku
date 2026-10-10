@@ -99,6 +99,28 @@ describe("tools", () => {
     assert.match(textOf(run), /Do not retry with changed parameters/);
   });
 
+  it("an UNKNOWN dry run (the mandate could not be read) is a result that says not to execute", async () => {
+    const mcp = await connect(
+      fakeClient(agentKey.address, {
+        checkPermission: async () => ({
+          agentId: AGENT_ID,
+          preview: true,
+          allowed: false,
+          decision: "UNKNOWN",
+          ruleId: "R10",
+          subCode: "MANDATE_UNAVAILABLE",
+          reason: "UNKNOWN: the passport allows it, but the owner's on-chain mandate could not be read (429).",
+          mandate: { status: "unavailable", detail: "The owner's on-chain mandate could not be read (429)." },
+        }),
+      }),
+      agentKey,
+    );
+    const r = await mcp.callTool({ name: "fuku_check_permission", arguments: { action: "transfer", amount: 30, to: NUSANTARA, asset: "aUSDC" } });
+    assert.equal(r.isError, false);
+    assert.match(textOf(r), /^UNKNOWN by rule R10 \(MANDATE_UNAVAILABLE\)/);
+    assert.match(textOf(r), /Do not execute it now/);
+  });
+
   it("execute signs with the agent key and sends a fresh idempotency key, or the one given to retry", async () => {
     const calls: Calls = { execute: [], check: [] };
     const mcp = await connect(fakeClient(agentKey.address, {}, calls), agentKey);

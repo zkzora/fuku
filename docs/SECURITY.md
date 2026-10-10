@@ -130,6 +130,7 @@ Rules that follow from the lifecycle:
   - It retries failed decision anchors.
   - Every transition is a conditional update, so concurrent runs are safe.
 - **Chain writes.** They come from one relayer key, serialised in process and across processes by a `ChainLock` lease row (150 s). A live failure is stored as `failed`, never as a mock receipt.
+- **The owner's mandate, before signing and in the dry run.** `web/src/lib/chain/mandate-check.ts` reads the guard's mandate, today's spend and the payee flag at one block, and applies `_checkMandateAndCap` in the contract's order and with its error names. Execution runs it before the compliance signer signs (a transfer the guard would refuse is R10 and never attested); the guard's own simulation still decides. The dry run (`check`, `fuku_check_permission`) runs the same code for A-Token transfers the passport allows: refused is BLOCKED R10 with execution's wording, unreadable (an RPC failure) is `UNKNOWN` (`allowed: false`, `MANDATE_UNAVAILABLE`), and on a mocked chain ALLOWED says the mandate was not checked. Not previewed: the attestation, and the agent's registration and passport on-chain, which execution anchors first.
 
 **Known limitation.** A decision anchor (`recordDecision`, not value-moving) whose process dies between broadcast and storing the result may be retried and recorded twice in the registry's counters. A guarded transfer cannot be: the action hash is single-use on-chain.
 

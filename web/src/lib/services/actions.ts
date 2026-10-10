@@ -1,5 +1,6 @@
 import { Prisma, type Agent, type AgentAction, type Identity, type Policy } from "@prisma/client";
 import type { Address, Hex } from "viem";
+import { evaluateMandate, readMandateState, type MandateRequest, type MandateState } from "../chain/mandate-check";
 import { db } from "../db";
 import { evaluate, fromMicros, PRE_COMPLIANCE_RULES, toMicros, type Evaluation } from "../engine/permission";
 import { isATokenPassport, labelFor, parsePolicy, VALUE_ACTIONS, type PolicyDoc } from "../engine/policy";
@@ -7,9 +8,13 @@ import { isViolation } from "../engine/reputation";
 import { explainDecision } from "../engine/explain";
 import {
   anchorStateOf,
+  chainMode,
+  chainReader,
   ChainWriteError,
   executeGuardedTransfer,
+  guardReady,
   recordDecisionOnChain,
+  spendGuardAddress,
   toAgentRef,
   updateScoreOnChain,
   type ChainReceipt,
@@ -17,7 +22,7 @@ import {
 import { legText } from "../cleanverse/compliance";
 import type { ComplianceLeg, ComplianceResult } from "../cleanverse/types";
 import { ForbiddenError, RequestError } from "../errors";
-import { hashJson, hashString } from "../ids";
+import { hashJson, hashString, idToBytes32 } from "../ids";
 import { newActionId, recordHash, recordJson } from "../records";
 import { refreshScore, SCORED_EVENTS, scoreFor } from "./agents";
 import { canActFor } from "./authz";
@@ -149,6 +154,115 @@ export async function assessAction(agent: AgentForAssessment, input: ActionInput
     counterparty: input.to,
   });
   return { policy, evaluation: evaluate({ ...base, compliance }), compliance };
+}
+
+/**
+ * R10 for a guarded transfer the chain side refuses: the guard is not configured, the owner changed
+ * the authorization, or FukuSpendGuard would revert. Shared by execution and the dry run.
+ */
+export function guardRejection(reason: string): Evaluation {
+  const notConfigured = reason === "GUARD_NOT_CONFIGURED";
+  // The owner revoked or replaced the passport, or paused the agent, after the decision above.
+  const changed = /^AUTHORIZATION_CHANGED\((.*)\)$/.exec(reason);
+  return {
+    decision: "BLOCKED",
+    ruleId: "R10",
+    subCode: notConfigured ? "GUARD_NOT_CONFIGURED" : changed ? "AUTHORIZATION_CHANGED" : "GUARD_REJECTED",
+    reason: notConfigured
+      ? "GUARD_NOT_CONFIGURED: the chain is live but FUKU_SPEND_GUARD or FUKU_COMPLIANCE_SIGNER_KEY is not set, so no A-Token can move."
+      : changed
+        ? `AUTHORIZATION_CHANGED: ${changed[1]} after this transfer was authorized. The owner's change wins, so nothing was signed or sent.`
+        : `GUARD_REJECTED: the on-chain FukuSpendGuard would revert with ${reason}.`,
+  };
+}
+
+/** What the dry run knows about the owner's on-chain mandate for this request. */
+export type MandatePreview =
+  /** Not a guarded transfer (no A-Token moves), or the passport already blocks it. */
+  | { status: "not_applicable" }
+  /** Mock chain: there is no mandate to read, and no token moves. */
+  | { status: "not_checked"; detail: string }
+  | { status: "ok"; detail: string; version: number; remainingAfterUsdc: number }
+  /** The guard would refuse it: `reason` is its error, e.g. "PerTxLimitExceeded(50000000)". */
+  | { status: "rejected"; detail: string; reason: string }
+  /** The mandate could not be read (RPC failure): Fuku cannot say whether it would go through. */
+  | { status: "unavailable"; detail: string };
+
+export interface MandatePreviewDeps {
+  mode: "live" | "mock";
+  ready: boolean;
+  read: (r: Pick<MandateRequest, "agentKey" | "from" | "to">) => Promise<MandateState>;
+}
+
+function liveMandateDeps(): MandatePreviewDeps {
+  return {
+    mode: chainMode(),
+    ready: guardReady(),
+    read: (r) => {
+      const client = chainReader();
+      const guard = spendGuardAddress();
+      if (!client || !guard) throw new Error("no chain reader or guard");
+      return readMandateState(client, guard, r);
+    },
+  };
+}
+
+/**
+ * The dry run's mandate check for an A-Token transfer the passport allows, with the same reader and
+ * rules execution applies before signing (lib/chain/mandate-check.ts). An RPC failure is
+ * `unavailable`, never an approval.
+ */
+export async function previewMandate(
+  agent: { id: string; identity: { walletAddress: string | null } },
+  input: { amountUsdc?: number | null; to?: string | null },
+  evaluation: Evaluation,
+  compliance: ComplianceResult | null,
+  deps: MandatePreviewDeps = liveMandateDeps(),
+): Promise<MandatePreview> {
+  const amount = input.amountUsdc != null ? toMicros(input.amountUsdc) : null;
+  if (evaluation.decision !== "ALLOWED" || !compliance || amount === null) return { status: "not_applicable" };
+  if (deps.mode !== "live") return { status: "not_checked", detail: "The owner's on-chain mandate was not checked: the chain is mocked, so no token moves." };
+  if (!deps.ready) return { status: "rejected", detail: "The guard is not configured.", reason: "GUARD_NOT_CONFIGURED" };
+  const token = compliance.evidence.atoken.address;
+  if (!token || !input.to || !agent.identity.walletAddress) {
+    return { status: "unavailable", detail: "The owner's on-chain mandate could not be checked (no A-Token address, recipient or bound owner wallet)." };
+  }
+  const request: MandateRequest = { agentKey: idToBytes32(agent.id), from: agent.identity.walletAddress as Address, to: input.to as Address, token: token as Address, amount };
+  let state: MandateState;
+  try {
+    state = await deps.read(request);
+  } catch (err) {
+    return { status: "unavailable", detail: `The owner's on-chain mandate could not be read (${(err as Error).message.slice(0, 120)}).` };
+  }
+  const verdict = evaluateMandate(state, request);
+  if (!verdict.ok) return { status: "rejected", detail: `FukuSpendGuard would refuse it: ${verdict.reason}.`, reason: verdict.reason };
+  return {
+    status: "ok",
+    detail: `The owner's on-chain mandate allows it (v${verdict.version}; ${fromMicros(verdict.remaining)} left today after it).`,
+    version: Number(verdict.version),
+    remainingAfterUsdc: fromMicros(verdict.remaining),
+  };
+}
+
+/** The dry run's answer: the passport's evaluation, narrowed by the mandate preview. */
+export function previewDecision(evaluation: Evaluation, mandate: MandatePreview): Omit<Evaluation, "decision"> & { decision: Evaluation["decision"] | "UNKNOWN" } {
+  switch (mandate.status) {
+    case "rejected":
+      return { ...evaluation, ...guardRejection(mandate.reason) };
+    case "unavailable":
+      return {
+        ...evaluation,
+        decision: "UNKNOWN",
+        ruleId: "R10",
+        subCode: "MANDATE_UNAVAILABLE",
+        reason: `UNKNOWN: the passport allows it, but ${mandate.detail.charAt(0).toLowerCase()}${mandate.detail.slice(1)} Fuku cannot say whether the transfer would go through; do not treat this as allowed.`,
+      };
+    case "not_checked":
+    case "ok":
+      return { ...evaluation, reason: `${evaluation.reason} ${mandate.detail}` };
+    default:
+      return evaluation;
+  }
 }
 
 export function complianceView(c: ComplianceResult | null): ComplianceView | null {
@@ -469,19 +583,7 @@ export async function executeAction(
       mark("Guarded transfer on Monad", "blocked", `Mined but reverted; nothing moved (${outcome.reason})`);
     } else {
       await release();
-      const notConfigured = outcome.reason === "GUARD_NOT_CONFIGURED";
-      // The owner revoked or replaced the passport, or paused the agent, after the decision above.
-      const changed = /^AUTHORIZATION_CHANGED\((.*)\)$/.exec(outcome.reason);
-      evaluation = {
-        decision: "BLOCKED",
-        ruleId: "R10",
-        subCode: notConfigured ? "GUARD_NOT_CONFIGURED" : changed ? "AUTHORIZATION_CHANGED" : "GUARD_REJECTED",
-        reason: notConfigured
-          ? "GUARD_NOT_CONFIGURED: the chain is live but FUKU_SPEND_GUARD or FUKU_COMPLIANCE_SIGNER_KEY is not set, so no A-Token can move."
-          : changed
-            ? `AUTHORIZATION_CHANGED: ${changed[1]} after this transfer was authorized. The owner's change wins, so nothing was signed or sent.`
-            : `GUARD_REJECTED: the on-chain FukuSpendGuard would revert with ${outcome.reason}.`,
-      };
+      evaluation = guardRejection(outcome.reason);
       status = "DENIED";
       proofHash = proofOf(evaluation, outcome.reason);
       await setStatus({ decision: "BLOCKED", status, ruleId: "R10", reason: evaluation.reason, proofHash, errorClass: "guard_revert", errorDetail: outcome.reason });

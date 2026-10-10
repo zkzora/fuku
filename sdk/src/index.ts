@@ -223,18 +223,36 @@ export interface ActionRequest {
   params?: Record<string, unknown>;
 }
 
+/**
+ * The dry run's view of the owner's on-chain mandate (FukuSpendGuard) for an A-Token transfer the
+ * passport allows, checked as execution checks it before signing.
+ */
+export type MandatePreview =
+  | { status: "not_applicable" }
+  /** Mock chain: no mandate was read (and no token would move). */
+  | { status: "not_checked"; detail: string }
+  | { status: "ok"; detail: string; version: number; remainingAfterUsdc: number }
+  /** The guard would refuse it; `reason` is its error, e.g. "PerTxLimitExceeded(50000000)". */
+  | { status: "rejected"; detail: string; reason: string }
+  /** The mandate could not be read: the decision is UNKNOWN. */
+  | { status: "unavailable"; detail: string };
+
 export interface PermissionCheck {
   agentId: string;
   /** Always true: a check is a preview, never an execution. */
   preview: true;
+  /** True only for ALLOWED. */
   allowed: boolean;
-  decision: "ALLOWED" | "BLOCKED";
+  /** UNKNOWN: the passport allows it but the owner's on-chain mandate could not be read. Do not execute on it. */
+  decision: "ALLOWED" | "BLOCKED" | "UNKNOWN";
   ruleId: string;
   /** Machine-readable cause for R4 and R7-R12, e.g. "CVI_FROZEN" or "APP_REQUIRED". */
   subCode?: string | null;
   reason: string;
   limitUsdcPerDay?: number;
   remainingUsdc?: number;
+  /** The owner's on-chain mandate, for A-Token transfers (0.5.0). */
+  mandate?: MandatePreview;
   compliance?: Compliance | null;
 }
 
