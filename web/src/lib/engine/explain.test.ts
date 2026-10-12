@@ -4,8 +4,6 @@ import { computeScore } from "./reputation";
 
 describe("score explanation (rule narrator)", () => {
   it("narrates every fuku-score/2 factor without throwing", async () => {
-    process.env.KIMI_API_KEY = "";
-    process.env.QWEN_API_KEY = "";
     const { explainScore } = await import("./explain");
     const result = computeScore({ passkeyVerified: true, apassEligible: true, hasActivePolicy: true, successes: 14, violations: 1, securityEvents: 0 });
     assert.equal(result.score, 96);

@@ -4,109 +4,10 @@ import { labelFor } from "./policy";
 import type { ScoreResult } from "./reputation";
 
 /**
- * AI reasoning layer. Kimi (Moonshot) and Qwen (DashScope) both expose OpenAI-compatible
- * chat endpoints. When no key is configured, Fuku falls back to a deterministic rule-based
- * explanation so the demo never depends on network access.
+ * Explanations come from Fuku's deterministic rule narrator: the same input always gives the
+ * same text, and nothing leaves the server.
  */
-export type ProviderName = "kimi" | "qwen" | "fuku-rules";
-
-interface Provider {
-  name: Exclude<ProviderName, "fuku-rules">;
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-}
-
-function providers(): Provider[] {
-  const list: Provider[] = [];
-  if (process.env.KIMI_API_KEY) {
-    list.push({
-      name: "kimi",
-      baseUrl: process.env.KIMI_BASE_URL ?? "https://api.moonshot.ai/v1",
-      apiKey: process.env.KIMI_API_KEY,
-      model: process.env.KIMI_MODEL ?? "kimi-k2-0905-preview",
-    });
-  }
-  if (process.env.QWEN_API_KEY) {
-    list.push({
-      name: "qwen",
-      baseUrl: process.env.QWEN_BASE_URL ?? "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-      apiKey: process.env.QWEN_API_KEY,
-      model: process.env.QWEN_MODEL ?? "qwen-plus",
-    });
-  }
-  return list;
-}
-
-export interface ProviderHealth {
-  ok: boolean;
-  at: string;
-  error?: string;
-}
-const aiHealth = globalThis as unknown as { __fukuAiHealth?: Record<string, ProviderHealth> };
-function noteAi(name: string, ok: boolean, error?: string) {
-  aiHealth.__fukuAiHealth = { ...(aiHealth.__fukuAiHealth ?? {}), [name]: { ok, at: new Date().toISOString(), ...(error ? { error } : {}) } };
-}
-
-/** Key configured, and the outcome of the last real call in this process (null before the first one). */
-export function aiProviderStatus() {
-  const h = aiHealth.__fukuAiHealth ?? {};
-  return {
-    kimi: Boolean(process.env.KIMI_API_KEY),
-    qwen: Boolean(process.env.QWEN_API_KEY),
-    kimiHealth: h.kimi ?? null,
-    qwenHealth: h.qwen ?? null,
-  };
-}
-
-async function chat(p: Provider, system: string, user: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 9000);
-  try {
-    const res = await fetch(`${p.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${p.apiKey}` },
-      body: JSON.stringify({
-        model: p.model,
-        temperature: 0.3,
-        max_tokens: 220,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`${p.name} ${res.status}`);
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-    const text = json.choices?.[0]?.message?.content?.trim();
-    if (!text) throw new Error(`${p.name} returned empty content`);
-    return text;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function withProviders(
-  system: string,
-  user: string,
-  fallback: () => string,
-): Promise<{ text: string; provider: ProviderName }> {
-  for (const p of providers()) {
-    try {
-      const text = await chat(p, system, user);
-      noteAi(p.name, true);
-      return { text, provider: p.name };
-    } catch (err) {
-      noteAi(p.name, false, (err as Error).message.slice(0, 160));
-      console.warn(`[fuku-ai] ${p.name} failed:`, (err as Error).message);
-    }
-  }
-  return { text: fallback(), provider: "fuku-rules" };
-}
-
-const SYSTEM =
-  "You are Fuku, a trust layer for AI agents. Explain decisions to a non-technical human owner in at most three short sentences. Be concrete, calm and factual. Never invent facts beyond the input.";
+export type ProviderName = "fuku-rules";
 
 export interface DecisionContext {
   agentName: string;
@@ -120,20 +21,8 @@ export interface DecisionContext {
   scoreAfter: number;
 }
 
-export function explainDecision(ctx: DecisionContext) {
-  const user = JSON.stringify({
-    agent: ctx.agentName,
-    owner: ctx.ownerName,
-    attempted: { action: ctx.action, amountUsdc: ctx.amountUsdc ?? undefined, app: ctx.app ?? undefined },
-    decision: ctx.evaluation.decision,
-    rule: ctx.evaluation.ruleId,
-    reason: ctx.evaluation.reason,
-    passport: ctx.policy,
-    trustScore: { before: ctx.scoreBefore, after: ctx.scoreAfter },
-  });
-  return withProviders(SYSTEM, `Explain this permission decision to the owner:\n${user}`, () =>
-    ruleBasedDecision(ctx),
-  );
+export async function explainDecision(ctx: DecisionContext): Promise<{ text: string; provider: ProviderName }> {
+  return { text: ruleBasedDecision(ctx), provider: "fuku-rules" };
 }
 
 function ruleBasedDecision(ctx: DecisionContext): string {
@@ -160,18 +49,8 @@ export interface ScoreContext {
   recentViolation?: string | null;
 }
 
-export function explainScore(ctx: ScoreContext) {
-  const user = JSON.stringify({
-    agent: ctx.agentName,
-    owner: ctx.ownerName,
-    score: ctx.result.score,
-    level: ctx.result.level,
-    breakdown: ctx.result.breakdown.map((b) => ({ factor: b.label, points: b.points, detail: b.detail })),
-    recentViolation: ctx.recentViolation ?? undefined,
-  });
-  return withProviders(SYSTEM, `Explain why this agent has this trust score:\n${user}`, () =>
-    ruleBasedScore(ctx),
-  );
+export async function explainScore(ctx: ScoreContext): Promise<{ text: string; provider: ProviderName }> {
+  return { text: ruleBasedScore(ctx), provider: "fuku-rules" };
 }
 
 function ruleBasedScore(ctx: ScoreContext): string {

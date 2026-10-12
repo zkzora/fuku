@@ -4,7 +4,7 @@ import { Logo } from "@/components/brand";
 import { Pill } from "@/components/bits";
 import { Reveal } from "@/components/landing/reveal";
 
-const SPONSORS = ["Monad", "Dynamic", "Nansen", "Envio", "Kimi", "Qwen", "Chainlink CRE", "Cleanverse"];
+const SPONSORS = ["Monad", "Dynamic", "Nansen", "Envio", "Chainlink CRE", "Cleanverse"];
 
 export default function Landing() {
   return (
@@ -172,7 +172,7 @@ export default function Landing() {
             <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-[#b3a3ff]">Developer SDK</div>
             <h2 className="mt-3 text-balance text-[34px] font-semibold leading-[1.08] md:text-[44px]">Integrate trust. Skip the infrastructure.</h2>
             <p className="mt-4 max-w-[480px] text-pretty text-[16px] leading-[1.55] text-white/65">
-              Five calls cover identity, registration, permissions and scoring. Agent activity indexed by Envio, explained by Kimi/Qwen.
+              Five calls cover identity, registration, permissions and scoring. Agent activity indexed by Envio, explained in plain language.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link href="/sign-in?next=/developers" className="inline-flex items-center gap-2 rounded-full bg-white px-5 py-3 text-[14px] font-medium text-ink hover:bg-white/90">

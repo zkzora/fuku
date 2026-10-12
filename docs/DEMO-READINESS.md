@@ -7,8 +7,8 @@ Labels used throughout:
 - **Automated**: a test or script, with its last result and date.
 - **Interactive**: needs a person (a passkey prompt, a browser wallet, Claude Desktop). Status is
   "not run" until someone runs it and records the result here.
-- **Simulated**: Cleanverse (A-Pass, aUSDC-SIM) is Fuku's simulator, Kimi/Qwen explanations fall back
-  to the rule narrator, CRE runs as a simulation. These stay labelled as such everywhere.
+- **Simulated**: Cleanverse (A-Pass, aUSDC-SIM) is Fuku's simulator and CRE runs as a
+  simulation. These stay labelled as such everywhere.
 
 ## 1. The MCP server's authority: an agent key
 
