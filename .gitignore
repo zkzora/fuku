@@ -10,3 +10,5 @@ artifacts
 cache
 *.tsbuildinfo
 .env.bak*
+
+.vercel
