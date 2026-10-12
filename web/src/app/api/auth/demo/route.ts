@@ -4,7 +4,7 @@ import { json, withErrors } from "@/lib/api";
 import { createSession } from "@/lib/session";
 import { DEMO_IDENTITY_ID, activeDemoAgentIds, seedDemo } from "@/lib/demo-seed";
 import { setAgentStatusOnChain, toAgentRef } from "@/lib/chain";
-import { demoEnabled, safeNextPath } from "@/lib/demo-mode";
+import { demoEnabled, demoResetAllowed, safeNextPath } from "@/lib/demo-mode";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 
 /**
@@ -36,13 +36,15 @@ async function signInDemo(reset: boolean) {
 const DISABLED = { error: "The demo sign-in is disabled on this deployment.", code: "demo_disabled" };
 
 /**
- * Signs in as the seeded demo identity (Ava Chen); re-seeds it when missing or when ?reset=1.
+ * Signs in as the seeded demo identity (Ava Chen); re-seeds it when missing or when ?reset=1
+ * (plus &token=FUKU_DEMO_RESET_TOKEN when that is set).
  * Off in production unless FUKU_DEMO_ENABLED=true (see lib/demo-mode.ts).
  */
 export const POST = withErrors(async (req) => {
   if (!demoEnabled()) return json(DISABLED, { status: 404 });
   rateLimit("auth", clientIp(req));
-  const reset = new URL(req.url).searchParams.get("reset") === "1";
+  const params = new URL(req.url).searchParams;
+  const reset = params.get("reset") === "1" && demoResetAllowed(params.get("token"));
   return json(await signInDemo(reset));
 });
 
@@ -51,7 +53,7 @@ export const GET = withErrors(async (req) => {
   if (!demoEnabled()) return json(DISABLED, { status: 404 });
   rateLimit("auth", clientIp(req));
   const url = new URL(req.url);
-  const reset = url.searchParams.get("reset") === "1";
+  const reset = url.searchParams.get("reset") === "1" && demoResetAllowed(url.searchParams.get("token"));
   await signInDemo(reset);
   return NextResponse.redirect(new URL(safeNextPath(url.searchParams.get("next")), url.origin));
 });

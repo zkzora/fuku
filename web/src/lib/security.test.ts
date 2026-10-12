@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { demoEnabled, safeNextPath } from "./demo-mode";
+import { demoEnabled, demoResetAllowed, safeNextPath } from "./demo-mode";
 import { sessionSecret } from "./session";
 import { LIMITS, rateLimit, RateLimitError, resetRateLimits } from "./rate-limit";
 import { parseWalletBindingMessage, walletBindingMessage } from "./wallet-binding";
@@ -11,6 +11,13 @@ describe("production gating", () => {
     assert.equal(demoEnabled({ NODE_ENV: "production" }), false);
     assert.equal(demoEnabled({ NODE_ENV: "production", FUKU_DEMO_ENABLED: "true" }), true);
     assert.equal(demoEnabled({ NODE_ENV: "development", FUKU_DEMO_ENABLED: "false" }), false);
+  });
+
+  it("lets a reset through only with the reset token when one is set", () => {
+    assert.equal(demoResetAllowed(null, {}), true);
+    assert.equal(demoResetAllowed(null, { FUKU_DEMO_RESET_TOKEN: "s3cret-reset" }), false);
+    assert.equal(demoResetAllowed("wrong", { FUKU_DEMO_RESET_TOKEN: "s3cret-reset" }), false);
+    assert.equal(demoResetAllowed("s3cret-reset", { FUKU_DEMO_RESET_TOKEN: "s3cret-reset" }), true);
   });
 
   it("refuses weak or default session secrets in production", () => {
