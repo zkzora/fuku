@@ -99,7 +99,10 @@ export async function envioStatus(): Promise<EnvioStatus> {
       }
     })(),
   ]);
-  statusCache = { hypersync: hs, hyperrpc: rpc, registriesConfigured: Object.keys(registries()).length === 4, checkedAt: Date.now() };
+  const regs = registries();
+  // The four registries; the spend guard is optional on top of them.
+  const registriesConfigured = Boolean(regs.identity && regs.agents && regs.permissions && regs.reputation);
+  statusCache = { hypersync: hs, hyperrpc: rpc, registriesConfigured, checkedAt: Date.now() };
   return statusCache;
 }
 
