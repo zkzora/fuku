@@ -29,6 +29,7 @@
     "@dynamic-labs-sdk/client": "^1.34.1",
     "@dynamic-labs-sdk/evm": "^1.34.1",
     "@dynamic-labs-sdk/react-hooks": "^1.34.1",
+    "@prisma/adapter-libsql": "^6.19.3",
     "@prisma/client": "^6.19.0",
     "@simplewebauthn/browser": "^13.2.2",
     "@simplewebauthn/server": "^13.2.2",
