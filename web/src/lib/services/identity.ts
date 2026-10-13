@@ -60,12 +60,17 @@ export async function createApiKey(identityId: string, name: string) {
 }
 
 export async function identityFromApiKey(raw: string | null): Promise<Identity | null> {
+  return (await apiKeyFromRaw(raw))?.identity ?? null;
+}
+
+/** The stored key a raw API key matches, with its identity; null for unknown or disabled keys. */
+export async function apiKeyFromRaw(raw: string | null) {
   if (!raw || !raw.startsWith("fk_")) return null;
   if (raw === DEMO_API_KEY && !demoEnabled()) return null;
-  const key = await db.apiKey.findFirst({ where: { keyHash: hashApiKey(raw) }, include: { identity: true } });
+  const key = await db.apiKey.findFirst({ where: { keyHash: hashApiKey(raw) }, include: { identity: true, agent: { select: { identityId: true } } } });
   if (!key) return null;
   await db.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: new Date() } });
-  return key.identity;
+  return key;
 }
 
 // --- Wallet binding ----------------------------------------------------------------------------

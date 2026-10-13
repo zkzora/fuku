@@ -9,14 +9,14 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { FukuError } from "@fuku/sdk";
 import { ConfigError, loadConfig, type Config } from "../src/config.js";
 import { createFukuMcpServer, type FukuClient } from "../src/server.js";
-import { AGENT_ID, NUSANTARA, fakeClient, type Calls } from "./fixtures.js";
+import { AGENT_ID, NUSANTARA, agentKeyInfo, fakeClient, ownerKeyInfo, type Calls } from "./fixtures.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const agentKey = privateKeyToAccount(generatePrivateKey());
-const config: Config = { baseUrl: "http://localhost:3001", apiKey: "fk_test", agentId: AGENT_ID, agentPrivateKey: null };
+const config: Config = { baseUrl: "http://localhost:3001", apiKey: "fk_test", agentId: AGENT_ID, agentPrivateKey: null, allowOwnerKey: false };
 
-async function connect(client: FukuClient, signer: typeof agentKey | null) {
-  const server = createFukuMcpServer({ config, client, signer });
+async function connect(client: FukuClient, signer: typeof agentKey | null, cfg: Config = config) {
+  const server = createFukuMcpServer({ config: cfg, client, signer });
   const [a, b] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: "test", version: "0.0.0" });
   await Promise.all([server.connect(a), mcp.connect(b)]);
@@ -34,6 +34,8 @@ describe("configuration", () => {
     const c = loadConfig({ ...good, FUKU_AGENT_PRIVATE_KEY: key.slice(2) });
     assert.deepEqual([c.baseUrl, c.agentPrivateKey], ["http://localhost:3001", key]);
     assert.equal(loadConfig(good).agentPrivateKey, null, "no key: read-only");
+    assert.equal(loadConfig(good).allowOwnerKey, false, "an owner key is refused unless allowed");
+    assert.equal(loadConfig({ ...good, FUKU_MCP_ALLOW_OWNER_KEY: "1" }).allowOwnerKey, true);
   });
 
   it("points out a placeholder pasted as a value", () => {
@@ -97,6 +99,28 @@ describe("tools", () => {
     assert.match(textOf(run), /Do not retry with changed parameters/);
   });
 
+  it("an UNKNOWN dry run (the mandate could not be read) is a result that says not to execute", async () => {
+    const mcp = await connect(
+      fakeClient(agentKey.address, {
+        checkPermission: async () => ({
+          agentId: AGENT_ID,
+          preview: true,
+          allowed: false,
+          decision: "UNKNOWN",
+          ruleId: "R10",
+          subCode: "MANDATE_UNAVAILABLE",
+          reason: "UNKNOWN: the passport allows it, but the owner's on-chain mandate could not be read (429).",
+          mandate: { status: "unavailable", detail: "The owner's on-chain mandate could not be read (429)." },
+        }),
+      }),
+      agentKey,
+    );
+    const r = await mcp.callTool({ name: "fuku_check_permission", arguments: { action: "transfer", amount: 30, to: NUSANTARA, asset: "aUSDC" } });
+    assert.equal(r.isError, false);
+    assert.match(textOf(r), /^UNKNOWN by rule R10 \(MANDATE_UNAVAILABLE\)/);
+    assert.match(textOf(r), /Do not execute it now/);
+  });
+
   it("execute signs with the agent key and sends a fresh idempotency key, or the one given to retry", async () => {
     const calls: Calls = { execute: [], check: [] };
     const mcp = await connect(fakeClient(agentKey.address, {}, calls), agentKey);
@@ -153,6 +177,85 @@ describe("tools", () => {
     const text = (prompt.messages[0].content as { text: string }).text;
     assert.match(text, /fuku_check_permission/);
     assert.match(text, /If it is BLOCKED, stop/);
+  });
+});
+
+describe("the API key: an agent key for this agent, never the owner's by default", () => {
+  it("acts with an agent key bound to FUKU_AGENT_ID, and whoami says so", async () => {
+    const mcp = await connect(fakeClient(agentKey.address), agentKey);
+    const who = await mcp.callTool({ name: "fuku_whoami", arguments: {} });
+    assert.equal(who.isError, false);
+    assert.match(textOf(who), /API key: an agent key for this agent only \(agent:read, agent:check, agent:execute, agent:actions\)/);
+    assert.equal((who.structuredContent as { apiKey: { kind: string } }).apiKey.kind, "agent");
+  });
+
+  it("refuses a full owner key: no call reaches Fuku but the key check", async () => {
+    const calls: Calls = { execute: [], check: [] };
+    const mcp = await connect(fakeClient(agentKey.address, { keyInfo: async () => ownerKeyInfo }, calls), agentKey);
+    const attempts: [string, Record<string, unknown>][] = [
+      ["fuku_whoami", {}],
+      ["fuku_check_permission", { action: "transfer", amount: 5 }],
+      ["fuku_execute_action", { action: "transfer", amount: 5, to: NUSANTARA }],
+    ];
+    for (const [name, args] of attempts) {
+      const r = await mcp.callTool({ name, arguments: args });
+      assert.equal(r.isError, true, name);
+      assert.match(textOf(r), /Refused to act: FUKU_API_KEY is Ava Chen's full owner key/);
+      assert.match(textOf(r), /FUKU_MCP_ALLOW_OWNER_KEY=1/);
+    }
+    assert.deepEqual([calls.check.length, calls.execute.length], [0, 0]);
+    await assert.rejects(() => mcp.readResource({ uri: "fuku://agent/passport" }), /full owner key/);
+  });
+
+  it("accepts an owner key only when FUKU_MCP_ALLOW_OWNER_KEY is set, and warns in whoami", async () => {
+    const mcp = await connect(fakeClient(agentKey.address, { keyInfo: async () => ownerKeyInfo }), agentKey, { ...config, allowOwnerKey: true });
+    const who = await mcp.callTool({ name: "fuku_whoami", arguments: {} });
+    assert.equal(who.isError, false);
+    assert.match(textOf(who), /full owner key \(FUKU_MCP_ALLOW_OWNER_KEY=1\): more authority than this agent needs/);
+  });
+
+  it("refuses an agent key bound to another agent", async () => {
+    const other = "fuku:agent:0x00000000000000000000000000000000000000b2";
+    const mcp = await connect(fakeClient(agentKey.address, { keyInfo: async () => agentKeyInfo(other) }), agentKey);
+    const r = await mcp.callTool({ name: "fuku_check_permission", arguments: { action: "transfer", amount: 5 } });
+    assert.equal(r.isError, true);
+    assert.match(textOf(r), new RegExp(`agent key for ${other}, not for FUKU_AGENT_ID`));
+  });
+
+  it("explains Fuku's agent-key refusals: another agent, a missing scope", async () => {
+    const own = fakeClient(agentKey.address);
+    const mcp = await connect(
+      fakeClient(agentKey.address, {
+        verifyAgent: async (id) => {
+          if (id === AGENT_ID) return own.verifyAgent(id);
+          throw new FukuError(403, `This key is an agent key for ${AGENT_ID}: it cannot act on or read ${id}.`, null, "agent_key_other_agent");
+        },
+        verifyScore: async () => {
+          throw new FukuError(403, "This key is an agent key without the agent:read scope.", null, "agent_key_scope");
+        },
+      }),
+      agentKey,
+    );
+    const other = await mcp.callTool({ name: "fuku_verify_agent", arguments: { agentId: "fuku:agent:0x00000000000000000000000000000000000000b2" } });
+    assert.equal(other.isError, true);
+    assert.match(textOf(other), /needs the agents:verify scope/);
+    assert.match(textOf(await mcp.callTool({ name: "fuku_verify_score", arguments: {} })), /lacks the scope for that call/);
+  });
+
+  it("checks the key again after a failed check (the app was down)", async () => {
+    let up = false;
+    const mcp = await connect(
+      fakeClient(agentKey.address, {
+        keyInfo: async () => {
+          if (!up) throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 127.0.0.1:3001") });
+          return agentKeyInfo();
+        },
+      }),
+      agentKey,
+    );
+    assert.match(textOf(await mcp.callTool({ name: "fuku_whoami", arguments: {} })), /Fuku is not reachable/);
+    up = true;
+    assert.equal((await mcp.callTool({ name: "fuku_whoami", arguments: {} })).isError, false);
   });
 });
 

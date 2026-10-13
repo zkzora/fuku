@@ -1,0 +1,18 @@
+# Never upload local secrets or databases; production env vars live in the Vercel project.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.db
+**/*.db-journal
+**/*.db.bak*
+**/dev.backup-*
+
+# Not part of the web app build
+contracts/
+cre/
+indexer/
+examples/
+Fuku UI mockups/
+**/node_modules
+**/.next
+.vercel

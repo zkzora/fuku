@@ -77,12 +77,16 @@ describe("MCP server against a live Fuku (local node)", { skip: !enabled && "set
     assert.equal(who.execute.enabled, true);
     assert.match(who.execute.reason, /registered key/);
     assert.deepEqual([who.mandate.dailyCapUsdc, who.mandate.maxPerTxUsdc], [100, 50]);
+    assert.equal((who as unknown as { apiKey: { kind: string } }).apiKey.kind, "agent", "the server runs with an agent key, not the owner's");
     token = who.mandate.token as Address;
   });
 
-  it("2. fuku_check_permission: 30 to Nusantara allowed, 30 to an unverified wallet R8, withdraw 4,800 R2", async () => {
-    const ok = data<{ decision: string; ruleId: string }>(await call("fuku_check_permission", { action: "transfer", amount: 30, to: NUSANTARA, asset: "aUSDC" }));
-    assert.deepEqual([ok.decision, ok.ruleId], ["ALLOWED", "R6"]);
+  it("2. fuku_check_permission: 30 to Nusantara allowed (mandate checked), 60 refused by the mandate, 30 to an unverified wallet R8, withdraw 4,800 R2", async () => {
+    const ok = data<{ decision: string; ruleId: string; mandate: { status: string } }>(await call("fuku_check_permission", { action: "transfer", amount: 30, to: NUSANTARA, asset: "aUSDC" }));
+    assert.deepEqual([ok.decision, ok.ruleId, ok.mandate.status], ["ALLOWED", "R6", "ok"]);
+    const over = data<{ decision: string; ruleId: string; subCode: string; reason: string }>(await call("fuku_check_permission", { action: "transfer", amount: 60, to: NUSANTARA, asset: "aUSDC" }));
+    assert.deepEqual([over.decision, over.ruleId, over.subCode], ["BLOCKED", "R10", "GUARD_REJECTED"], over.reason);
+    assert.match(over.reason, /PerTxLimitExceeded\(50000000\)/);
     const r8 = await call("fuku_check_permission", { action: "transfer", amount: 30, to: UNVERIFIED, asset: "aUSDC" });
     assert.equal(r8.isError, false);
     assert.deepEqual([data<{ decision: string }>(r8).decision, data<{ ruleId: string }>(r8).ruleId], ["BLOCKED", "R8"]);
@@ -136,5 +140,25 @@ describe("MCP server against a live Fuku (local node)", { skip: !enabled && "set
     const res = data<{ id: string; replayed: boolean }>(r);
     assert.deepEqual([res.id, res.replayed], [firstTransfer.id, true]);
     assert.equal(await balance(NUSANTARA), before, "no second transfer");
+  });
+
+  it("7. the MCP server's API key (an agent key) cannot change the passport, register agents or reach other agents", async () => {
+    const env = readFileSync(envFile, "utf8");
+    const value = (k: string) => env.match(new RegExp(`^${k}=(.+)$`, "m"))?.[1]?.trim() ?? "";
+    const [baseUrl, apiKey, agentId] = [value("FUKU_BASE_URL"), value("FUKU_API_KEY"), value("FUKU_AGENT_ID")];
+    assert.match(apiKey, /^fk_agent_/, "mcp:setup wrote an agent key, not the owner's");
+    const http = async (method: string, p: string, body?: unknown) => {
+      const res = await fetch(`${baseUrl}/api/v1${p}`, { method, headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+      return [res.status, ((await res.json()) as { code?: string }).code];
+    };
+    const id = encodeURIComponent(agentId);
+    assert.deepEqual(await http("PUT", `/agents/${id}/permissions`, { allowed: [{ action: "withdraw", limitUsdcPerDay: 1_000_000 }], blocked: [], scopeApps: [] }), [403, "agent_key_forbidden"]);
+    assert.deepEqual(await http("DELETE", `/agents/${id}/permissions`), [403, "agent_key_forbidden"]);
+    assert.deepEqual(await http("POST", "/agents", { name: "Spawned", capabilities: ["transfer"] }), [403, "agent_key_forbidden"]);
+    assert.deepEqual(await http("POST", `/agents/${id}/keys`, { name: "more" }), [403, "agent_key_forbidden"]);
+    const other = encodeURIComponent("fuku:agent:0x0000000000000000000000000000000000000001");
+    assert.deepEqual(await http("POST", `/agents/${other}/check`, { action: "transfer", amountUsdc: 1 }), [403, "agent_key_other_agent"]);
+    const [status] = await http("GET", `/agents/${id}`);
+    assert.equal(status, 200, "its own agent is readable");
   });
 });

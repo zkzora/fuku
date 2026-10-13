@@ -39,4 +39,4 @@ export const GET = withApiKey<P>(async (req, caller, { id }) => {
     explanationProvider: explanation?.provider ?? null,
     updatedAt: agent.updatedAt.toISOString(),
   });
-});
+}, { agentKey: { scope: "agent:read", agentParam: "id" } });

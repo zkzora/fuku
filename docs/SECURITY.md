@@ -25,6 +25,7 @@ What is **not** enforced on-chain:
 
 - **Sessions (web app):** HS256 JWT cookie, 7 days, `httpOnly`, `sameSite=lax`, `secure` in production. In production the server refuses to start sessions without a random `FUKU_SESSION_SECRET` of at least 32 characters. Logout deletes the cookie; there is no server-side session revocation yet.
 - **API keys (SDK, CRE):** a request that presents a key is authorised by that key alone. An invalid, revoked or disabled key gets 401 and never falls back to the browser session.
+- **Agent keys** (`fk_agent_…`): an API key bound to one agent, minted only by that agent's owner. It reads, dry-runs and executes for that agent and reads its receipts, on the routes that opt in, and gets 403 everywhere else (passport, agent and identity management, keys, other agents). Section 11 has the details; it is what the MCP server runs with.
 - **Acting for an owner** (`canActFor`) is allowed in three cases:
   - the caller is the owner;
   - the caller created the identity through `POST /api/v1/identities` (`managedById`);
@@ -129,6 +130,7 @@ Rules that follow from the lifecycle:
   - It retries failed decision anchors.
   - Every transition is a conditional update, so concurrent runs are safe.
 - **Chain writes.** They come from one relayer key, serialised in process and across processes by a `ChainLock` lease row (150 s). A live failure is stored as `failed`, never as a mock receipt.
+- **The owner's mandate, before signing and in the dry run.** `web/src/lib/chain/mandate-check.ts` reads the guard's mandate, today's spend and the payee flag at one block, and applies `_checkMandateAndCap` in the contract's order and with its error names. Execution runs it before the compliance signer signs (a transfer the guard would refuse is R10 and never attested); the guard's own simulation still decides. The dry run (`check`, `fuku_check_permission`) runs the same code for A-Token transfers the passport allows: refused is BLOCKED R10 with execution's wording, unreadable (an RPC failure) is `UNKNOWN` (`allowed: false`, `MANDATE_UNAVAILABLE`), and on a mocked chain ALLOWED says the mandate was not checked. Not previewed: the attestation, and the agent's registration and passport on-chain, which execution anchors first.
 
 **Known limitation.** A decision anchor (`recordDecision`, not value-moving) whose process dies between broadcast and storing the result may be retried and recorded twice in the registry's counters. A guarded transfer cannot be: the action hash is single-use on-chain.
 
@@ -239,14 +241,15 @@ Local runs on 2026-09-30:
 | Command | Expected |
 | --- | --- |
 | `cd contracts && npm test` | 72 passing (13 of them adversarial) |
-| `npm test` (root: web + sdk) | 82 web tests, 8 SDK tests, all passing |
+| `npm test` (root: web, sdk and mcp workspaces) | 105 web tests, 11 SDK tests, 20 MCP tests, all passing (2026-10-09) |
 | `cd web && npx tsc --noEmit && npm run lint` | no errors |
 | `cd cre/fuku-guard && bun test` | 10 pass |
 | Local node smoke (`docs/CLEANVERSE.md` "Run it locally", with `DATABASE_URL` pointing at the web instance's database and `SMOKE_OWNER_PRIVATE_KEY` set) | `67/67 checks passed` on a fresh node, and again on the same node; 66/66 on Monad testnet (2026-09-30), where the reorg check cannot run |
 | `cd web && npm run adversarial:live` against the local node, with its own `DATABASE_URL` (schema pushed) | `12/12 passed` |
 | `cd web && npm run reconcile -- --anchor-seeded`, then `npm run verify-score`, on the local node after a demo reset | 40 transactions, then 5/5 demo agents verified (Trading Assistant 96 = 96 = 96, 15/15 records). After the withdraw climax: 92 = 92 = 92, 16/16. After the full smoke (which resets the demo), Trading Assistant still verifies |
-| `npm test -w mcp` | 14 passing: the tools over the MCP in-memory transport with a fake SDK client, the built server over real stdio (only JSON-RPC on stdout), configuration errors |
-| `FUKU_MCP_INTEGRATION=1 … npm run test:integration -w mcp` after `npm run mcp:setup`, on a local node and a production build of the app | 6/6. The checks: whoami; three dry runs (allowed, R8, R2); a 30 aUSDC transfer seen on-chain; withdraw BLOCKED R2 with `isError: false`; a 60 transfer blocked by the guard's per-transfer limit (R10), or by R5 once the day's budget is low; an idempotent replay |
+| `npm test -w mcp` | 20 passing: the tools over the MCP in-memory transport with a fake SDK client, the built server over real stdio (only JSON-RPC on stdout), configuration errors, the API-key policy (owner key refused, agent key for another agent refused) |
+| `FUKU_MCP_INTEGRATION=1 … npm run test:integration -w mcp` after `npm run mcp:setup`, on a local node and a production build of the app | 7/7 (2026-10-09). The checks: whoami (with an agent key); three dry runs (allowed, R8, R2); a 30 aUSDC transfer seen on-chain; withdraw BLOCKED R2 with `isError: false`; a 60 transfer blocked by the guard's per-transfer limit (R10), or by R5 once the day's budget is low; an idempotent replay; the server's agent key refused (403) on passport changes, agent registration, key minting and another agent |
+| `npm run owner-path:local` against a running app on a local node | 28/28 (2026-10-09): the owner-controlled path with the money (`docs/DEMO-READINESS.md` section 2) |
 | `node examples/sdk-consumer/index.mjs` (after `npm run build -w sdk`) | 16 steps `ok`, exit 0 (the 3 ERC-8004 steps are skipped on a local node); 19/19 on Monad testnet (2026-09-30) |
 | Mock mode (no chain env): demo reset, then withdraw 4,800 | R2, score 96 → 92, receipt `simulated` |
 
@@ -313,7 +316,13 @@ Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON
 - An unsigned request is refused with `401 agent_signature_required`, and a request signed with another key with `agent_signature_invalid`. The check runs after authorization and before an idempotent replay.
 - The result records the signer (`agentSignature`), and the workflow shows "Agent key verified".
 
+**The server's API key is an agent key** (`web/src/lib/services/api-keys.ts`, `withApiKey` in `web/src/lib/api.ts`).
+- `mcp:setup` mints a key bound to the MCP agent (`fk_agent_…`) and writes it to `mcp/.env`; the owner's key is never written there. The MCP server asks Fuku what its key is before the first call and refuses an owner key unless `FUKU_MCP_ALLOW_OWNER_KEY=1`.
+- An agent key works only on routes that opt in, only with the scopes it carries, and only for its own agent: read itself, dry-run, execute (still signed with the agent's own key), read its own receipts. Passport changes, agent registration and management, identities and wallets, ERC-8004 setup, records, delegations, key minting, travel-rule records, other agents and other owners answer 403 (`agent_key_*`). A test pins the list of routes that admit agent keys.
+- The key is checked against its agent on every request: if the agent changes owner the key stops working, and deleting the agent deletes its keys. The owner revokes it in the Developer Console or with `revokeAgentKey`.
+
 **What it protects.**
+- A stolen `mcp/.env` gives the agent's own authority (bounded by its passport and mandate), not the owner's: it cannot raise a limit, unblock withdraw, or touch another agent.
 - A leaked owner API key alone cannot execute as this agent over the API.
 - Fuku cannot act as the agent over the API either, because it never held the key.
 - Every action the assistant takes is bound to the key on the user's machine.
@@ -321,8 +330,55 @@ Over this sequence the relayer spent 1.76 MON: 1.26 MON of gas, plus the 0.5 MON
 - Rules are evaluated by Fuku's engine on every request, never by the model. The tool descriptions ask the model to check first and not to work around a block, but that is guidance. The engine's decision is what counts, and it is anchored on Monad.
 
 **What it does not protect.**
-- The agent key and the owner's API key sit on the same machine, in `mcp/.env` or the MCP client's configuration. Whoever controls that machine controls both. Fuku's API keys carry their identity's full rights; there are no per-key scopes.
+- The agent key and the server's API key sit on the same machine, in `mcp/.env` or the MCP client's configuration. Whoever controls that machine can act as the agent, within its passport and mandate, until the owner revokes the key or the passport.
+- Owner keys (`fk_live_…`) still carry their identity's full rights. Only agent keys are scoped; an application acting for many owners uses its own owner key plus delegations (section 2).
 - The owner's own session in the Fuku app is not an API call. The owner can act for the agent there without the agent key.
 - The signature is checked by Fuku's API, not on-chain. FukuSpendGuard checks the compliance signer's attestation and the owner's mandate. Fuku's server still decides and anchors, with the trust assumptions in sections 6 and 7.
 - A signed request that someone captures can be replayed within its 5 minutes. A replay returns the stored result of the same idempotency key and never executes twice.
 - To cut an assistant off, revoke the agent's passport (the kill switch, section 6). Or give the agent a new key with `setErc8004AgentKey`; the old key is then refused.
+
+## 12. Dependency audit triage (2026-10-09)
+
+`npm audit` at the root (web, sdk, mcp): 28 findings, 1 critical, 15 high, 12 moderate. `contracts/`:
+8 low. `cre/fuku-guard` (`bun audit`): none in 37 packages. Each is triaged by whether an attacker can
+reach the vulnerable code in what Fuku runs. Update 2026-10-10: `next` was patched to 16.3.8 (item 1
+below; root 27 findings, no critical); the rest still waits for approval.
+
+**Runtime, server: the Next.js app (`next` 16.3.5, pinned).** Every advisory is fixed in 16.3.8.
+
+| Advisory | Reachable in Fuku? |
+| --- | --- |
+| RCE in `next/og` `ImageResponse` (critical, GHSA-vcvr-r3jv-pc5j) | No: nothing imports `next/og`, and the only metadata image is a static `icon.png` |
+| Draft Mode content leak through `use cache` (GHSA-3w37-wq28-93x7) | No: no `"use cache"`, no `draftMode` |
+| Metadata image routes, `dynamicParams` bypass (GHSA-f87g-xv8r-7p7x) | No: no dynamic metadata image routes |
+| SSRF in Image Optimization (high, GHSA-cjq9-62q9-8jv4) | The `/_next/image` endpoint exists on every Next server; Fuku configures no remote patterns and uses `next/image` for one local file. Not reachable on a localhost demo; assume reachable if the app is hosted publicly |
+| SSG/ISR cache poisoning (GHSA-4jqv-mc3x-m676, GHSA-mcj8-r9mp-w47p) | The app shell is `force-dynamic`; the landing and sign-in pages are static. Matters only behind a shared cache on a public host |
+| Dev server MCP endpoint information disclosure (low, GHSA-39w2-rjm5-chcv) | **Yes, for the demo as run today.** The demo uses `next dev`, which listens on `0.0.0.0`; `POST /_next/mcp` answered `tools/list` (`get_logs`, `get_routes`, `get_project_metadata`, …) on the local stack. Anyone on the same network can call it. Mitigation now: `npm run dev -- -p 3001 -H 127.0.0.1` |
+
+`sharp` 0.35.4 (high, librsvg CVE-2026-96889) is reached only through Image Optimization, which
+refuses SVG input by default and only sees Fuku's local image: not reachable.
+
+**Runtime, browser: Dynamic sign-in (sandbox).** `axios` (via `@dynamic-labs-wallet/core` and
+`@coinbase/cdp-sdk`), `uuid` and the `@metamask/*` packages above it. Most axios advisories concern
+the Node HTTP adapter, HTTP/2 and proxies, which do not exist in a browser; the prototype-pollution
+gadgets need a separate pollution bug to be useful. `uuid` matters only when a caller passes `buf`.
+`http-cache-semantics` arrives through `ably` → `got`, which is Node-only and unused in the browser
+bundle. Low. The fix is Dynamic's SDK 1.34.1 → 1.39.0 (not a major), which changes the sign-in path that
+has never been run end to end (`docs/DEMO-READINESS.md` section 2, step I2: the Dynamic OTP needs a real inbox).
+
+**Build and developer tooling only:** `source-map-js` (our own CSS through PostCSS/Tailwind), `shadcn`,
+`eslint-config-next` / `@next/eslint-plugin-next`, `fast-glob` / `micromatch` / `braces`, `ts-morph`,
+and the Prisma CLI (`@prisma/config` → `deepmerge-ts`; `@prisma/client` is not affected). Their inputs
+are the repository's own files; not shipped to users. In `contracts/`, `elliptic` under `@ethersproject`
+comes with `hardhat-verify`; Fuku's keys sign with viem (noble), never with elliptic.
+
+**Do not run `npm audit fix --force`.** For prisma, eslint-config-next and shadcn it proposes
+"fixes" that are downgrades across majors (prisma 6.12.0, eslint-config-next 14.2.35, shadcn 1.0.0).
+
+**Proposed, not applied (each needs a go-ahead):**
+1. **Done 2026-10-10:** `next` 16.3.5 → 16.3.8 (a patch; every listed range ends below it). Tests,
+   typecheck, lint, `next build`, a page and API smoke, and the preflight passed on it.
+2. `npm audit fix` without `--force` (dry run: 48 package changes, among them sharp 0.35.5,
+   source-map-js 1.2.2, http-cache-semantics 4.3.0 and Dynamic's SDK 1.39.0), with a Dynamic sign-in
+   retest, after the demo.
+3. For the demo, with no code change: run the dev server bound to `127.0.0.1`.

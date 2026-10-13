@@ -19,8 +19,6 @@ const SAFE_ENV: Record<string, string> = {
   DEPLOYER_PRIVATE_KEY: "",
   FUKU_COMPLIANCE_SIGNER_KEY: "",
   FUKU_SPEND_GUARD: "",
-  KIMI_API_KEY: "",
-  QWEN_API_KEY: "",
   NANSEN_API_KEY: "",
   ENVIO_API_TOKEN: "",
   ENVIO_HYPERRPC_TOKEN: "",

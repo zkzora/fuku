@@ -5,8 +5,10 @@
 export interface Config {
   /** Fuku app, e.g. http://localhost:3001 */
   baseUrl: string;
-  /** The owner's API key (fk_live_…). */
+  /** An agent key for this agent (fk_agent_…, minted by `npm run mcp:setup`). */
   apiKey: string;
+  /** FUKU_MCP_ALLOW_OWNER_KEY=1: accept a full owner key (fk_live_…). Off by default. */
+  allowOwnerKey: boolean;
   /** The Fuku agent this assistant acts as. */
   agentId: string;
   /** The agent's own key (0x + 64 hex), registered as its ERC-8004 agentWallet. Null: read-only. */
@@ -36,7 +38,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     }
   }
   const apiKey = env.FUKU_API_KEY?.trim() ?? "";
-  if (!apiKey) problems.push("FUKU_API_KEY is not set (the owner's API key from the Developer Console).");
+  if (!apiKey) problems.push("FUKU_API_KEY is not set (the agent key from `npm run mcp:setup`, fk_agent_…).");
   else if (apiKey.startsWith("<")) problems.push("FUKU_API_KEY is still a placeholder: copy the key from mcp/.env, or remove the line.");
   const agentId = env.FUKU_AGENT_ID?.trim() ?? "";
   if (!agentId) problems.push("FUKU_AGENT_ID is not set (the Fuku agent this assistant acts as).");
@@ -48,6 +50,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     else if (!PRIVATE_KEY.test(rawKey)) problems.push("FUKU_AGENT_PRIVATE_KEY must be 32 bytes of hex (0x followed by 64 hex digits). Its value is not shown.");
     else agentPrivateKey = (rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`) as `0x${string}`;
   }
+  const allowOwnerKey = /^(1|true|yes)$/i.test(env.FUKU_MCP_ALLOW_OWNER_KEY?.trim() ?? "");
   if (problems.length) throw new ConfigError(problems);
-  return { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey, agentId, agentPrivateKey };
+  return { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey, agentId, agentPrivateKey, allowOwnerKey };
 }

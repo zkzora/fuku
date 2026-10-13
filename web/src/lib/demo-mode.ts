@@ -10,6 +10,17 @@ export function demoEnabled(env: Record<string, string | undefined> = process.en
   return env.NODE_ENV !== "production";
 }
 
+/**
+ * Whether a demo request may reseed. With FUKU_DEMO_RESET_TOKEN set (a public demo deployment),
+ * ?reset=1 needs &token=<that value>; without it the request is a plain sign-in, so a visitor
+ * cannot wipe the demo mid-presentation.
+ */
+export function demoResetAllowed(token: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  const required = env.FUKU_DEMO_RESET_TOKEN?.trim();
+  if (!required) return true;
+  return token === required;
+}
+
 /** Only same-site paths: "/dashboard" yes; "//evil.com", "/\\evil.com" and absolute URLs no. */
 export function safeNextPath(next: string | null | undefined, fallback = "/dashboard"): string {
   if (!next || !next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\")) return fallback;

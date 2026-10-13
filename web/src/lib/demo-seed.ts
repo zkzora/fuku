@@ -81,7 +81,7 @@ export async function keepAgentAcrossDemoResets(db: PrismaClient, agentId: strin
   await db.setting.upsert({ where: { key: KEEP_SETTING }, create: { key: KEEP_SETTING, value }, update: { value } });
 }
 
-/** Move the kept agents (and their actions) out of the demo identity before it is deleted. */
+/** Move the kept agents (with their actions and agent keys) out of the demo identity before it is deleted. */
 async function parkKeptAgents(db: PrismaClient): Promise<string[]> {
   const wanted = await keptDemoAgents(db);
   if (!wanted.length) return [];
@@ -91,6 +91,8 @@ async function parkKeptAgents(db: PrismaClient): Promise<string[]> {
   await db.identity.upsert({ where: { id: HOLDING_IDENTITY_ID }, create: { id: HOLDING_IDENTITY_ID, displayName: "Demo reset holding (temporary)" }, update: {} });
   await db.agent.updateMany({ where: { id: { in: kept } }, data: { identityId: HOLDING_IDENTITY_ID } });
   await db.agentAction.updateMany({ where: { agentId: { in: kept } }, data: { identityId: HOLDING_IDENTITY_ID } });
+  // Their agent keys (the MCP server's API key) too: deleting Ava would delete them.
+  await db.apiKey.updateMany({ where: { agentId: { in: kept } }, data: { identityId: HOLDING_IDENTITY_ID } });
   return kept;
 }
 
@@ -98,6 +100,7 @@ async function unparkKeptAgents(db: PrismaClient, kept: string[]): Promise<void>
   if (kept.length) {
     await db.agent.updateMany({ where: { id: { in: kept } }, data: { identityId: DEMO_IDENTITY_ID } });
     await db.agentAction.updateMany({ where: { agentId: { in: kept } }, data: { identityId: DEMO_IDENTITY_ID } });
+    await db.apiKey.updateMany({ where: { agentId: { in: kept } }, data: { identityId: DEMO_IDENTITY_ID } });
   }
   await db.identity.deleteMany({ where: { id: HOLDING_IDENTITY_ID } });
 }

@@ -64,7 +64,8 @@ Use this beat instead of "Pay a verified supplier", not in addition to it, so th
 
 It needs a few things ready (`mcp/README.md`):
 - Claude Desktop, with the Fuku MCP server configured;
-- the MCP Assistant set up for the app you present (`npm run mcp:setup`);
+- the MCP Assistant set up for the app you present (`npm run mcp:setup`; on an existing setup, `npm run mcp:setup -- --key-only` once to switch it to an agent key);
+- the checklist in `docs/DEMO-READINESS.md` section 3 run once beforehand;
 - the app running on the same chain.
 
 With the MCP Assistant set up, Ava has six agents, so say "six agents" at 0:15. The Trading Assistant's 96 → 92 is unchanged.
@@ -120,7 +121,7 @@ Four substitutions keep the spoken lines true. At 0:55, "anchors the hash" becom
    - It lists what the chain does not commit to: security events, an A-Pass read through the Cleanverse API, the passkey ceremony itself, and the seeded history's completed actions (Fuku's own records under the old rules).
    - On a local node, after `npm run reconcile -- --anchor-seeded`, the Trading Assistant verifies at 96, and at 92 after the climax (16/16 records).
    - On Monad testnet, anchored on 2026-09-30, all five demo agents verify, Trading Assistant at 96 with 15/15 records. They still verify after the live smoke's two demo resets.
-5. **Surface.** Next.js app, public v1 API with hashed API keys, `@fuku/sdk`, Envio HyperSync indexing the four registries (Activity → On-chain) plus HyperRPC proof verification, an Envio HyperIndex config, Kimi/Qwen explanations with a rule-based fallback, and an AES-GCM encrypted memory vault.
+5. **Surface.** Next.js app, public v1 API with hashed API keys, `@fuku/sdk`, Envio HyperSync indexing the four registries (Activity → On-chain) plus HyperRPC proof verification, an Envio HyperIndex config, plain-language explanations from a deterministic rule narrator, and an AES-GCM encrypted memory vault.
 
 ### What is real today
 
@@ -136,7 +137,7 @@ Four substitutions keep the spoken lines true. At 0:55, "anchors the hash" becom
 | Cleanverse CVI / CVA | Real integration code: cooperate API client (envelope, AES-CBC bodies, fail-closed code mapping), asset / owner / recipient checks, evidence hashed into a `complianceRef`, A-Pass reads persisted, UI and SDK. The live API has never been called (invite pending); answers come from a Fuku-built simulator, labelled everywhere. See `docs/CLEANVERSE.md`. |
 | Authorization | One path for the web app, the API, the SDK and CRE: an owner, an identity the caller created, or an owner-granted delegation with scopes (register, manage, execute). Invalid API keys are 401 with no session fallback. Rate limits per process. The demo sign-in and demo key are off in production unless explicitly enabled. |
 | Execution lifecycle | DENIED, AUTHORIZED, SUBMITTED, CONFIRMED, PENDING, FAILED and SIMULATED are stored with receipt mode, chain id, block and log index; `Idempotency-Key` replays instead of executing twice. |
-| MCP server | `mcp/` (`@fuku/mcp`) makes an AI assistant (Claude Desktop, Claude Code) a Fuku agent through six tools, a passport resource and a safe-payment prompt. Executions are signed with the agent's own key, which stays on the user's machine; Fuku verifies the signature and requires it for such agents. A blocked decision is a normal result with the rule and the reason. Tested with unit tests, over real stdio, and end to end on a local node (6/6). On Monad testnet since 2026-10-01: the MCP Assistant is ERC-8004 agent #1963, with its key on the operator's machine (`docs/CLEANVERSE.md` has the transactions). |
+| MCP server | `mcp/` (`@fuku/mcp`) makes an AI assistant (Claude Desktop, Claude Code) a Fuku agent through six tools, a passport resource and a safe-payment prompt. Executions are signed with the agent's own key, which stays on the user's machine; Fuku verifies the signature and requires it for such agents. A blocked decision is a normal result with the rule and the reason. It runs with an agent key that can act only as its agent (no passport changes, no other agents), never the owner's key. Tested with unit tests, over real stdio, and end to end on a local node (7/7); the Claude Desktop run itself is a checklist in `docs/DEMO-READINESS.md`, not yet run. On Monad testnet since 2026-10-01: the MCP Assistant is ERC-8004 agent #1963, with its key on the operator's machine (`docs/CLEANVERSE.md` has the transactions). |
 | Memory vault | AES-GCM-256 with a PBKDF2 key (100,000 iterations) derived in the browser from the owner's own passphrase; the server stores ciphertext, IVs and an encrypted check value, never the passphrase. Only the seeded demo identity opens with a public demo passphrase, labelled as not secret. Titles are stored in clear. |
 
 ### What is simulated until keys are configured
@@ -144,7 +145,6 @@ Four substitutions keep the spoken lines true. At 0:55, "anchors the hash" becom
 | Component | Today | What flips it |
 | --- | --- | --- |
 | Monad settlement | Mock receipts with a deterministic proof hash. The explorer link in a mock receipt does not resolve. | One deploy and one `npm run wire:env` away (it writes `FUKU_CHAIN_MODE=live`, the signer key and the four `FUKU_*_REGISTRY` addresses). Do not call this "one env var". |
-| AI explanations | Rule-based narrator (`fuku-rules`). | Literally one env var: `KIMI_API_KEY` or `QWEN_API_KEY`. The adapter has not been exercised with a real key; on any error it falls back to the narrator. |
 | Nansen | Key configured and verified against the live API (free plan). Wallet-label lookups cost 100 Nansen credits each, so until the account holds at least 100 credits the Reputation card shows ledger-derived signals and says so. | Top up Nansen credits (or Pro plan); the code path is exercised and cached per address for a day. |
 | Envio | Live. HyperSync indexes every Fuku registry event on Monad testnet for the signed-in identity and its agents (Activity → On-chain · Envio, with block times and explorer links). HyperRPC verifies a single decision: its receipt, its ActionDecision event, and that the on-chain proof hash equals the Fuku ledger ("Verify on-chain" on an activity row). The HyperIndex config in `/indexer` carries the real addresses but is not run (it needs Docker). | Nothing for the demo. Running HyperIndex would add a GraphQL API over the same events. |
 | Cleanverse | Simulated, "API invite pending". With a live chain, Fuku's `CleanverseAPassSim` and `CleanverseATokenSim` (aUSDC-SIM) answer; with a mocked chain, DB fixtures with the same semantics do. The simulator has been deployed on Monad testnet since 2026-09-30, and the testnet smoke passed 66/66. | The API invite, then the checklist in `docs/CLEANVERSE.md` (`npm run cleanverse:check` first). |
@@ -369,8 +369,6 @@ Source of truth: `web/src/lib/integrations/index.ts`, rendered on the Developer 
 | Dynamic | Identity | Email sign-in with an embedded EVM wallet (Dynamic JavaScript SDK 1.34, headless), on the sign-in page and as "Connect wallet with Dynamic" on the Identity page. The server verifies Dynamic's JWT (RS256 against the environment JWKS, issuer, `user:basic` scope) before issuing a Fuku session, and takes the wallet only from the token's verified credentials. The wallet becomes the identity's owner wallet. | `NEXT_PUBLIC_DYNAMIC_ENV_ID` plus a Dynamic token verified by this server (configured until then). | Passkey sign-in. Email sign-in alone does not mark an identity human-verified; only a passkey does. |
 | Nansen | Data | Behavioural risk signals for agent wallets, shown on the Reputation report; the integration board shows the plan and remaining credits from Nansen's free `account` endpoint. | `NANSEN_API_KEY` (verified live) plus at least 100 Nansen credits per wallet-label lookup (`POST /profiler/address/labels`, chain from `NANSEN_CHAIN`, default `monad`, cached per address for a day). | Below 100 credits, or without a key: signals derived from Fuku's ledger (violation ratio, security events, agent age, volume), with the reason printed on the card. |
 | Envio | Data | HyperSync: on-chain history of identities, agents, passports, decisions and scores from the Fuku registries. HyperRPC: per-decision proof verification against Monad. | `ENVIO_API_TOKEN` (HyperSync) and `ENVIO_HYPERRPC_TOKEN` (HyperRPC), both configured and verified. | Without tokens: activity from the local ledger only. |
-| Kimi | AI | Trust explanations for decisions and scores (OpenAI-compatible chat, 9 s timeout). | `KIMI_API_KEY` and a call that succeeded (configured until then; the adapter has not been exercised with a real key). | Deterministic rule narrator. |
-| Qwen | AI | Policy interpretation and explanations (same adapter, tried after Kimi). | `QWEN_API_KEY` and a call that succeeded (same caveat). | Deterministic rule narrator. |
 | Chainlink CRE | Automation | `fuku-guard` workflow: request (HTTP trigger), verify (Fuku API: human owner, trust score, dry run; low-trust agents are rejected before execution), execute (Fuku API, one call across the DON), record (EVM read of PermissionRegistry and ReputationRegistry on monad-testnet). Actions it submits are tagged "via Chainlink CRE" in the activity timeline. | `CRE_WORKFLOW_ID` from `cre workflow deploy`, which Chainlink gates behind a commercial agreement (hackathons simulate). | Runs end to end with `cre workflow simulate`; the in-app seven-step trace runs on every action regardless. |
 | Cleanverse | Credentials | A-Pass (CVI) and A-Token (CVA) checks before an agent moves value: asset rule (R9), owner A-Pass (R7), recipient A-Pass (R8), evidence hashed into the attestation that FukuSpendGuard verifies; the owner's A-Pass card on the Identity page. | Live only after a call to the cooperate API has succeeded with `CLEANVERSE_API_ID` and `CLEANVERSE_API_KEY` (the card says "configured" before that). | Simulated, "API invite pending": Fuku's simulator contracts (live chain) or DB fixtures (mock chain), labelled "Cleanverse simulator" in the UI and `mode: "simulated"` in the SDK. |
 
@@ -428,7 +426,7 @@ More than we would like, and we list it in `docs/SECURITY.md`. The relayer key o
 **Ask.**
 - Monad: testnet support for deployment, and feedback on the registry design and ERC-8004 alignment.
 - One design partner (a Monad DEX or an agent framework) to integrate `verifyAgent` and `checkPermission` before an agent touches funds.
-- Sponsor keys (Kimi or Qwen) and Nansen credits so the integration board goes live for real.
+- Nansen credits so the wallet-label lookups on the Reputation report go live.
 
 **Next two weeks.**
 1. Serve the ERC-8004 registration file from a public URL, and move the registered agents to it with `setAgentURI`.

@@ -18,4 +18,4 @@ export const GET = withApiKey<P>(async (_req, caller, { id }) => {
   const { agent } = await authorizedAgent(caller, id, "agents:execute");
   if (chainMode() !== "live") throw new RequestError("The chain is mocked: there is nothing on-chain to recompute from.", 409, "mock_chain");
   return json(await verifyScoreFromChain(agent.id));
-});
+}, { agentKey: { scope: "agent:read", agentParam: "id" } });

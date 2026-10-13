@@ -8,6 +8,8 @@ export type EngineSubCode =
   | ComplianceSubCode
   | "GUARD_REJECTED"
   | "GUARD_NOT_CONFIGURED"
+  /** Dry run only: the owner's on-chain mandate could not be read, so the answer is UNKNOWN. */
+  | "MANDATE_UNAVAILABLE"
   | "AUTHORIZATION_CHANGED"
   | "APP_REQUIRED"
   | "OWNER_UNVERIFIED"

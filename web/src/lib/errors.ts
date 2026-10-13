@@ -1,6 +1,9 @@
 /** The caller is authenticated but may not act on this resource (HTTP 403). */
 export class ForbiddenError extends Error {
-  constructor(message = "Forbidden") {
+  constructor(
+    message = "Forbidden",
+    readonly code = "forbidden",
+  ) {
     super(message);
     this.name = "ForbiddenError";
   }

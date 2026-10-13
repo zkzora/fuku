@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { AGENT_ID, verification } from "./fixtures.js";
+import { AGENT_ID, agentKeyInfo, verification } from "./fixtures.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const entry = path.resolve(here, "../dist/index.js");
@@ -30,6 +30,7 @@ before(async () => {
       res.end(JSON.stringify(body));
     };
     if (req.headers.authorization !== "Bearer fk_test") return send(401, { error: "Invalid API key", code: "unauthorized" });
+    if (url === "/api/v1/key") return send(200, agentKeyInfo());
     if (url === `/api/v1/agents/${AGENT_ID}`) return send(200, verification(keyAddress));
     if (url === `/api/v1/agents/${AGENT_ID}/mandate`) return send(200, { mandate: null, wallet: null, reason: "mock-chain", guard: null, token: null, chainId: 31337, agentKey: "0x" });
     return send(404, { error: "not found", code: "not_found" });

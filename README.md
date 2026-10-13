@@ -8,9 +8,9 @@ web/        Next.js 16 app: landing, dashboard, identity, agents, permissions, r
 contracts/  Solidity for Monad (Hardhat 3): HumanIdentityRegistry, AgentRegistry,
             PermissionRegistry, ReputationRegistry, FukuSpendGuard (owner-bounded mandates),
             and the Cleanverse simulators CleanverseAPassSim / CleanverseATokenSim — 72 passing tests
-sdk/        @fuku/sdk 0.4.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
+sdk/        @fuku/sdk 0.5.0 — createIdentity, registerAgent, verifyAgent, requestPermission,
             getTrustScore, checkPermission, executeAction (signed with the agent's own key),
-            getAction, getMandate, verifyScore
+            getAction, getMandate, verifyScore, createAgentKey (keys bound to one agent)
 mcp/        @fuku/mcp — MCP server: Claude Desktop or Claude Code acts as a Fuku agent (stdio)
 examples/   sdk-consumer: an external program using only the SDK, verifying results on-chain
 docs/       PITCH.md (talk track, status, judge Q&A), CLEANVERSE.md (CVI/CVA integration),
@@ -25,7 +25,7 @@ Fuku UI mockups/  Design source (Claude Design exports) and the product specs
 ```bash
 npm install                 # installs web, sdk and mcp (npm workspaces)
 cd web
-npx prisma db push          # creates web/prisma/dev.db (SQLite)
+npx prisma db push          # creates web/prisma/dev.db (SQLite); run it again after pulling schema changes
 npm run db:seed             # seeds Ava Chen, 5 agents, activity, vault items, demo API key
 npm run dev -- -p 3001      # http://localhost:3001
 ```
@@ -189,7 +189,7 @@ Trust score (`web/src/lib/engine/reputation.ts`, fuku-score/2): 40 baseline, +10
 - Blocks caused by the owner or the infrastructure are neutral.
 - The report includes dimensions, evidence count, observation period and uncertainty.
 
-Every action runs the same workflow: request → owner verified → passport evaluated → execute or block → proof anchored on Monad → reputation updated → explanation generated (Kimi/Qwen when keys are set, otherwise a rule-based narrator).
+Every action runs the same workflow: request → owner verified → passport evaluated → execute or block → proof anchored on Monad → reputation updated → explanation generated (a deterministic rule-based narrator).
 
 ## Security, in one paragraph
 
@@ -203,4 +203,4 @@ The live Cleanverse API is invite-only and has not been called yet. Until then a
 
 ## Sponsor stack
 
-Monad (settlement), Dynamic (email sign-in with an embedded EVM wallet; the server verifies Dynamic's JWT), Nansen (behavioural intelligence; the free `account` endpoint drives the status card, wallet labels cost 100 Nansen credits per lookup and are cached for a day), Envio (HyperSync indexes the Fuku registries on Monad for Activity → On-chain; HyperRPC verifies each decision's proof hash; HyperIndex config in `/indexer`), Kimi and Qwen (trust explanations), Chainlink CRE (`cre/fuku-guard`: HTTP-triggered workflow that verifies an agent through the Fuku API, executes the action, then reads the Monad registries through the DON; simulated end to end with `cre workflow simulate`; DON deployment requires a commercial agreement with Chainlink, see `cre/README.md`), Cleanverse (A-Pass and A-Token checks before an agent moves value; simulated until the API invite lands, see `docs/CLEANVERSE.md`). Each integration reports its mode in the Developer Console.
+Monad (settlement), Dynamic (email sign-in with an embedded EVM wallet; the server verifies Dynamic's JWT), Nansen (behavioural intelligence; the free `account` endpoint drives the status card, wallet labels cost 100 Nansen credits per lookup and are cached for a day), Envio (HyperSync indexes the Fuku registries on Monad for Activity → On-chain; HyperRPC verifies each decision's proof hash; HyperIndex config in `/indexer`), Chainlink CRE (`cre/fuku-guard`: HTTP-triggered workflow that verifies an agent through the Fuku API, executes the action, then reads the Monad registries through the DON; simulated end to end with `cre workflow simulate`; DON deployment requires a commercial agreement with Chainlink, see `cre/README.md`), Cleanverse (A-Pass and A-Token checks before an agent moves value; simulated until the API invite lands, see `docs/CLEANVERSE.md`). Each integration reports its mode in the Developer Console.

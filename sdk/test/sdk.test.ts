@@ -121,3 +121,21 @@ describe("@fuku/sdk 0.4.0: agent-signed execution", () => {
     assert.equal(calls[1].url, "http://localhost:3001/api/v1/agents/fuku%3Aagent%3A0x2/verify-score");
   });
 });
+
+describe("@fuku/sdk 0.5.0: agent keys", () => {
+  it("mints, lists and revokes agent keys, reads keyInfo, and surfaces agent_key_* refusals", async () => {
+    const calls: Call[] = [];
+    const fuku = new Fuku({ apiKey: "fk_live_owner", baseUrl: "http://fuku.test", fetch: fakeFetch(201, { key: { id: "k1", scopes: ["agent:read"] }, raw: "fk_agent_x" }, calls) });
+    const minted = await fuku.createAgentKey("fuku:agent:1", { name: "MCP server", scopes: ["agent:read"] });
+    assert.equal(minted.raw, "fk_agent_x");
+    assert.deepEqual([calls[0].method, calls[0].url, calls[0].body], ["POST", "http://fuku.test/api/v1/agents/fuku%3Aagent%3A1/keys", { name: "MCP server", scopes: ["agent:read"] }]);
+    await new Fuku({ apiKey: "k", baseUrl: "http://fuku.test", fetch: fakeFetch(200, { keys: [] }, calls) }).listAgentKeys("a");
+    await new Fuku({ apiKey: "k", baseUrl: "http://fuku.test", fetch: fakeFetch(200, { ok: true }, calls) }).revokeAgentKey("a", "k1");
+    const info = await new Fuku({ apiKey: "k", baseUrl: "http://fuku.test", fetch: fakeFetch(200, { kind: "agent", agentId: "a" }, calls) }).keyInfo();
+    assert.equal(info.kind, "agent");
+    assert.deepEqual(calls.slice(1).map((c) => `${c.method} ${c.url}`), ["GET http://fuku.test/api/v1/agents/a/keys", "DELETE http://fuku.test/api/v1/agents/a/keys/k1", "GET http://fuku.test/api/v1/key"]);
+
+    const refused = new Fuku({ apiKey: "fk_agent_x", fetch: fakeFetch(403, { error: "This key is an agent key", code: "agent_key_forbidden" }, []) });
+    await assert.rejects(() => refused.requestPermission("a", { allowed: [], blocked: [], scopeApps: [] }), (err: unknown) => err instanceof FukuError && err.status === 403 && err.code === "agent_key_forbidden");
+  });
+});
