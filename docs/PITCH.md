@@ -1,8 +1,9 @@
 # Fuku Protocol: Hackathon Pitch
 
 Track: Trust, Identity & AI Infrastructure on Monad.
-Audience: the judges, and the founder who delivers it.
-Every claim below was checked against the code in this repository on 2026-09-30. Where something is simulated, this document says so. `docs/SECURITY.md` lists what the server can still do on its own; read it before answering trust questions.
+Audience: the judges.
+Live demo: https://fuku-beige.vercel.app (Monad testnet; Sign in → "Try the demo as Ava Chen").
+Every claim below was checked against the code in this repository on 2026-09-30, and updated on 2026-10-13. Where something is simulated, this document says so. `docs/SECURITY.md` lists what the server can still do on its own; read it before answering trust questions.
 
 ---
 
@@ -150,7 +151,7 @@ Four substitutions keep the spoken lines true. At 0:55, "anchors the hash" becom
 | Cleanverse | Simulated, "API invite pending". With a live chain, Fuku's `CleanverseAPassSim` and `CleanverseATokenSim` (aUSDC-SIM) answer; with a mocked chain, DB fixtures with the same semantics do. The simulator has been deployed on Monad testnet since 2026-09-30, and the testnet smoke passed 66/66. | The API invite, then the checklist in `docs/CLEANVERSE.md` (`npm run cleanverse:check` first). |
 | Chainlink CRE | Real workflow in `cre/fuku-guard` (TypeScript, CRE SDK 1.22): HTTP trigger, verify through the Fuku API, execute, then an EVM read of the Monad registries through the DON. Proven with `cre workflow simulate` against the live app: a blocked withdraw produced a real Monad transaction and CRE read back the matching score. Not deployed to the DON: Chainlink answered our access request (2026-09-24) that hackathon teams simulate locally, and that testnet or mainnet deployment goes through a commercial call and an MNDA. | A commercial agreement with Chainlink, then `node cre/deploy.mjs` (tunnel, secret, deploy, `CRE_WORKFLOW_ID`) is ready to run. |
 | On-chain human flag | In live mode the app sets `setHumanVerified` itself, because its signer is the registry owner (the verifier role). | An independent verifier holding that role is future work. |
-| Signing model | In live mode the relayer key is registry owner, identity controller, enforcer and scorer, so it can record any decision or score. The compliance signer attests guarded transfers, but only inside the mandate the owner's own wallet opened (token, cap, per-transfer limit, expiry, payees). The owner's wallet signs the approval, the mandate and the payee list. | Owner-controlled identity keys, which need a registry redeploy (an open decision). |
+| Signing model | In live mode the relayer key is registry owner, enforcer and scorer, and the controller of every custodial identity (the seeded demo among them), so it can record any decision or score. The compliance signer attests guarded transfers, but only inside the mandate the owner's own wallet opened (token, cap, per-transfer limit, expiry, payees). The owner's wallet signs the approval, the mandate and the payee list. | Owner-controlled identities need no redeploy: an identity whose wallet is bound before its first on-chain write is controlled by that wallet (`npm run owner-path:local`, 28/28 on a local node). Ava, the demo owner, stays custodial; the browser steps for a new owner are not yet run (`docs/DEMO-READINESS.md`). |
 | Seeded demo data | Ava Chen, her agents and their history are seeded with deterministic ids and decision records. `npm run reconcile -- --anchor-seeded` anchors them once. A demo reset rebuilds the same records, so they stay verifiable. | Anchored on Monad testnet on 2026-09-30. A reset cannot rewind live actions on-chain, so after a live climax, `npm run demo:cohort` gives the demo fresh, anchored agents. |
 
 ### Going live on Monad testnet before the demo (the founder's runbook)
@@ -417,7 +418,7 @@ Per agent and per action type. Before evaluating a value action (swap, withdraw,
 The integration code is real; the answers are not Cleanverse's yet, and the product says so. Fuku has a client for Cleanverse's cooperate API (`query_apass`, `verify_apass`, `atoken/rules`, the A-Token list, Travel Rule), with the envelope, encryption and fail-closed code mapping, tested against a fake server. API access is invite-only and ours is pending, so a Fuku-built simulator answers today: an A-Pass contract and an `aUSDC-SIM` token with the same verify codes, or DB fixtures when the chain is mocked. The UI badges it "Cleanverse simulator", the SDK returns `mode: "simulated"`, and the integration card reads "API invite pending". What does not depend on Cleanverse is real on the chain we run: FukuSpendGuard checks the attestation, the agent's status, the current passport hash, the owner's mandate and the daily cap before the token moves. When the invite lands, it is credentials plus the checklist in `docs/CLEANVERSE.md`.
 
 **12. What can the Fuku server still do on its own?**
-More than we would like, and we list it in `docs/SECURITY.md`. The relayer key owns the four registries and is every identity's on-chain controller, so it could record any decision or score. Fixing that means redeploying the registries with owner-controlled identities, which is an open decision. For money it cannot do what it likes: a transfer needs a mandate the owner's own wallet opened, and the guard enforces the token, daily cap, per-transfer limit, expiry, approved payees, active agent, current passport hash and a single-use action. A stolen compliance key is bounded by those limits.
+More than we would like, and we list it in `docs/SECURITY.md`. The relayer key owns the four registries and is the on-chain controller of every custodial identity, the seeded demo included, so it could record any decision or score for them. The deployed registries already support owner-controlled identities: bind a wallet before the first on-chain write and only that wallet can register, re-anchor, revoke or pause (checked end to end on a local node; the relayer's attempts revert `NotAgentOwner`). For money it cannot do what it likes: a transfer needs a mandate the owner's own wallet opened, and the guard enforces the token, daily cap, per-transfer limit, expiry, approved payees, active agent, current passport hash and a single-use action. A stolen compliance key is bounded by those limits.
 
 ---
 
@@ -430,38 +431,7 @@ More than we would like, and we list it in `docs/SECURITY.md`. The relayer key o
 
 **Next two weeks.**
 1. Serve the ERC-8004 registration file from a public URL, and move the registered agents to it with `setAgentURI`.
-2. Owner-controlled keys as identity controller; an independent verifier for the human flag.
+2. Owner-controlled identities by default for new owners (the registries support it today); an independent verifier for the human flag.
 3. Serve the whole activity timeline from the Envio index instead of the local ledger.
 4. Publish `@fuku/sdk` to npm with its 21 public v1 endpoints documented.
 5. Risk-weighted scoring and a rolling 24-hour limit window.
-
----
-
-## Cara membawakannya (tips untuk founder)
-
-**Bingkai ceritanya dengan tiga pertanyaan.** Siapa manusia di balik agen ini, agen ini boleh apa, dan bisa dipercaya atau tidak. Ucapkan di pembukaan, ulangi di penutup. Kalau perlu analogi: Fuku itu paspor sekaligus SIM untuk agen AI. Paspor bilang siapa pemiliknya, SIM bilang boleh "nyetir" apa, dan catatan pelanggarannya ikut ke mana pun dia pergi.
-
-**Kalimat kunci yang harus keluar.** "The passport is the product." "Deny by default." "Nothing left Ava's control." "Every sponsor card reports live or simulated." Juri mengingat kalimat pendek, bukan paragraf.
-
-**Sebelum naik panggung.**
-- Buka `http://localhost:3001/api/auth/demo?reset=1&next=/sign-in` sekali, supaya skor Trading Assistant kembali ke 96. Setiap kali demo dijalankan tanpa reset, skor turun 4 lagi.
-- Pakai tombol **Try the demo as Ava Chen** kecuali kamu sudah latihan **Create with passkey** dengan Windows Hello di laptop yang sama. Passkey asli mengesankan, tapi kalau gagal di depan juri, momentum hilang.
-- Latihan penuh minimal tiga kali dengan stopwatch. Target 2:50, bukan 3:00.
-
-**Saat demo.**
-- Jangan klik link explorer selama mode mock. Transaksinya tidak ada di explorer. Klik hanya kalau dialog hasil menulis "Monad transaction", bukan "Monad receipt (mock)".
-- Kalau juri membaca catatan "Mock settlement" di dialog, jawab jujur dan singkat: "Settlement hari ini mock. Kontraknya ada di Monad testnet, 72 test kontrak lulus, dan `npm run wire:env` membuat app-nya live." Jujur lebih menang daripada mengaku-aku.
-- Biarkan dialog hasil terbuka sekitar sepuluh detik. Sebut "rule R2" dengan jelas, lalu bacakan satu kalimat penjelasannya. Itu bagian yang paling gampang diingat.
-- Di beat Cleanverse, ucapkan kata "simulator" dengan jelas dan tunjuk badge "Cleanverse simulator". Jangan pernah bilang A-Pass itu diterbitkan Cleanverse selama kartunya masih "API invite pending".
-- Di Developer Console, jangan buru-buru scroll. Tunjuk kartu yang bertulis "simulated" dan bilang itu disengaja: juri menghargai kejujuran.
-
-**Ringkasan cara uji di Monad testnet** (detail lengkap di bagian 4, runbook).
-- Isi `contracts/.env` dengan key baru yang sudah diisi MON dari faucet, lalu `npm run check:deployer` untuk memastikan chain 10143 dan saldo cukup.
-- `npm run deploy:monad`, lalu `npm run wire:env` supaya `web/.env` otomatis berisi mode live, key, dan empat alamat registry. Restart dev server.
-- Cek Developer Console: pil di sebelah "Integration status" harus bertulis "live settlement".
-- Pemanasan: jalankan satu aksi di Trading Assistant dulu (tombol **Run demo flow** di sandbox), karena aksi live pertama untuk data seed akan menambah tiga transaksi di depan. Setelah itu buka link `?reset=1`.
-- Kalau ingin pakai identitas passkey baru di mode live, angkanya jadi 50 setelah register (belum ada A-Pass), 55 setelah passport disetujui, 51 setelah withdraw diblokir. Sebutkan angka itu sebelum mulai supaya juri tidak bingung. Setiap langkah menunggu receipt, jadi isi jeda dengan narasi, jangan diam.
-
-**Menjawab pertanyaan juri.** Satu kalimat inti dulu, baru detail kalau diminta. Kalau sesuatu belum ada di kode, bilang "belum, itu langkah berikutnya" dan sebut langkahnya. Jangan pernah bilang integrasi live kalau kartunya masih simulated.
-
-**Cadangan kalau UI bermasalah.** Sandbox di Developer Console menjalankan alur yang sama lewat API publik. Simpan juga screenshot dialog hasil (blocked R2) dan halaman Reputation (96 ke 92) di folder yang gampang dibuka.

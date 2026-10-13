@@ -214,3 +214,34 @@ Still: start the app with `-H 127.0.0.1` (the dev server's `/_next/mcp` endpoint
 16.3.8; bound to loopback it is reachable from this machine only). Proposed, not done: a non-forced
 `npm audit fix` with a Dynamic sign-in retest after the demo. Never `npm audit fix --force` (it
 downgrades Prisma and the lint config across majors).
+
+## 6. Hosted demo (Vercel)
+
+https://fuku-beige.vercel.app, deployed from the CLI (`vercel deploy --prod` at the repository root; no
+git integration, so a push does not deploy). The app is the same code against Monad testnet.
+
+- **Database**: Turso (hosted SQLite, same schema) through Prisma's libSQL adapter, used when
+  `TURSO_DATABASE_URL` is set (`web/src/lib/db.ts`); integers are read as bigint, or amounts above
+  2^31 fail. On 2026-10-13 `dev.db` was copied to it: 19 tables, 184 rows, every row identical. From
+  then on the hosted database and a local `dev.db` are separate; they share only the chain.
+- **Environment**: the production variables live in the Vercel project, never in the upload
+  (`.vercelignore` excludes `.env` files and databases). The demo is on (`FUKU_DEMO_ENABLED=true`),
+  with its own session secret.
+- **Reset**: `?reset=1` reseeds only with `&token=<FUKU_DEMO_RESET_TOKEN>`; without it the link is a
+  plain sign-in, so a visitor cannot wipe the demo. The reseed is not one transaction: if it fails,
+  run it again.
+- **Anyone with the link** can sign in as Ava and run actions; live actions spend the relayer's
+  testnet MON. Watch its balance.
+
+Checked on the deployed site on 2026-10-13 (reads and dry runs only, no transaction):
+
+| Check | Result |
+| --- | --- |
+| `/api/integrations` | Monad configured for chain 10143; Envio and Nansen live; CRE and Cleanverse simulated |
+| Demo reset with the token, then demo sign-in | 307 to the dashboard; Ava with six agents (rehearsal agents removed) |
+| Dry run, MCP Assistant, 30 aUSDC-SIM to Nusantara | ALLOWED R6, the owner's on-chain mandate read |
+| Dry run, same, 60 | BLOCKED R10, the guard would revert `PerTxLimitExceeded(50000000)` |
+| `verify-score`, Trading Assistant | 96 from the chain, 15/15 records verified |
+
+Not run on the hosted site: Dynamic sign-in (it needs the domain under Allowed Origins in the Dynamic
+dashboard, and an inbox for the OTP), passkey sign-up, and any live transfer.

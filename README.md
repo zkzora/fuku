@@ -2,6 +2,8 @@
 
 Human-backed AI agent trust infrastructure on Monad. Fuku binds every agent to a passkey-verified owner, evaluates each action against a permission passport the owner approved, enforces the owner's limits on-chain when an agent moves money, and keeps an explainable reputation. What is enforced on-chain, what is enforced by Fuku's server, and what the server can still do on its own are listed in [`docs/SECURITY.md`](docs/SECURITY.md).
 
+**Live demo: https://fuku-beige.vercel.app** — on Sign in, choose "Try the demo as Ava Chen". It runs against the contracts on Monad testnet (chain 10143); Cleanverse is Fuku's labelled simulator. The demo is shared, so other visitors' actions show up in it.
+
 ```
 web/        Next.js 16 app: landing, dashboard, identity, agents, permissions, reputation,
             activity, memory vault, developer console + the API (session and public v1)
@@ -25,12 +27,13 @@ Fuku UI mockups/  Design source (Claude Design exports) and the product specs
 ```bash
 npm install                 # installs web, sdk and mcp (npm workspaces)
 cd web
+cp .env.example .env        # local defaults: SQLite, mock settlement
 npx prisma db push          # creates web/prisma/dev.db (SQLite); run it again after pulling schema changes
 npm run db:seed             # seeds Ava Chen, 5 agents, activity, vault items, demo API key
 npm run dev -- -p 3001      # http://localhost:3001
 ```
 
-`web/.env` is pre-filled for local dev; see `web/.env.example` for every option.
+`web/.env.example` lists every option.
 
 Contracts (standalone, own `node_modules`):
 
