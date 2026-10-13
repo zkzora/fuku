@@ -31,10 +31,10 @@ networks:
         handler: src/EventHandlers.ts
         events:
           - event: ScoreUpdated(bytes32 indexed agentId, uint16 newScore, int16 delta, bytes32 reasonHash, string reason, uint64 timestamp)
-      # FukuSpendGuard and the Cleanverse simulators are not deployed on Monad testnet yet: set these
-      # addresses from contracts/deployments/monadTestnet.json after `npm run deploy:cleanverse:monad`.
+      # FukuSpendGuard and the Cleanverse A-Pass simulator, on Monad testnet since 2026-09-30
+      # (contracts/deployments/monadTestnet.json).
       - name: FukuSpendGuard
-        address: "0x0000000000000000000000000000000000000000"
+        address: "0x3d5d3d38362fcb9ecc26250867cc3f30c99746dc"
         handler: src/EventHandlers.ts
         events:
           - event: MandateOpened(bytes32 indexed agentId, address indexed wallet, address indexed token, uint256 dailyCap, uint256 maxPerTx, uint64 validUntil, bool restrictPayees, uint64 version)
@@ -42,7 +42,7 @@ networks:
           - event: PayeeSet(bytes32 indexed agentId, address indexed wallet, address indexed payee, bool allowed)
           - event: GuardedTransferExecuted(bytes32 indexed agentId, address indexed from, address indexed to, address token, uint256 amount, bytes32 actionHash, bytes32 proofHash, bytes32 complianceRef, uint64 mandateVersion, uint256 nonce)
       - name: CleanverseAPassSim
-        address: "0x0000000000000000000000000000000000000000"
+        address: "0x0607ba109cf19e0ca3b8d6606a142b38c61fc579"
         handler: src/EventHandlers.ts
         events:
           - event: APassIssued(address indexed wallet, address indexed issuer, uint8 status, uint8 tier, uint8 subTier, bytes32 group, bytes32 subGroup, uint64 expiresAt, bytes32 cvRecordId)
