@@ -19,7 +19,6 @@ docs/       PITCH.md (talk track, status, judge Q&A), CLEANVERSE.md (CVI/CVA int
             SECURITY.md (authorization, lifecycle, trust assumptions, runbooks)
 indexer/    Envio HyperIndex config + handlers for the on-chain events (real Monad addresses)
 cre/        Chainlink CRE workflow fuku-guard (request -> verify -> execute -> record on Monad)
-Fuku UI mockups/  Design source (Claude Design exports) and the product specs
 ```
 
 ## Run it

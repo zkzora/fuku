@@ -12,3 +12,6 @@ cache
 .env.bak*
 
 .vercel
+
+# Early design exports (kept locally, not part of the build)
+Fuku UI mockups/
