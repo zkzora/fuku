@@ -12,7 +12,9 @@ function createClient() {
   const log: ("warn" | "error")[] = process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"];
   const tursoUrl = process.env.TURSO_DATABASE_URL?.trim();
   if (tursoUrl) {
-    const adapter = new PrismaLibSQL({ url: tursoUrl, authToken: process.env.TURSO_AUTH_TOKEN?.trim() });
+    // intMode "bigint": in the default mode, integers above 2^31 (amountMicros of 4,800 USDC) come
+    // back as floats and Prisma rejects them ("number must be an integer").
+    const adapter = new PrismaLibSQL({ url: tursoUrl, authToken: process.env.TURSO_AUTH_TOKEN?.trim(), intMode: "bigint" });
     return new PrismaClient({ adapter, log });
   }
   return new PrismaClient({ log });
